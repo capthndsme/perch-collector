@@ -1,0 +1,112 @@
+name: Release
+
+# On a v* tag, or by hand for an existing tag (Actions → Release → Run
+# workflow): builds the OpenWrt packages (.ipk for 24.10, .apk for 25.12) for
+# every architecture in openwrt/sdk.env with the official SDK images, the
+# static x86_64 binary with nDPI linked in (scripts/build-static.sh), and a
+# SHA256SUMS file, and attaches them to the tag's GitHub release, creating it
+# when missing. docker.yml publishes the images for the same tag. The
+# packaging (openwrt/, scripts/) comes from the commit the workflow runs on,
+# the packaged source from the tag.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, e.g. v0.2.0"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      releases: ${{ steps.m.outputs.releases }}
+      arches: ${{ steps.m.outputs.arches }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: m
+        run: |
+          . openwrt/sdk.env
+          list() { printf '%s\n' $1 | jq -R . | jq -cs .; }
+          echo "releases=$(list "$OPENWRT_RELEASES")" >> "$GITHUB_OUTPUT"
+          echo "arches=$(list "$OPENWRT_ARCHES")" >> "$GITHUB_OUTPUT"
+
+  packages:
+    needs: matrix
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        release: ${{ fromJSON(needs.matrix.outputs.releases) }}
+        arch: ${{ fromJSON(needs.matrix.outputs.arches) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # the tag's tree is what gets packaged
+      # Bootstraps the SDK's host Go, which otherwise builds its own chain of
+      # bootstrap compilers first.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache: false
+      # Source tarballs (nDPI, libpcap, the Go toolchain) and the module cache.
+      - uses: actions/cache@v4
+        with:
+          path: out/openwrt/dl
+          key: openwrt-dl-${{ matrix.release }}-${{ hashFiles('go.sum', 'openwrt/*/Makefile') }}
+          restore-keys: openwrt-dl-${{ matrix.release }}-
+      - name: Build
+        env:
+          SOURCE_REF: refs/tags/${{ env.TAG }}
+        run: scripts/openwrt-package.sh "${{ matrix.arch }}" "${{ matrix.release }}" "$TAG"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-${{ matrix.release }}-${{ matrix.arch }}
+          path: out/openwrt/perch-collector_*
+          if-no-files-found: error
+
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.TAG }}
+      - name: Static x86_64 binary (musl, libpcap and nDPI 5.0 linked in)
+        run: VERSION="${TAG#v}" scripts/build-static.sh out/perch-collector-linux-amd64-ndpi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: static-amd64
+          path: out/perch-collector-linux-amd64-ndpi
+          if-no-files-found: error
+
+  publish:
+    needs: [packages, static]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cd release
+          chmod +x perch-collector-linux-amd64-ndpi
+          sha256sum perch-collector* > SHA256SUMS
+          cat SHA256SUMS
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --verify-tag --title "perch-collector ${TAG#v}" --generate-notes
+          gh release upload "$TAG" perch-collector* SHA256SUMS --clobber

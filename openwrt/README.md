@@ -9,33 +9,79 @@ controller's Gateway page. Nothing has to reach the router: the local API
 listens on 127.0.0.1 only. Configuration is UCI; the API key and the
 instance id are generated on first start.
 
-## Build
+## Install a release package
 
-With the OpenWrt SDK (or a full buildroot) for your target:
+Every release carries the package for OpenWrt 24.10 (`.ipk`, opkg) and 25.12
+(`.apk`, apk-tools), built with the official SDKs, one file per architecture:
+
+| Architecture | Routers |
+|---|---|
+| `mipsel_24kc` | MediaTek MT7621, MT7628 (`ramips`) |
+| `mips_24kc` | Qualcomm Atheros `ath79` |
+| `aarch64_cortex-a53` | MediaTek Filogic (MT7981, MT7986), Qualcomm `ipq807x` |
+| `arm_cortex-a7_neon-vfpv4` | Qualcomm `ipq40xx` |
+| `x86_64` | x86/64: PCs, VMs, containers |
+
+`apk --print-arch` (25.12) or the last line of `opkg print-architecture`
+(24.10) names the router's architecture.
 
 ```sh
-# feeds.conf.default (or feeds.conf): add this checkout's openwrt/ dir as a feed
+V=0.2.0 ARCH=mipsel_24kc
+BASE=https://github.com/capthndsme/perch-collector/releases/download/v$V
+# OpenWrt 24.10
+opkg update
+opkg install $BASE/perch-collector_$V-r1_$ARCH.ipk
+# OpenWrt 25.12
+apk update
+wget -O /tmp/perch-collector.apk $BASE/perch-collector_$V-r1_$ARCH.apk
+apk add --allow-untrusted /tmp/perch-collector.apk
+```
+
+The only runtime dependency is `libpcap`, from the OpenWrt feeds; nDPI 5.0 is
+linked into the binary. `--allow-untrusted` because the `.apk` is signed with
+the SDK's build key, not OpenWrt's. The installed binary is 10.5 to 12 MB
+depending on the architecture and on the Go the OpenWrt release builds with
+(see "On a router" below for flash and memory). `SHA256SUMS` on the release
+lists every file.
+
+## Build
+
+From a checkout, with nothing but Docker (the official SDK image does the
+work, the source is the checkout itself):
+
+```sh
+scripts/openwrt-package.sh mipsel_24kc 24.10.8   # out/openwrt/perch-collector_<version>-r1_mipsel_24kc.ipk
+scripts/openwrt-package.sh mipsel_24kc 25.12.5   # out/openwrt/perch-collector_<version>-r1_mipsel_24kc.apk
+```
+
+`openwrt/sdk.env` pins the OpenWrt releases and lists the architectures the
+release workflow (`.github/workflows/release.yml`) builds. A build takes 10 to
+20 minutes, most of it the SDK compiling its own Go; the script bootstraps that
+with the Go installed on the host when there is one.
+
+Or in an SDK or buildroot of your own, as a feed:
+
+```sh
 echo 'src-link perch /path/to/perch-collector/openwrt' >> feeds.conf.default
 ./scripts/feeds update -a
 ./scripts/feeds install perch-collector
-make menuconfig            # Network → perch-collector (nDPI option, default on)
 make package/perch-collector/compile V=s
 ls bin/packages/*/perch/
 ```
 
-`libpcap` and `libndpi` come from the packages feed; the daemon requires
-nDPI 5.0, which is what the feed ships. Turn the nDPI option off for
-MT7621-class routers; port-based classification costs almost nothing.
-
-The Go toolchain and `golang-package.mk` from the packages feed handle cgo
-cross-compilation; Go modules (including `github.com/capthndsme/perch-agentkit`)
-are downloaded through the module proxy during the build. `PKG_HASH` is
-`skip` until the first tagged release.
+The package builds nDPI 5.0 from its release tarball and links it statically:
+the daemon binds the nDPI 5.0 API, whatever `libndpi` the packages feed
+carries, and the router needs no `libndpi` package. `libpcap` comes from the
+OpenWrt feed. The Go toolchain and `golang-package.mk` from the packages feed
+handle the cgo cross-compilation; Go modules (including
+`github.com/capthndsme/perch-agentkit`) are downloaded through the module proxy
+during the build. `PKG_HASH` is `skip`: `scripts/openwrt-package.sh` and the
+release workflow put the source tarball in place themselves.
 
 ## Install and point it at the controller
 
 ```sh
-opkg install perch-collector_*.ipk       # apk add on 25.x
+# after installing the package (above)
 uci set perch-collector.main.server_url='https://perch.example.com'
 uci commit perch-collector
 /etc/init.d/perch-collector enable
@@ -136,8 +182,9 @@ has no such problem, which is why it is the default.
 
 ## Without the SDK
 
-For an x86_64 OpenWrt LXC or VM, `scripts/build-static.sh` in the collector
-repo produces a static binary with nDPI 5.0 inside, using only Docker. Copy it
+For an x86_64 OpenWrt LXC or VM, the release's `perch-collector-linux-amd64-ndpi`
+(or `scripts/build-static.sh` in the collector repo, using only Docker) is a
+static binary with libpcap and nDPI 5.0 inside, for any OpenWrt version. Copy it
 to `/usr/bin/perch-collector` together with the three files under `files/`
 (init → `/etc/init.d/perch-collector`, config → `/etc/config/perch-collector`,
 defaults → `/etc/uci-defaults/90-perch-collector`), run the defaults script
@@ -149,21 +196,30 @@ Coming from the earlier `metricslite-collector` package: copy `api_key`,
 instance id keeps the controller's row and its history), then stop and
 disable the old service before starting the new one.
 
-## On a router, two things to know
+## On a router, three things to know
 
 - **Hardware flow offloading** (MediaTek/Qualcomm PPE) forwards established
   flows without the CPU seeing them: the collector would see connections
   start and miss their bytes. Keep hardware offloading off on the router
   that captures; software offloading is fine.
 - **CPU.** nDPI inspects the first packets of every flow. A Filogic or
-  ipq807x class router copes at home bandwidths; a MT7621 should run with
-  `classification 'port'`. The daemon's own memory is ~35 MB plus the flow
-  table.
+  ipq807x class router copes at home bandwidths; a MT7621 or ath79 router
+  should start with `classification 'port'` and turn nDPI on only if the
+  load stays reasonable.
+- **Memory and flash.** The daemon itself needs 30 to 50 MB (about 47 MB on
+  an x86_64 gateway with 40 devices), plus about 1 KB per flow in nDPI's table
+  (`ndpi_max_flows`, default 50000, so up to about 50 MB when it fills). On a 128 MB router set `option ndpi_max_flows '10000'`
+  (or use `classification 'port'`); 256 MB and up is fine with the defaults.
+  The installed binary is 10.5 to 12 MB (the package about 4 MB). Check
+  `df -h /overlay` first: a 16 MB-flash router rarely has room for it, and
+  is better served by an image built with the package included.
 
 ## Files
 
 ```
-openwrt/perch-collector/Makefile                 feed package (golang-package.mk, nDPI menuconfig option)
+openwrt/perch-collector/Makefile                 feed package (golang-package.mk, nDPI 5.0 built and linked statically)
+openwrt/sdk.env                                  OpenWrt releases and architectures the release builds
+scripts/openwrt-package.sh                       one package for one architecture and release, with the SDK's Docker image
 openwrt/perch-collector/files/*.init             procd init: UCI → environment, key generation, interface triggers
 openwrt/perch-collector/files/*.config           default /etc/config/perch-collector
 openwrt/perch-collector/files/*.defaults         uci-defaults: generate the API key and the instance id on first boot
