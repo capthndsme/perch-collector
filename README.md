@@ -37,29 +37,36 @@ stats, and keeps its local API on 127.0.0.1. Build and install instructions:
 
 ## Run with Docker
 
-The image carries nDPI, listens on `0.0.0.0:9800`, and captures on the
-interface that carries the default route unless told otherwise. No config
-file is needed.
+The image carries nDPI and captures on the interface that carries the default
+route unless told otherwise. No config file is needed. Point it at your
+controller and it dials in over the WebSocket; on first start it generates
+its API key and keeps it, with its instance id, in `/var/lib/perch-collector`,
+so mount a volume there to keep its identity across container upgrades:
 
 ```bash
 docker run -d --name perch-collector --restart unless-stopped \
   --network host --cap-add NET_RAW --cap-add NET_ADMIN \
-  -e PERCH_COLLECTOR_API_KEY=change-me \
+  -v perch-collector-data:/var/lib/perch-collector \
+  -e PERCH_COLLECTOR_SERVER_URL=https://perch.example.com \
   ghcr.io/capthndsme/perch-collector:latest
 ```
 
-Add `-e PERCH_COLLECTOR_INTERFACE=<name>` to capture on a specific interface
-(a LAN bridge like `br-lan`, or a mirror port), and
-`-e PERCH_COLLECTOR_SERVER_URL=https://perch.example.com` to have it dial the
-controller instead of waiting to be polled. The host must actually see the
-LAN's traffic, meaning it is the router, sits on the bridge, or hangs off a
-mirror port; otherwise the collector only sees the host's own traffic.
-`--network host` is what makes the host's interfaces visible, so this needs a
-Linux Docker host. Every option in [CONFIG.md](CONFIG.md) has a
-`PERCH_COLLECTOR_*` variable (the pre-rename `GOCOLLECTOR_*` names still
-work, with a deprecation line in the log); the `docker compose` file in the
-[controller repository](https://github.com/capthndsme/perch-controller) starts
-this container for you next to the controller and the database.
+It then shows up in the controller under Settings → Collectors → Pending
+adoption; the log prints the key's fingerprint to compare before you adopt.
+Add `-e PERCH_COLLECTOR_INTERFACE=<name>` to capture on a specific interface (a
+LAN bridge like `br-lan`, or a mirror port), and
+`-e PERCH_COLLECTOR_GATEWAY_STATS=on` when the Docker host is the router. The
+host must actually see the LAN's traffic, meaning it is the router, sits on the
+bridge, or hangs off a mirror port; otherwise the collector only sees the
+host's own traffic. `--network host` is what makes the host's interfaces
+visible, so this needs a Linux Docker host. To be polled instead, leave out
+`PERCH_COLLECTOR_SERVER_URL`, set `PERCH_COLLECTOR_LISTEN` to an address the
+controller can reach and `PERCH_COLLECTOR_API_KEY` to a shared secret. Every
+option in [CONFIG.md](CONFIG.md) has a `PERCH_COLLECTOR_*` variable (the
+pre-rename `GOCOLLECTOR_*` names still work, with a deprecation line in the
+log). The [controller's](https://github.com/capthndsme/perch-controller)
+compose file runs this container next to the controller with
+`docker compose --profile collector up -d`.
 
 ```bash
 make docker      # build the image locally as perch-collector

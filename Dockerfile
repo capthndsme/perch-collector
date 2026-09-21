@@ -33,18 +33,23 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=build /usr/local/lib/libndpi.so* /usr/local/lib/
 COPY --from=build /out/perch-collector /usr/local/bin/perch-collector
+COPY docker/entrypoint.sh /usr/local/bin/perch-collector-entrypoint
 # Fail the build if the binary needs a library the image does not carry.
 RUN ldconfig && ! ldd /usr/local/bin/perch-collector | grep 'not found'
 
 # No config file is needed: a missing collector.yaml means built-in defaults,
 # and these environment variables turn the defaults into a container-friendly
 # nDPI setup. Override any of them with `-e` (see CONFIG.md for the full list).
-ENV PERCH_COLLECTOR_LISTEN=0.0.0.0:9800 \
+ENV PERCH_COLLECTOR_LISTEN=127.0.0.1:9800 \
     PERCH_COLLECTOR_CLASSIFICATION_MODE=ndpi \
     PERCH_COLLECTOR_SNAP_LEN=1500
 
 # Run with: --network host --cap-add NET_RAW --cap-add NET_ADMIN
 # The capture interface is auto-detected from the default route;
 # set PERCH_COLLECTOR_INTERFACE for a bridge or mirror port.
+# The API answers on loopback: collectors dial the controller. Set
+# PERCH_COLLECTOR_LISTEN to a reachable address to be polled instead.
 EXPOSE 9800
-ENTRYPOINT ["perch-collector"]
+# Generates and keeps the API key a collector dialing a controller needs, then
+# runs the daemon (docker/entrypoint.sh). State: /var/lib/perch-collector.
+ENTRYPOINT ["perch-collector-entrypoint"]
