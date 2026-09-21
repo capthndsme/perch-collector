@@ -1,0 +1,199 @@
+#!/bin/sh /etc/rc.common
+# Perch Network Collector: UCI (/etc/config/perch-collector) → environment
+# variables of the daemon. Restarts when the capture or listen network comes
+# up so the capture device and the listen address are always current.
+
+START=95
+STOP=10
+USE_PROCD=1
+PROG=/usr/bin/perch-collector
+CONF=perch-collector
+
+. /lib/functions/network.sh
+
+generate_key() {
+	# busybox has no base64; the kernel always has a UUID source. 32 hex chars.
+	local k
+	k="$(tr -d '-' < /proc/sys/kernel/random/uuid 2>/dev/null)"
+	[ -n "$k" ] || k="$(hexdump -vn16 -e '16/1 "%02x"' /dev/urandom 2>/dev/null)"
+	echo "$k"
+}
+
+resolve_capture_device() {
+	local dev network
+	config_get dev main capture_device
+	[ -n "$dev" ] && { echo "$dev"; return; }
+	config_get network main capture_network 'lan'
+	network_get_device dev "$network"
+	[ -n "$dev" ] && { echo "$dev"; return; }
+	echo "br-lan"
+}
+
+# The network the API listens on. Unset: loopback when the collector pushes
+# over its own socket (nothing needs to reach the API), else the LAN.
+listen_network() {
+	local network server_url transport
+	config_get network main listen_network
+	if [ -z "$network" ]; then
+		config_get server_url main server_url
+		config_get transport main transport 'auto'
+		if [ -n "$server_url" ] && [ "$transport" != "poll" ]; then
+			network=loopback
+		else
+			network=lan
+		fi
+	fi
+	echo "$network"
+}
+
+resolve_listen() {
+	local addr network port
+	config_get port main port '9800'
+	config_get addr main listen_address
+	if [ -z "$addr" ]; then
+		network="$(listen_network)"
+		network_get_ipaddr addr "$network"
+		[ -z "$addr" ] && [ "$network" = "loopback" ] && addr=127.0.0.1
+	fi
+	[ -n "$addr" ] && echo "$addr:$port"
+}
+
+append_list() {
+	# $1 = value, $2 = variable name; builds a comma-separated list
+	local cur
+	eval "cur=\"\$$2\""
+	eval "$2=\"\${cur:+\$cur,}\$1\""
+}
+
+# A wan_interface entry is a UCI network ('wan', resolved to its device) or
+# a device name ('pppoe-wan').
+append_wan() {
+	local dev
+	network_get_device dev "$1"
+	append_list "${dev:-$1}" "$2"
+}
+
+start_service() {
+	local enabled api_key mode snap promisc bpf dev listen gateway_macs subnets
+	local top_peers top_lan top_services top_dest top_unnamed flows idle partial
+	local instance_id server_url announce_interval announce_key announce_insecure
+	local transport ca_file gateway_stats wan_interfaces
+	local uci_dirty=0
+
+	config_load "$CONF"
+	config_get_bool enabled main enabled 1
+	[ "$enabled" -eq 1 ] || return 0
+
+	config_get api_key main api_key
+	if [ -z "$api_key" ]; then
+		api_key="$(generate_key)"
+		if [ -z "$api_key" ]; then
+			logger -p daemon.err -t perch-collector "could not generate an API key; refusing to start without one (set $CONF.main.api_key)"
+			return 1
+		fi
+		uci -q set "$CONF.main.api_key=$api_key"
+		uci_dirty=1
+		logger -t perch-collector "generated API key; read it with: uci get $CONF.main.api_key"
+	fi
+
+	# Stable identity towards the controller. uci-defaults normally
+	# generated this on first boot; this catches a config without the
+	# option. Unlike the API key a missing instance id is NOT fatal: the
+	# daemon falls back to deriving one from the machine itself.
+	config_get instance_id main instance_id
+	if [ -z "$instance_id" ]; then
+		instance_id="$(generate_key)"
+		if [ -n "$instance_id" ]; then
+			uci -q set "$CONF.main.instance_id=$instance_id"
+			uci_dirty=1
+		fi
+	fi
+
+	# One commit for both, like the uci-defaults script.
+	if [ "$uci_dirty" -eq 1 ]; then
+		uci -q commit "$CONF"
+	fi
+
+	dev="$(resolve_capture_device)"
+	listen="$(resolve_listen)"
+	if [ -z "$listen" ]; then
+		logger -t perch-collector "listen network has no address yet; waiting for it to come up"
+		return 0
+	fi
+
+	config_list_foreach main gateway_mac append_list gateway_macs
+	if [ -z "$gateway_macs" ] && [ -r "/sys/class/net/$dev/address" ]; then
+		# On the gateway itself every LAN↔WAN frame carries this MAC.
+		gateway_macs="$(cat "/sys/class/net/$dev/address")"
+	fi
+	config_list_foreach main local_subnet append_list subnets
+	config_list_foreach main wan_interface append_wan wan_interfaces
+
+	config_get mode main classification 'ndpi'
+	config_get snap main snap_len '1500'
+	config_get_bool promisc main promiscuous 1
+	config_get bpf main bpf_filter
+	config_get top_peers main top_peers '50'
+	config_get top_lan main top_lan_peers '50'
+	config_get top_services main top_services '500'
+	config_get top_dest main top_destinations '500'
+	config_get top_unnamed main top_unnamed_destinations '100'
+	config_get flows main ndpi_max_flows '50000'
+	config_get idle main ndpi_flow_idle_seconds '120'
+	config_get partial main ndpi_partial_extra_packets '4'
+
+	# The controller: nothing is sent until server_url is set.
+	config_get server_url main server_url
+	config_get transport main transport 'auto'
+	config_get announce_interval main announce_interval '60'
+	config_get_bool announce_key main announce_api_key 1
+	config_get_bool announce_insecure main announce_tls_insecure 0
+	config_get ca_file main server_ca_file
+	config_get gateway_stats main gateway_stats 'auto'
+
+	procd_open_instance
+	# No config file: everything comes from the environment below.
+	procd_set_param command "$PROG"
+	procd_set_param env \
+		PERCH_COLLECTOR_INTERFACE="$dev" \
+		PERCH_COLLECTOR_LISTEN="$listen" \
+		PERCH_COLLECTOR_API_KEY="$api_key" \
+		PERCH_COLLECTOR_CLASSIFICATION_MODE="$mode" \
+		PERCH_COLLECTOR_SNAP_LEN="$snap" \
+		PERCH_COLLECTOR_PROMISCUOUS="$promisc" \
+		PERCH_COLLECTOR_BPF_FILTER="$bpf" \
+		PERCH_COLLECTOR_GATEWAY_MACS="$gateway_macs" \
+		PERCH_COLLECTOR_LOCAL_SUBNETS="$subnets" \
+		PERCH_COLLECTOR_TOP_PEERS_COUNT="$top_peers" \
+		PERCH_COLLECTOR_TOP_LAN_PEERS_COUNT="$top_lan" \
+		PERCH_COLLECTOR_TOP_SERVICES_COUNT="$top_services" \
+		PERCH_COLLECTOR_TOP_DESTINATIONS_COUNT="$top_dest" \
+		PERCH_COLLECTOR_TOP_UNNAMED_DESTINATIONS_COUNT="$top_unnamed" \
+		PERCH_COLLECTOR_NDPI_MAX_FLOWS="$flows" \
+		PERCH_COLLECTOR_NDPI_FLOW_IDLE_SECONDS="$idle" \
+		PERCH_COLLECTOR_NDPI_PARTIAL_EXTRA_PACKETS="$partial" \
+		PERCH_COLLECTOR_SERVER_URL="$server_url" \
+		PERCH_COLLECTOR_TRANSPORT="$transport" \
+		PERCH_COLLECTOR_ANNOUNCE_INTERVAL="$announce_interval" \
+		PERCH_COLLECTOR_ANNOUNCE_API_KEY="$announce_key" \
+		PERCH_COLLECTOR_INSTANCE_ID="$instance_id" \
+		PERCH_COLLECTOR_ANNOUNCE_TLS_INSECURE="$announce_insecure" \
+		PERCH_COLLECTOR_SERVER_CA_FILE="$ca_file" \
+		PERCH_COLLECTOR_GATEWAY_STATS="$gateway_stats" \
+		PERCH_COLLECTOR_WAN_INTERFACES="$wan_interfaces"
+	procd_set_param respawn 3600 5 0
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+	logger -t perch-collector "starting on $dev, API on $listen ($mode)${server_url:+, controller $server_url}"
+}
+
+service_triggers() {
+	local capture listen
+	config_load "$CONF"
+	config_get capture main capture_network 'lan'
+	listen="$(listen_network)"
+	procd_add_reload_trigger "$CONF"
+	procd_add_interface_trigger "interface.*.up" "$capture" /etc/init.d/perch-collector reload
+	[ "$listen" = "$capture" ] || procd_add_interface_trigger "interface.*.up" "$listen" /etc/init.d/perch-collector reload
+}

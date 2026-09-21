@@ -1,0 +1,189 @@
+# perch-collector (Perch Network Collector) configuration
+# See CONFIG.md for full reference.
+
+# Network interface to capture packets on. Empty = auto-detect the interface
+# that carries the IPv4 default route (right for a router or a single-NIC
+# server). Set it explicitly for a LAN bridge or a mirror port, e.g. "br-lan".
+interface: ""
+
+# BPF filter expression. Empty = capture all traffic.
+# Examples: "not port 22", "net 192.168.1.0/24", "tcp"
+bpf_filter: ""
+
+# Snapshot length — bytes per packet to capture.
+#   96   = headers only, sufficient for classification_mode "port"
+#   256  = TLS ClientHello (SNI) fits, enough for nDPI's app fingerprints
+#   1500 = full packets, best for nDPI; gives QUIC/BitTorrent the most
+#          accurate detection at a small CPU cost.
+snap_len: 1500
+
+# ---------- Protocol Classification ----------
+
+# Classification mode:
+#   "port"  — fast, stateless, port-based lookup only (default)
+#   "ndpi"  — deep packet inspection via libndpi. Requires a binary
+#             built with `make build-ndpi` AND libndpi installed on the
+#             host (apt install libndpi-dev / libndpi). On any failure
+#             the daemon logs a warning and degrades to "port".
+#
+# In "port" mode, snap_len can stay at 96 (headers only).
+# In "ndpi" mode, snap_len should be >= 256 (TLS SNI) or 1500 (full
+# packets). The daemon prints a startup warning if snap_len < 256.
+classification_mode: "ndpi"
+
+# When classification_mode is "ndpi":
+
+# Maximum concurrent flows tracked by the nDPI flow table.
+# Each flow consumes ~1 KB of nDPI state until classification finalizes
+# (typically within 1-20 packets). The oldest flow is evicted when this
+# cap is reached.
+ndpi_max_flows: 50000
+
+# Idle flow expiry in seconds. Flows with no packets for this long are
+# purged from the flow table and their nDPI state freed.
+ndpi_flow_idle_seconds: 120
+
+# Packets a flow keeps native nDPI state after its first usable label. Bounds
+# memory on busy links; 0 = finalise at the first label, 4 = default.
+ndpi_partial_extra_packets: 4
+
+# HTTP API listen address.
+# Use "127.0.0.1:PORT" for local-only, "0.0.0.0:PORT" for network.
+listen: "127.0.0.1:9800"
+
+# Promiscuous mode — required to see traffic not addressed to this host.
+promiscuous: true
+
+# Optional API key for Bearer token authentication.
+# When empty, no authentication is enforced.
+# When set, all endpoints except /healthz require: Authorization: Bearer <key>
+api_key: ""
+
+# Path for periodic JSON snapshot dumps. Empty = disabled.
+flush_file: ""
+
+# How often (seconds) to write snapshots to flush_file.
+flush_interval: 60
+
+# Ethernet MAC of a single upstream gateway. Kept for backward compatibility;
+# prefer gateway_macs below. When set, it is appended to gateway_macs.
+gateway_mac: ""
+
+# List of Ethernet MACs to treat as upstream-gateway pivots. Any frame whose
+# src or dst MAC is in this list classifies traffic as WAN for the device on
+# the other side. Empty = auto-detect the single default-route gateway from
+# /proc/net/route + /proc/net/arp at startup.
+#
+# Set this explicitly when you have multiple upstream routers (e.g. an
+# OpenWrt gateway plus a secondary WAN container with policy routing).
+gateway_macs: []
+# Example with two upstreams:
+# gateway_macs:
+#   - "02:00:00:00:00:01"   # primary OpenWrt gateway (192.168.0.1)
+#   - "02:00:00:00:00:02"   # secondary WAN container (192.168.0.2), policy-routed targets
+
+# CIDR list identifying local LAN address space. These are merged with the
+# CIDRs auto-detected from the capture interface. IPs outside this set are
+# treated as external (and may appear in a device's top_peers list).
+# Examples:
+#   - "192.168.0.0/16"
+#   - "fd00::/8"
+local_subnets: []
+
+# Cap on the number of remote external (WAN) peers tracked per local device.
+# Higher = better visibility, more memory; smallest-score peers are evicted
+# when full. Hard maximum is 1000.
+top_peers_count: 50
+
+# Cap on the number of LAN neighbours tracked per local device. LAN peers
+# answer "who fed me these bytes over the LAN?" for flows like NAS ↔ Jellyfin
+# (SMB/NFS), IP-cam ↔ NVR, phone ↔ printer, etc. Lives in a separate bounded
+# heap from top_peers_count so heavy WAN chatter can't evict critical LAN
+# peers. Hard maximum is 1000.
+top_lan_peers_count: 50
+
+# Cap on distinct (server name, protocol) rows tracked per local device for
+# the "bytes served per site" view. Names are TLS SNI / HTTP Host / QUIC SNI
+# learned by nDPI (port mode learns none) and only recorded on the device
+# that is the *server* of the flow. 0 = default (500), negative = disable.
+top_services_count: 500
+
+# Cap on distinct (server name, protocol) *destination* rows tracked per
+# local device for the "where is my traffic going" view. The mirror image of
+# top_services_count: rows are recorded on the device that is the *client*
+# of a WAN flow, keyed by the site it asked for (TLS SNI / HTTP Host / QUIC
+# SNI) and carrying nDPI's application category. Flows without a name pool
+# per protocol so app-level labels ("youtube", "netflix") still account for
+# every byte. 0 = default (500), negative = disable.
+top_destinations_count: 500
+
+# Cap on destination rows keyed by *peer address*: unnamed TLS / HTTP / QUIC
+# flows whose ClientHello the capture never saw (long-lived sessions that
+# predate a restart, or a hello outside the 20-packet inspection window).
+# They are attributed by address so a consumer can group them by ASN; past
+# the cap they join the per-protocol pool. Families that never carry a name
+# (BitTorrent, plain UDP) always pool. 0 = default (100), negative = off.
+top_unnamed_destinations_count: 100
+
+# ---------- The Perch controller ----------
+
+# Root URL of the Perch Network Controller. Set it and this collector
+# introduces itself instead of being typed into the dashboard by hand: it
+# shows up under Settings → Collectors as *pending*, and nothing is sent or
+# polled until an admin adopts it. Empty (the default) = the daemon opens no
+# outbound connection at all and can only be polled.
+server_url: ""
+
+# How the collector reaches the controller:
+#   websocket  it dials <server_url>/api/v1/collector-agent/ws, authenticates
+#              with api_key and pushes its counters on the schedule the
+#              controller sets. Nothing has to reach the collector, so
+#              `listen` can stay on 127.0.0.1. Needs api_key.
+#   poll       it POSTs its identity to <server_url>/api/v1/collectors/announce
+#              and the controller polls the API on `listen`.
+#   auto       websocket when api_key is set, poll when it is not (default).
+transport: auto
+
+# Seconds between HTTP announces (transport poll). This is only the opening
+# cadence — every reply carries the schedule the server wants and that wins
+# from then on. Clamped to [15, 3600].
+announce_interval: 60
+
+# Include the API key in the hello / announce so adoption is one click. The
+# key then crosses the network in cleartext unless server_url is https, so
+# set this to false on a segment you do not trust: the collector still sends
+# its key's fingerprint and you paste the key in when you adopt.
+announce_api_key: true
+
+# Stable identity, so the controller recognises this daemon across restarts
+# and address changes. Empty = resolve it: the id in instance_id_file, else
+# one derived from this machine (machine id + capture interface MAC), else a
+# random one. Set it explicitly when you want certainty rather than
+# inference.
+instance_id: ""
+
+# Where the resolved instance id is persisted (0600, written atomically).
+# The derived id is written here too, as a pin against a later NIC change;
+# a path that cannot be written is not an error. With the default path, an
+# id in /var/lib/go-collector/instance-id (before the rename) is still read.
+instance_id_file: "/var/lib/perch-collector/instance-id"
+
+# Accept a self-signed certificate on an https server_url, or trust a
+# private CA (PEM bundle, on top of the system roots). No effect on an
+# http:// URL.
+announce_tls_insecure: false
+server_ca_file: ""
+
+# ---------- Gateway stats ----------
+
+# Report the router's own health with the traffic: connection tracking,
+# established TCP, load, memory and the WAN interface counters, for the
+# controller's Gateway page. Only meaningful when the collector runs on the
+# router. auto = on under OpenWrt; on / off force it.
+gateway_stats: auto
+
+# WAN interfaces (devices, as in `ip link`) the WAN rate is counted on.
+# Empty = the interfaces holding a default route, re-read on every report.
+# Set it when the WAN routes live outside the main table (mwan3, policy
+# routing).
+wan_interfaces: []

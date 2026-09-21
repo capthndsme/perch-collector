@@ -1,0 +1,31 @@
+[Unit]
+Description=Perch Network Collector - per-device traffic accounting
+Documentation=https://github.com/capthndsme/perch-collector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/perch-collector -config /etc/perch-collector/collector.yaml
+Restart=on-failure
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=no
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+ProtectSystem=strict
+ProtectHome=yes
+# /var/lib/perch-collector: created and kept writable by systemd; the
+# instance id lives here. /var/lib/go-collector (before the rename) is still
+# read, never written.
+StateDirectory=perch-collector
+PrivateTmp=yes
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=perch-collector
+
+[Install]
+WantedBy=multi-user.target

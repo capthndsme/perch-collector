@@ -1,0 +1,22 @@
+# Build output
+out/
+
+# OS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+
+# Debug
+*.json.tmp
+
+# OUT
+out/
+
+# Live config (copy collector.example.yaml and edit)
+collector.yaml
+
+# Stray local builds at the repo root (real builds live in out/)
+/perch-collector
+/go-collector

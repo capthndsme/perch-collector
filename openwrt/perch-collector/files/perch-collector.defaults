@@ -1,0 +1,39 @@
+#!/bin/sh
+# First-boot defaults: give the collector its API key, so the very first start
+# already answers only to the Perch controller, and its instance id, the
+# stable identity it announces under. The init script does the same when
+# either is empty; this just makes them visible in `uci show` before the first
+# start. On OpenWrt UCI is the only place either value lives, which is what
+# lets the daemon keep its identity on a read-only overlay.
+CONF=perch-collector
+
+generate_key() {
+	# busybox has no base64; the kernel always has a UUID source. 32 hex chars.
+	local k
+	k="$(tr -d '-' < /proc/sys/kernel/random/uuid 2>/dev/null)"
+	[ -n "$k" ] || k="$(hexdump -vn16 -e '16/1 "%02x"' /dev/urandom 2>/dev/null)"
+	echo "$k"
+}
+
+changed=0
+
+key="$(uci -q get $CONF.main.api_key)"
+if [ -z "$key" ]; then
+	key="$(generate_key)"
+	if [ -n "$key" ]; then
+		uci -q set "$CONF.main.api_key=$key"
+		changed=1
+	fi
+fi
+
+instance_id="$(uci -q get $CONF.main.instance_id)"
+if [ -z "$instance_id" ]; then
+	instance_id="$(generate_key)"
+	if [ -n "$instance_id" ]; then
+		uci -q set "$CONF.main.instance_id=$instance_id"
+		changed=1
+	fi
+fi
+
+[ "$changed" -eq 1 ] && uci -q commit "$CONF"
+exit 0

@@ -1,0 +1,9 @@
+.git
+.github
+out/
+collector.yaml
+/perch-collector
+/go-collector
+*.bundle
+*.md
+perch-collector.service
