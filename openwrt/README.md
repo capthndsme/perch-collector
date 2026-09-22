@@ -81,8 +81,8 @@ release workflow put the source tarball in place themselves.
 ## Install and point it at the controller
 
 ```sh
-# after installing the package (above)
-uci set perch-collector.main.server_url='https://perch.example.com'
+# after installing the package (above); the address you open the dashboard at
+uci set perch-collector.main.server_url='http://192.168.1.10:8080'
 uci commit perch-collector
 /etc/init.d/perch-collector enable
 /etc/init.d/perch-collector start
@@ -124,7 +124,7 @@ appearing as a second one. Check it with
 `logread -e perch-collector` shows the init script's start line,
 
 ```
-starting on br-lan, API on 127.0.0.1:9800 (ndpi), controller https://perch.example.com
+starting on br-lan, API on 127.0.0.1:9800 (ndpi), controller http://192.168.1.10:8080
 ```
 
 then one line per *state change* (`starting -> pending`, `pending ->
@@ -137,7 +137,7 @@ adopted by …`, `pushing every 5s`) — never one per push, and never the key.
 | Option | Default | Meaning |
 |---|---|---|
 | `enabled` | `1` | |
-| `server_url` | empty | The Perch Network Controller, e.g. `https://perch.example.com`. Empty = talk to no controller (the API can still be polled). |
+| `server_url` | empty | The Perch Network Controller, e.g. `http://192.168.1.10:8080` (the default install; plain HTTP, so keep the router's management address and the controller on a management VLAN, see the controller README's "Plain HTTP and a management VLAN") or `https://perch.example.com`. Empty = talk to no controller (the API can still be polled). |
 | `transport` | `auto` | `auto` / `websocket`: dial the controller and push. `poll`: announce over HTTP and be polled on the API address (then set `listen_network 'lan'`). |
 | `announce_api_key` | `1` | Send the API key with the hello so adoption is one click. `0` = its fingerprint only. |
 | `announce_tls_insecure` | `0` | Accept a self-signed certificate on an `https` `server_url`. |

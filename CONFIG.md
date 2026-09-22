@@ -139,7 +139,9 @@ top_peers_count: 50
 # Default: 50
 top_lan_peers_count: 50
 
-# Root URL of the Perch Network Controller, e.g. "https://perch.example.com".
+# Root URL of the Perch Network Controller, e.g. "http://192.168.1.10:8080" (the
+# default install: plain HTTP, keep it on a management VLAN) or
+# "https://perch.example.com".
 # Empty = the daemon never opens an outbound connection and can only be
 # polled. See "The Perch controller" below.
 # Default: ""
@@ -380,7 +382,7 @@ registration, and nothing is pushed or polled until someone clicks Adopt in
 Settings → Collectors (or the setup wizard).
 
 ```yaml
-server_url: "https://perch.example.com"  # empty = talk to no controller (default)
+server_url: "http://192.168.1.10:8080"   # empty = talk to no controller (default)
 transport: auto                          # websocket with an api_key, else poll
 api_key: "change-me-to-something-long"   # the collector's credential
 announce_api_key: true                   # send the key so adoption is one click

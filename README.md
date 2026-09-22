@@ -47,7 +47,7 @@ so mount a volume there to keep its identity across container upgrades:
 docker run -d --name perch-collector --restart unless-stopped \
   --network host --cap-add NET_RAW --cap-add NET_ADMIN \
   -v perch-collector-data:/var/lib/perch-collector \
-  -e PERCH_COLLECTOR_SERVER_URL=https://perch.example.com \
+  -e PERCH_COLLECTOR_SERVER_URL=http://192.168.1.10:8080 \
   ghcr.io/capthndsme/perch-collector:latest
 ```
 
@@ -192,7 +192,7 @@ snap_len: 96
 listen: "127.0.0.1:9800"
 promiscuous: true
 api_key: "change-me-to-something-long"
-server_url: "https://perch.example.com"   # the controller; empty = only be polled
+server_url: "http://192.168.1.10:8080"   # the controller; empty = only be polled
 transport: auto          # websocket when api_key is set, else announce + poll
 gateway_stats: auto      # on under OpenWrt: this is the router
 flush_file: "/var/lib/perch-collector/stats.json"
@@ -327,7 +327,17 @@ default category of every protocol label the classifier can emit.
 ## Talking to the controller
 
 Set `server_url` (or `PERCH_COLLECTOR_SERVER_URL`, or `option server_url` in
-UCI) and the collector introduces itself to the Perch Network Controller: it
+UCI) to the address you open the controller's dashboard at: for the default
+Docker install that is plain HTTP, `http://<controller>:8080`. That is
+supported, but it carries the collector's key and everything it reports
+(which sites every device visits) unencrypted: keep the controller and the
+router's management address on a management VLAN that client devices cannot
+reach (worth it with HTTPS too), or serve the controller over HTTPS
+(`https://perch.example.com`). The
+dashboard marks collectors that connect over plain HTTP. Why and how:
+[Plain HTTP and a management VLAN](https://github.com/capthndsme/perch-controller#plain-http-and-a-management-vlan).
+
+With `server_url` set, the collector introduces itself to the Perch Network Controller: it
 shows up under **Settings → Collectors** (and in the setup wizard) as
 *pending*, with its hostname, version, capture interface and its API key's
 fingerprint. Nothing is sent or polled until an admin adopts it. There are
