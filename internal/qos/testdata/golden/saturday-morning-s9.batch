@@ -1,0 +1,216 @@
+qdisc replace dev ifb-pdn root handle 1: htb default 0 r2q 10
+class add dev ifb-pdn parent 1: classid 1:1 htb rate 10000000kbit ceil 10000000kbit burst 1250000 cburst 1250000 quantum 1514
+class add dev ifb-pdn parent 1:1 classid 1:12 htb rate 10000kbit ceil 10000kbit burst 1600 cburst 1600 quantum 1514
+class add dev ifb-pdn parent 1:12 classid 1:112 htb rate 64kbit ceil 10000kbit burst 1600 cburst 1600 quantum 1514
+qdisc add dev ifb-pdn parent 1:112 handle 112: cake unlimited besteffort dual-dsthost memlimit 4194304
+class add dev ifb-pdn parent 1:12 classid 1:13 htb rate 6000kbit ceil 6000kbit burst 1600 cburst 1600 quantum 1514
+class add dev ifb-pdn parent 1:13 classid 1:113 htb rate 64kbit ceil 6000kbit burst 1600 cburst 1600 quantum 1514
+qdisc add dev ifb-pdn parent 1:113 handle 113: cake unlimited besteffort dual-dsthost memlimit 4194304
+class add dev ifb-pdn parent 1:12 classid 1:200 htb rate 64kbit ceil 5000kbit burst 1600 cburst 1600 quantum 1514
+qdisc add dev ifb-pdn parent 1:200 handle 200: fq_codel limit 1000 flows 64 memory_limit 1048576 target 5000us interval 100000us
+class add dev ifb-pdn parent 1:1 classid 1:201 htb rate 1000kbit ceil 1000kbit burst 1600 cburst 1600 quantum 1514
+qdisc add dev ifb-pdn parent 1:201 handle 201: fq_codel limit 1000 flows 64 memory_limit 1048576 target 18168us interval 113168us
+class add dev ifb-pdn parent 1:1 classid 1:202 htb rate 3000kbit ceil 3000kbit burst 1600 cburst 1600 quantum 1514
+qdisc add dev ifb-pdn parent 1:202 handle 202: fq_codel limit 1000 flows 64 memory_limit 1048576 target 6056us interval 101056us
+class add dev ifb-pdn parent 1:13 classid 1:203 htb rate 64kbit ceil 4000kbit burst 1600 cburst 1600 quantum 1514
+qdisc add dev ifb-pdn parent 1:203 handle 203: fq_codel limit 1000 flows 64 memory_limit 1048576 target 5000us interval 100000us
+class add dev ifb-pdn parent 1:13 classid 1:204 htb rate 64kbit ceil 4000kbit burst 1600 cburst 1600 quantum 1514
+qdisc add dev ifb-pdn parent 1:204 handle 204: fq_codel limit 1000 flows 64 memory_limit 1048576 target 5000us interval 100000us
+class add dev ifb-pdn parent 1:12 classid 1:205 htb rate 64kbit ceil 5000kbit burst 1600 cburst 1600 quantum 1514
+qdisc add dev ifb-pdn parent 1:205 handle 205: fq_codel limit 1000 flows 64 memory_limit 1048576 target 5000us interval 100000us
+qdisc replace dev ifb-pup root handle 1: htb default 0 r2q 10
+class add dev ifb-pup parent 1: classid 1:1 htb rate 10000000kbit ceil 10000000kbit burst 1250000 cburst 1250000 quantum 1514
+class add dev ifb-pup parent 1:1 classid 1:12 htb rate 10000kbit ceil 10000kbit burst 1600 cburst 1600 quantum 1514
+class add dev ifb-pup parent 1:12 classid 1:112 htb rate 64kbit ceil 10000kbit burst 1600 cburst 1600 quantum 1514
+qdisc add dev ifb-pup parent 1:112 handle 112: cake unlimited besteffort dual-srchost memlimit 4194304
+class add dev ifb-pup parent 1:12 classid 1:13 htb rate 6000kbit ceil 6000kbit burst 1600 cburst 1600 quantum 1514
+class add dev ifb-pup parent 1:13 classid 1:113 htb rate 64kbit ceil 6000kbit burst 1600 cburst 1600 quantum 1514
+qdisc add dev ifb-pup parent 1:113 handle 113: cake unlimited besteffort dual-srchost memlimit 4194304
+class add dev ifb-pup parent 1:12 classid 1:200 htb rate 64kbit ceil 1000kbit burst 1600 cburst 1600 quantum 1514
+qdisc add dev ifb-pup parent 1:200 handle 200: fq_codel limit 1000 flows 64 memory_limit 1048576 target 18168us interval 113168us
+class add dev ifb-pup parent 1:1 classid 1:201 htb rate 1000kbit ceil 1000kbit burst 1600 cburst 1600 quantum 1514
+qdisc add dev ifb-pup parent 1:201 handle 201: fq_codel limit 1000 flows 64 memory_limit 1048576 target 18168us interval 113168us
+class add dev ifb-pup parent 1:1 classid 1:202 htb rate 1000kbit ceil 1000kbit burst 1600 cburst 1600 quantum 1514
+qdisc add dev ifb-pup parent 1:202 handle 202: fq_codel limit 1000 flows 64 memory_limit 1048576 target 18168us interval 113168us
+class add dev ifb-pup parent 1:13 classid 1:203 htb rate 64kbit ceil 4000kbit burst 1600 cburst 1600 quantum 1514
+qdisc add dev ifb-pup parent 1:203 handle 203: fq_codel limit 1000 flows 64 memory_limit 1048576 target 5000us interval 100000us
+class add dev ifb-pup parent 1:13 classid 1:204 htb rate 64kbit ceil 4000kbit burst 1600 cburst 1600 quantum 1514
+qdisc add dev ifb-pup parent 1:204 handle 204: fq_codel limit 1000 flows 64 memory_limit 1048576 target 5000us interval 100000us
+class add dev ifb-pup parent 1:12 classid 1:205 htb rate 64kbit ceil 1000kbit burst 1600 cburst 1600 quantum 1514
+qdisc add dev ifb-pup parent 1:205 handle 205: fq_codel limit 1000 flows 64 memory_limit 1048576 target 18168us interval 113168us
+qdisc add dev guest clsact
+filter add dev guest egress pref 1 protocol arp handle 1 flower action pass
+filter add dev guest egress pref 2 protocol all handle 1 flower dst_mac 01:00:00:00:00:00/01:00:00:00:00:00 action pass
+filter add dev guest egress pref 3 protocol ip handle 1 flower src_ip 192.168.5.1/32 action pass
+filter add dev guest egress pref 3 protocol ip handle 2 flower src_ip 192.168.10.1/32 action pass
+filter add dev guest egress pref 3 protocol ip handle 3 flower src_ip 192.168.20.1/32 action pass
+filter add dev guest egress pref 3 protocol ip handle 4 flower src_ip 192.168.30.1/32 action pass
+filter add dev guest egress pref 4 protocol ipv6 handle 1 flower src_ip fd00:10::1/128 action pass
+filter add dev guest egress pref 5 protocol all handle 2 flower dst_mac 02:00:00:00:10:13 action skbedit priority 1:201 pipe action mirred egress redirect dev ifb-pdn
+filter add dev guest egress pref 6 protocol ip handle 1 flower src_ip 192.168.5.0/24 action pass
+filter add dev guest egress pref 6 protocol ip handle 2 flower src_ip 192.168.10.0/24 action pass
+filter add dev guest egress pref 6 protocol ip handle 3 flower src_ip 192.168.20.0/24 action pass
+filter add dev guest egress pref 6 protocol ip handle 4 flower src_ip 192.168.30.0/24 action pass
+filter add dev guest egress pref 6 protocol ip handle 5 flower src_ip 198.51.100.0/24 action pass
+filter add dev guest egress pref 7 protocol ipv6 handle 1 flower src_ip fd00:10::/64 action pass
+filter add dev guest egress pref 7 protocol ipv6 handle 2 flower src_ip fe80::/10 action pass
+filter add dev guest egress pref 10 protocol all handle 1 flower dst_mac 02:00:00:00:10:11 action skbedit priority 1:200 pipe action mirred egress redirect dev ifb-pdn
+filter add dev guest egress pref 10 protocol all handle 3 flower dst_mac 02:00:00:00:10:14 action skbedit priority 1:202 pipe action mirred egress redirect dev ifb-pdn
+filter add dev guest egress pref 10 protocol all handle 4 flower dst_mac 02:00:00:00:10:15 action drop
+filter add dev guest egress pref 10 protocol all handle 5 flower dst_mac 02:00:00:00:20:11 action skbedit priority 1:203 pipe action mirred egress redirect dev ifb-pdn
+filter add dev guest egress pref 10 protocol all handle 6 flower dst_mac 02:00:00:00:20:12 action skbedit priority 1:204 pipe action mirred egress redirect dev ifb-pdn
+filter add dev guest egress pref 10 protocol all handle 7 flower dst_mac 02:00:00:00:30:11 action skbedit priority 1:112 pipe action mirred egress redirect dev ifb-pdn
+filter add dev guest egress pref 10 protocol all handle 8 flower dst_mac 02:00:00:00:20:99 action skbedit priority 1:205 pipe action mirred egress redirect dev ifb-pdn
+filter add dev guest egress pref 100 protocol all handle 1 flower action skbedit priority 1:112 pipe action mirred egress redirect dev ifb-pdn
+filter add dev guest ingress pref 1 protocol arp handle 1 flower action pass
+filter add dev guest ingress pref 2 protocol all handle 1 flower dst_mac 01:00:00:00:00:00/01:00:00:00:00:00 action pass
+filter add dev guest ingress pref 3 protocol ip handle 1 flower dst_ip 192.168.5.1/32 action pass
+filter add dev guest ingress pref 3 protocol ip handle 2 flower dst_ip 192.168.10.1/32 action pass
+filter add dev guest ingress pref 3 protocol ip handle 3 flower dst_ip 192.168.20.1/32 action pass
+filter add dev guest ingress pref 3 protocol ip handle 4 flower dst_ip 192.168.30.1/32 action pass
+filter add dev guest ingress pref 4 protocol ipv6 handle 1 flower dst_ip fd00:10::1/128 action pass
+filter add dev guest ingress pref 5 protocol all handle 2 flower src_mac 02:00:00:00:10:13 action skbedit priority 1:201 pipe action mirred egress redirect dev ifb-pup
+filter add dev guest ingress pref 6 protocol ip handle 1 flower dst_ip 192.168.5.0/24 action pass
+filter add dev guest ingress pref 6 protocol ip handle 2 flower dst_ip 192.168.10.0/24 action pass
+filter add dev guest ingress pref 6 protocol ip handle 3 flower dst_ip 192.168.20.0/24 action pass
+filter add dev guest ingress pref 6 protocol ip handle 4 flower dst_ip 192.168.30.0/24 action pass
+filter add dev guest ingress pref 6 protocol ip handle 5 flower dst_ip 198.51.100.0/24 action pass
+filter add dev guest ingress pref 7 protocol ipv6 handle 1 flower dst_ip fd00:10::/64 action pass
+filter add dev guest ingress pref 7 protocol ipv6 handle 2 flower dst_ip fe80::/10 action pass
+filter add dev guest ingress pref 10 protocol all handle 1 flower src_mac 02:00:00:00:10:11 action skbedit priority 1:200 pipe action mirred egress redirect dev ifb-pup
+filter add dev guest ingress pref 10 protocol all handle 3 flower src_mac 02:00:00:00:10:14 action skbedit priority 1:202 pipe action mirred egress redirect dev ifb-pup
+filter add dev guest ingress pref 10 protocol all handle 4 flower src_mac 02:00:00:00:10:15 action drop
+filter add dev guest ingress pref 10 protocol all handle 5 flower src_mac 02:00:00:00:20:11 action skbedit priority 1:203 pipe action mirred egress redirect dev ifb-pup
+filter add dev guest ingress pref 10 protocol all handle 6 flower src_mac 02:00:00:00:20:12 action skbedit priority 1:204 pipe action mirred egress redirect dev ifb-pup
+filter add dev guest ingress pref 10 protocol all handle 7 flower src_mac 02:00:00:00:30:11 action skbedit priority 1:112 pipe action mirred egress redirect dev ifb-pup
+filter add dev guest ingress pref 10 protocol all handle 8 flower src_mac 02:00:00:00:20:99 action skbedit priority 1:205 pipe action mirred egress redirect dev ifb-pup
+filter add dev guest ingress pref 100 protocol all handle 1 flower action skbedit priority 1:112 pipe action mirred egress redirect dev ifb-pup
+qdisc add dev iot clsact
+filter add dev iot egress pref 1 protocol arp handle 1 flower action pass
+filter add dev iot egress pref 2 protocol all handle 1 flower dst_mac 01:00:00:00:00:00/01:00:00:00:00:00 action pass
+filter add dev iot egress pref 3 protocol ip handle 1 flower src_ip 192.168.5.1/32 action pass
+filter add dev iot egress pref 3 protocol ip handle 2 flower src_ip 192.168.10.1/32 action pass
+filter add dev iot egress pref 3 protocol ip handle 3 flower src_ip 192.168.20.1/32 action pass
+filter add dev iot egress pref 3 protocol ip handle 4 flower src_ip 192.168.30.1/32 action pass
+filter add dev iot egress pref 4 protocol ipv6 handle 1 flower src_ip fd00:10::1/128 action pass
+filter add dev iot egress pref 5 protocol all handle 2 flower dst_mac 02:00:00:00:10:13 action skbedit priority 1:201 pipe action mirred egress redirect dev ifb-pdn
+filter add dev iot egress pref 6 protocol ip handle 1 flower src_ip 192.168.5.0/24 action pass
+filter add dev iot egress pref 6 protocol ip handle 2 flower src_ip 192.168.10.0/24 action pass
+filter add dev iot egress pref 6 protocol ip handle 3 flower src_ip 192.168.20.0/24 action pass
+filter add dev iot egress pref 6 protocol ip handle 4 flower src_ip 192.168.30.0/24 action pass
+filter add dev iot egress pref 6 protocol ip handle 5 flower src_ip 198.51.100.0/24 action pass
+filter add dev iot egress pref 7 protocol ipv6 handle 1 flower src_ip fd00:10::/64 action pass
+filter add dev iot egress pref 7 protocol ipv6 handle 2 flower src_ip fe80::/10 action pass
+filter add dev iot egress pref 10 protocol all handle 1 flower dst_mac 02:00:00:00:10:11 action skbedit priority 1:200 pipe action mirred egress redirect dev ifb-pdn
+filter add dev iot egress pref 10 protocol all handle 3 flower dst_mac 02:00:00:00:10:14 action skbedit priority 1:202 pipe action mirred egress redirect dev ifb-pdn
+filter add dev iot egress pref 10 protocol all handle 4 flower dst_mac 02:00:00:00:10:15 action drop
+filter add dev iot egress pref 10 protocol all handle 5 flower dst_mac 02:00:00:00:20:11 action skbedit priority 1:203 pipe action mirred egress redirect dev ifb-pdn
+filter add dev iot egress pref 10 protocol all handle 6 flower dst_mac 02:00:00:00:20:12 action skbedit priority 1:204 pipe action mirred egress redirect dev ifb-pdn
+filter add dev iot egress pref 10 protocol all handle 7 flower dst_mac 02:00:00:00:30:11 action skbedit priority 1:112 pipe action mirred egress redirect dev ifb-pdn
+filter add dev iot ingress pref 1 protocol arp handle 1 flower action pass
+filter add dev iot ingress pref 2 protocol all handle 1 flower dst_mac 01:00:00:00:00:00/01:00:00:00:00:00 action pass
+filter add dev iot ingress pref 3 protocol ip handle 1 flower dst_ip 192.168.5.1/32 action pass
+filter add dev iot ingress pref 3 protocol ip handle 2 flower dst_ip 192.168.10.1/32 action pass
+filter add dev iot ingress pref 3 protocol ip handle 3 flower dst_ip 192.168.20.1/32 action pass
+filter add dev iot ingress pref 3 protocol ip handle 4 flower dst_ip 192.168.30.1/32 action pass
+filter add dev iot ingress pref 4 protocol ipv6 handle 1 flower dst_ip fd00:10::1/128 action pass
+filter add dev iot ingress pref 5 protocol all handle 2 flower src_mac 02:00:00:00:10:13 action skbedit priority 1:201 pipe action mirred egress redirect dev ifb-pup
+filter add dev iot ingress pref 6 protocol ip handle 1 flower dst_ip 192.168.5.0/24 action pass
+filter add dev iot ingress pref 6 protocol ip handle 2 flower dst_ip 192.168.10.0/24 action pass
+filter add dev iot ingress pref 6 protocol ip handle 3 flower dst_ip 192.168.20.0/24 action pass
+filter add dev iot ingress pref 6 protocol ip handle 4 flower dst_ip 192.168.30.0/24 action pass
+filter add dev iot ingress pref 6 protocol ip handle 5 flower dst_ip 198.51.100.0/24 action pass
+filter add dev iot ingress pref 7 protocol ipv6 handle 1 flower dst_ip fd00:10::/64 action pass
+filter add dev iot ingress pref 7 protocol ipv6 handle 2 flower dst_ip fe80::/10 action pass
+filter add dev iot ingress pref 10 protocol all handle 1 flower src_mac 02:00:00:00:10:11 action skbedit priority 1:200 pipe action mirred egress redirect dev ifb-pup
+filter add dev iot ingress pref 10 protocol all handle 3 flower src_mac 02:00:00:00:10:14 action skbedit priority 1:202 pipe action mirred egress redirect dev ifb-pup
+filter add dev iot ingress pref 10 protocol all handle 4 flower src_mac 02:00:00:00:10:15 action drop
+filter add dev iot ingress pref 10 protocol all handle 5 flower src_mac 02:00:00:00:20:11 action skbedit priority 1:203 pipe action mirred egress redirect dev ifb-pup
+filter add dev iot ingress pref 10 protocol all handle 6 flower src_mac 02:00:00:00:20:12 action skbedit priority 1:204 pipe action mirred egress redirect dev ifb-pup
+filter add dev iot ingress pref 10 protocol all handle 7 flower src_mac 02:00:00:00:30:11 action skbedit priority 1:112 pipe action mirred egress redirect dev ifb-pup
+qdisc add dev lan clsact
+filter add dev lan egress pref 1 protocol arp handle 1 flower action pass
+filter add dev lan egress pref 2 protocol all handle 1 flower dst_mac 01:00:00:00:00:00/01:00:00:00:00:00 action pass
+filter add dev lan egress pref 3 protocol ip handle 1 flower src_ip 192.168.5.1/32 action pass
+filter add dev lan egress pref 3 protocol ip handle 2 flower src_ip 192.168.10.1/32 action pass
+filter add dev lan egress pref 3 protocol ip handle 3 flower src_ip 192.168.20.1/32 action pass
+filter add dev lan egress pref 3 protocol ip handle 4 flower src_ip 192.168.30.1/32 action pass
+filter add dev lan egress pref 4 protocol ipv6 handle 1 flower src_ip fd00:10::1/128 action pass
+filter add dev lan egress pref 5 protocol all handle 2 flower dst_mac 02:00:00:00:10:13 action skbedit priority 1:201 pipe action mirred egress redirect dev ifb-pdn
+filter add dev lan egress pref 6 protocol ip handle 1 flower src_ip 192.168.5.0/24 action pass
+filter add dev lan egress pref 6 protocol ip handle 2 flower src_ip 192.168.10.0/24 action pass
+filter add dev lan egress pref 6 protocol ip handle 3 flower src_ip 192.168.20.0/24 action pass
+filter add dev lan egress pref 6 protocol ip handle 4 flower src_ip 192.168.30.0/24 action pass
+filter add dev lan egress pref 6 protocol ip handle 5 flower src_ip 198.51.100.0/24 action pass
+filter add dev lan egress pref 7 protocol ipv6 handle 1 flower src_ip fd00:10::/64 action pass
+filter add dev lan egress pref 7 protocol ipv6 handle 2 flower src_ip fe80::/10 action pass
+filter add dev lan egress pref 10 protocol all handle 1 flower dst_mac 02:00:00:00:10:11 action skbedit priority 1:200 pipe action mirred egress redirect dev ifb-pdn
+filter add dev lan egress pref 10 protocol all handle 3 flower dst_mac 02:00:00:00:10:14 action skbedit priority 1:202 pipe action mirred egress redirect dev ifb-pdn
+filter add dev lan egress pref 10 protocol all handle 4 flower dst_mac 02:00:00:00:10:15 action drop
+filter add dev lan egress pref 10 protocol all handle 5 flower dst_mac 02:00:00:00:20:11 action skbedit priority 1:203 pipe action mirred egress redirect dev ifb-pdn
+filter add dev lan egress pref 10 protocol all handle 6 flower dst_mac 02:00:00:00:20:12 action skbedit priority 1:204 pipe action mirred egress redirect dev ifb-pdn
+filter add dev lan egress pref 10 protocol all handle 7 flower dst_mac 02:00:00:00:30:11 action skbedit priority 1:112 pipe action mirred egress redirect dev ifb-pdn
+filter add dev lan ingress pref 1 protocol arp handle 1 flower action pass
+filter add dev lan ingress pref 2 protocol all handle 1 flower dst_mac 01:00:00:00:00:00/01:00:00:00:00:00 action pass
+filter add dev lan ingress pref 3 protocol ip handle 1 flower dst_ip 192.168.5.1/32 action pass
+filter add dev lan ingress pref 3 protocol ip handle 2 flower dst_ip 192.168.10.1/32 action pass
+filter add dev lan ingress pref 3 protocol ip handle 3 flower dst_ip 192.168.20.1/32 action pass
+filter add dev lan ingress pref 3 protocol ip handle 4 flower dst_ip 192.168.30.1/32 action pass
+filter add dev lan ingress pref 4 protocol ipv6 handle 1 flower dst_ip fd00:10::1/128 action pass
+filter add dev lan ingress pref 5 protocol all handle 2 flower src_mac 02:00:00:00:10:13 action skbedit priority 1:201 pipe action mirred egress redirect dev ifb-pup
+filter add dev lan ingress pref 6 protocol ip handle 1 flower dst_ip 192.168.5.0/24 action pass
+filter add dev lan ingress pref 6 protocol ip handle 2 flower dst_ip 192.168.10.0/24 action pass
+filter add dev lan ingress pref 6 protocol ip handle 3 flower dst_ip 192.168.20.0/24 action pass
+filter add dev lan ingress pref 6 protocol ip handle 4 flower dst_ip 192.168.30.0/24 action pass
+filter add dev lan ingress pref 6 protocol ip handle 5 flower dst_ip 198.51.100.0/24 action pass
+filter add dev lan ingress pref 7 protocol ipv6 handle 1 flower dst_ip fd00:10::/64 action pass
+filter add dev lan ingress pref 7 protocol ipv6 handle 2 flower dst_ip fe80::/10 action pass
+filter add dev lan ingress pref 10 protocol all handle 1 flower src_mac 02:00:00:00:10:11 action skbedit priority 1:200 pipe action mirred egress redirect dev ifb-pup
+filter add dev lan ingress pref 10 protocol all handle 3 flower src_mac 02:00:00:00:10:14 action skbedit priority 1:202 pipe action mirred egress redirect dev ifb-pup
+filter add dev lan ingress pref 10 protocol all handle 4 flower src_mac 02:00:00:00:10:15 action drop
+filter add dev lan ingress pref 10 protocol all handle 5 flower src_mac 02:00:00:00:20:11 action skbedit priority 1:203 pipe action mirred egress redirect dev ifb-pup
+filter add dev lan ingress pref 10 protocol all handle 6 flower src_mac 02:00:00:00:20:12 action skbedit priority 1:204 pipe action mirred egress redirect dev ifb-pup
+filter add dev lan ingress pref 10 protocol all handle 7 flower src_mac 02:00:00:00:30:11 action skbedit priority 1:112 pipe action mirred egress redirect dev ifb-pup
+qdisc add dev mgmt clsact
+filter add dev mgmt egress pref 1 protocol arp handle 1 flower action pass
+filter add dev mgmt egress pref 2 protocol all handle 1 flower dst_mac 01:00:00:00:00:00/01:00:00:00:00:00 action pass
+filter add dev mgmt egress pref 3 protocol ip handle 1 flower src_ip 192.168.5.1/32 action pass
+filter add dev mgmt egress pref 3 protocol ip handle 2 flower src_ip 192.168.10.1/32 action pass
+filter add dev mgmt egress pref 3 protocol ip handle 3 flower src_ip 192.168.20.1/32 action pass
+filter add dev mgmt egress pref 3 protocol ip handle 4 flower src_ip 192.168.30.1/32 action pass
+filter add dev mgmt egress pref 4 protocol ipv6 handle 1 flower src_ip fd00:10::1/128 action pass
+filter add dev mgmt egress pref 5 protocol all handle 2 flower dst_mac 02:00:00:00:10:13 action skbedit priority 1:201 pipe action mirred egress redirect dev ifb-pdn
+filter add dev mgmt egress pref 6 protocol ip handle 1 flower src_ip 192.168.5.0/24 action pass
+filter add dev mgmt egress pref 6 protocol ip handle 2 flower src_ip 192.168.10.0/24 action pass
+filter add dev mgmt egress pref 6 protocol ip handle 3 flower src_ip 192.168.20.0/24 action pass
+filter add dev mgmt egress pref 6 protocol ip handle 4 flower src_ip 192.168.30.0/24 action pass
+filter add dev mgmt egress pref 6 protocol ip handle 5 flower src_ip 198.51.100.0/24 action pass
+filter add dev mgmt egress pref 7 protocol ipv6 handle 1 flower src_ip fd00:10::/64 action pass
+filter add dev mgmt egress pref 7 protocol ipv6 handle 2 flower src_ip fe80::/10 action pass
+filter add dev mgmt egress pref 10 protocol all handle 1 flower dst_mac 02:00:00:00:10:11 action skbedit priority 1:200 pipe action mirred egress redirect dev ifb-pdn
+filter add dev mgmt egress pref 10 protocol all handle 3 flower dst_mac 02:00:00:00:10:14 action skbedit priority 1:202 pipe action mirred egress redirect dev ifb-pdn
+filter add dev mgmt egress pref 10 protocol all handle 4 flower dst_mac 02:00:00:00:10:15 action drop
+filter add dev mgmt egress pref 10 protocol all handle 5 flower dst_mac 02:00:00:00:20:11 action skbedit priority 1:203 pipe action mirred egress redirect dev ifb-pdn
+filter add dev mgmt egress pref 10 protocol all handle 6 flower dst_mac 02:00:00:00:20:12 action skbedit priority 1:204 pipe action mirred egress redirect dev ifb-pdn
+filter add dev mgmt egress pref 10 protocol all handle 7 flower dst_mac 02:00:00:00:30:11 action skbedit priority 1:112 pipe action mirred egress redirect dev ifb-pdn
+filter add dev mgmt ingress pref 1 protocol arp handle 1 flower action pass
+filter add dev mgmt ingress pref 2 protocol all handle 1 flower dst_mac 01:00:00:00:00:00/01:00:00:00:00:00 action pass
+filter add dev mgmt ingress pref 3 protocol ip handle 1 flower dst_ip 192.168.5.1/32 action pass
+filter add dev mgmt ingress pref 3 protocol ip handle 2 flower dst_ip 192.168.10.1/32 action pass
+filter add dev mgmt ingress pref 3 protocol ip handle 3 flower dst_ip 192.168.20.1/32 action pass
+filter add dev mgmt ingress pref 3 protocol ip handle 4 flower dst_ip 192.168.30.1/32 action pass
+filter add dev mgmt ingress pref 4 protocol ipv6 handle 1 flower dst_ip fd00:10::1/128 action pass
+filter add dev mgmt ingress pref 5 protocol all handle 2 flower src_mac 02:00:00:00:10:13 action skbedit priority 1:201 pipe action mirred egress redirect dev ifb-pup
+filter add dev mgmt ingress pref 6 protocol ip handle 1 flower dst_ip 192.168.5.0/24 action pass
+filter add dev mgmt ingress pref 6 protocol ip handle 2 flower dst_ip 192.168.10.0/24 action pass
+filter add dev mgmt ingress pref 6 protocol ip handle 3 flower dst_ip 192.168.20.0/24 action pass
+filter add dev mgmt ingress pref 6 protocol ip handle 4 flower dst_ip 192.168.30.0/24 action pass
+filter add dev mgmt ingress pref 6 protocol ip handle 5 flower dst_ip 198.51.100.0/24 action pass
+filter add dev mgmt ingress pref 7 protocol ipv6 handle 1 flower dst_ip fd00:10::/64 action pass
+filter add dev mgmt ingress pref 7 protocol ipv6 handle 2 flower dst_ip fe80::/10 action pass
+filter add dev mgmt ingress pref 10 protocol all handle 1 flower src_mac 02:00:00:00:10:11 action skbedit priority 1:200 pipe action mirred egress redirect dev ifb-pup
+filter add dev mgmt ingress pref 10 protocol all handle 3 flower src_mac 02:00:00:00:10:14 action skbedit priority 1:202 pipe action mirred egress redirect dev ifb-pup
+filter add dev mgmt ingress pref 10 protocol all handle 4 flower src_mac 02:00:00:00:10:15 action drop
+filter add dev mgmt ingress pref 10 protocol all handle 5 flower src_mac 02:00:00:00:20:11 action skbedit priority 1:203 pipe action mirred egress redirect dev ifb-pup
+filter add dev mgmt ingress pref 10 protocol all handle 6 flower src_mac 02:00:00:00:20:12 action skbedit priority 1:204 pipe action mirred egress redirect dev ifb-pup
+filter add dev mgmt ingress pref 10 protocol all handle 7 flower src_mac 02:00:00:00:30:11 action skbedit priority 1:112 pipe action mirred egress redirect dev ifb-pup

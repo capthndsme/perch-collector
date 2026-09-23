@@ -1,0 +1,40 @@
+// The input of planner-perch-qos and planner-devices.json: run with the
+// controller's planQos (metrics-be app/services/qos_plan.ts) and printed as UCI.
+import { planQos } from '#services/qos_plan'
+const p = planQos({
+  at: new Date('2026-09-23T12:00:00Z'),
+  timezone: 'UTC',
+  networks: ['lan', 'guest', 'iot'],
+  exempt: ['198.51.100.0/24'],
+  policies: [
+    { id: 2, name: 'Guest', shared: { downKbit: 10000, upKbit: 10000 }, each: { downKbit: 5000, upKbit: 1000 }, fairness: 'per_host', includeLan: false, parentId: null, enabled: true, classMinor: 0x12 },
+    { id: 3, name: 'Voucher tier', shared: { downKbit: 6000, upKbit: 6000 }, each: { downKbit: 4000, upKbit: 4000 }, fairness: 'per_host', includeLan: false, parentId: 2, enabled: true, classMinor: 0x13 },
+    { id: 4, name: 'Kids', shared: null, each: { downKbit: 2000, upKbit: 1000 }, fairness: 'per_flow', includeLan: false, parentId: null, enabled: true, classMinor: 0x14 },
+    { id: 5, name: 'Lab LAN', shared: null, each: { downKbit: 1000, upKbit: 1000 }, fairness: 'per_host', includeLan: true, parentId: null, enabled: true, classMinor: 0x15 },
+  ],
+  groups: [{ id: 1, members: ['02:00:00:00:20:11', '02:00:00:00:20:12'] }],
+  assignments: [
+    { id: 1, policyId: 4, target: { type: 'device', mac: '02:00:00:00:10:11' }, rate: null, quota: null, expiresAt: null },
+    { id: 2, policyId: 3, target: { type: 'group', groupId: 1 }, rate: null, quota: null, expiresAt: null },
+    { id: 3, policyId: 2, target: { type: 'device', mac: '02:00:00:00:30:11' }, rate: { downKbit: 0, upKbit: 0 }, quota: null, expiresAt: null },
+    { id: 4, policyId: 2, target: { type: 'network', network: 'guest' }, rate: null, quota: null, expiresAt: null },
+    { id: 5, policyId: 5, target: { type: 'device', mac: '02:00:00:00:10:13' }, rate: null, quota: null, expiresAt: null },
+    { id: 6, policyId: null, target: { type: 'device', mac: '02:00:00:00:10:14' }, rate: { downKbit: 3000, upKbit: 1000 }, quota: { limitBytes: 52428800, usedBytes: 0, onExhausted: 'throttle', throttle: { downKbit: 256, upKbit: 128 } }, expiresAt: new Date('2026-12-31T00:00:00Z') },
+    { id: 7, policyId: null, target: { type: 'device', mac: '02:00:00:00:10:15' }, rate: { downKbit: 3000, upKbit: 1000 }, quota: { limitBytes: 1000, usedBytes: 5000, onExhausted: 'block', throttle: null }, expiresAt: null },
+  ],
+  schedules: [
+    { id: 7, enabled: true, target: { type: 'policy', policyId: 3 }, action: 'limit', usePolicyId: null, shared: { downKbit: 3000, upKbit: null }, each: null, rate: null, days: 0x1f, startMinute: 18 * 60, endMinute: 23 * 60 },
+    { id: 8, enabled: true, target: { type: 'assignment', assignmentId: 1 }, action: 'block', usePolicyId: null, shared: null, each: null, rate: null, days: 0x7f, startMinute: 22 * 60, endMinute: 6 * 60 + 30 },
+    { id: 9, enabled: true, target: { type: 'assignment', assignmentId: 1 }, action: 'policy', usePolicyId: 2, shared: null, each: null, rate: null, days: 0x60, startMinute: 8 * 60, endMinute: 12 * 60 },
+  ],
+})
+const q = (v: string) => `'${v.replace(/'/g, "'\\''")}'`
+let out = ''
+for (const s of p.sections) {
+  out += `\nconfig ${s.type} ${q(s.name)}\n`
+  for (const [k, v] of Object.entries(s.options)) {
+    if (Array.isArray(v)) for (const item of v) out += `\tlist ${k} ${q(item)}\n`
+    else out += `\toption ${k} ${q(v as string)}\n`
+  }
+}
+console.log(JSON.stringify({ uci: out, devices: p.devices, issues: p.issues }, null, 2))

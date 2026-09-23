@@ -1,0 +1,21 @@
+active true
+class 1:12 parent 1:1 bucket b:2 down 10000/10000 up 10000/10000 leaf ""
+class 1:112 parent 1:12 rest r:2 down 64/10000 up 64/10000 leaf "cake"
+class 1:13 parent 1:12 bucket b:3 down 6000/6000 up 6000/6000 leaf ""
+class 1:113 parent 1:13 rest r:3 down 64/6000 up 64/6000 leaf "cake"
+class 1:200 parent 1:1 device d:02:00:00:00:10:13 down 1000/1000 up 1000/1000 leaf "fq_codel"
+class 1:201 parent 1:1 device d:02:00:00:00:10:14 down 3000/3000 up 1000/1000 leaf "fq_codel"
+class 1:202 parent 1:13 device d:02:00:00:00:20:11 down 64/4000 up 64/4000 leaf "fq_codel"
+class 1:203 parent 1:13 device d:02:00:00:00:20:12 down 64/4000 up 64/4000 leaf "fq_codel"
+class 1:204 parent 1:12 device d:02:00:00:00:20:99 down 64/5000 up 64/1000 leaf "fq_codel"
+device 02:00:00:00:10:11 class "" network "lan" dynamic false blocked
+device 02:00:00:00:10:13 class "1:200" network "" dynamic false shaped
+device 02:00:00:00:10:14 class "1:201" network "" dynamic false shaped
+device 02:00:00:00:10:15 class "" network "" dynamic false blocked
+device 02:00:00:00:20:11 class "1:202" network "guest" dynamic false shaped
+device 02:00:00:00:20:12 class "1:203" network "" dynamic false shaped
+device 02:00:00:00:20:99 class "1:204" network "guest" dynamic true shaped
+device 02:00:00:00:30:11 class "1:112" network "" dynamic false shaped
+schedule s7 active false until 2026-09-28T18:00:00Z
+schedule s8 active true since 2026-09-27T22:00:00Z until 2026-09-28T06:30:00Z
+schedule s9 active false until 2026-10-03T08:00:00Z
