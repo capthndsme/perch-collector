@@ -207,7 +207,11 @@ func (f *FAS) Shutdown(ctx context.Context) error {
 
 func securityHeaders(h http.Header) {
 	h.Set("X-Content-Type-Options", "nosniff")
-	h.Set("Referrer-Policy", "no-referrer")
+	// same-origin, not no-referrer: under no-referrer browsers send
+	// "Origin: null" on form posts, which sameOrigin refuses (every form
+	// of the builtin pages failed in a real browser). Other sites still
+	// get no referrer.
+	h.Set("Referrer-Policy", "same-origin")
 	h.Set("X-Frame-Options", "DENY")
 }
 
