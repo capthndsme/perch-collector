@@ -451,7 +451,7 @@ Reconnects:
 | close 4002 (another collector with this instance id) | 60 s |
 | close 4003 (dismissed) | 6 h |
 | close 1001 (controller restarting) | 2–5 s |
-| anything else | 1 s doubling to 60 s; reset after a session that lasted over a minute |
+| anything else | 1 s doubling to 30 s (60 s before 1.0.0-rc.2), or a 5xx's `Retry-After` when shorter (`gateway_starting` right after a controller restart); reset after a session that lasted over a minute |
 
 Each state change is one log line (`starting -> pending`, `pending ->
 adopted by …`, `pushing every 5s`, `adopted -> error: …`), never one per push.

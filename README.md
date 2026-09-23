@@ -58,7 +58,7 @@ docker run -d --name perch-collector --restart unless-stopped \
 ```
 
 Image tags: `latest` and `1.0` follow final releases, a version tag (`1.0.0`,
-`1.0.0-rc.1`) stays put, `rc` is the newest release candidate and `edge` is
+`1.0.0-rc.2`) stays put, `rc` is the newest release candidate and `edge` is
 `main`.
 
 It then shows up in the controller under Settings → Collectors → Pending
@@ -275,7 +275,7 @@ Example response:
   "meta": {
     "capture_interface": "br-lan",
     "query_time": "2026-05-25T02:15:01Z",
-    "version": "1.0.0-rc.1",
+    "version": "1.0.0-rc.2",
     "transport": "websocket",
     "announce_status": "adopted"
   }
@@ -374,7 +374,8 @@ two ways it does that (`transport`):
   socket. Adoption takes effect immediately, nothing has to reach the
   collector (the API can stay on 127.0.0.1), and a NAT between the two does
   not matter. The socket reconnects on its own: a controller restart costs a
-  few seconds; a refused key, discovery switched off or a full pending list
+  few seconds, and while the controller is unreachable the collector retries
+  at least every 30 s (1 s doubling, capped); a refused key, discovery switched off or a full pending list
   wait five minutes; a dismissed collector retries every six hours. The wire
   contract is `docs/collector-agent.md` in the controller repository.
 - **Announce and poll** (`poll`, and `auto` without an `api_key`). The

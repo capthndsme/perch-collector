@@ -107,7 +107,7 @@ jobs:
           chmod +x perch-collector-linux-amd64-ndpi
           sha256sum perch-collector* > SHA256SUMS
           cat SHA256SUMS
-          # A tag with a pre-release part (v1.0.0-rc.1) is a GitHub pre-release:
+          # A tag with a pre-release part (v1.0.0-rc.2) is a GitHub pre-release:
           # …/releases/latest keeps pointing at the last final release.
           pre=; case "$TAG" in *-*) pre=--prerelease ;; esac
           gh release view "$TAG" >/dev/null 2>&1 \

@@ -53,8 +53,14 @@ const DefaultDHCPRefresh = 10 * time.Minute
 
 // Reconnect waits (section 3.3).
 const (
-	slowRetry      = 5 * time.Minute
-	replacedRetry  = 60 * time.Second
+	slowRetry     = 5 * time.Minute
+	replacedRetry = 60 * time.Second
+	// reconnectMin/Max bound the transport-error ladder (1 s doubling, ±10 %
+	// jitter): a controller that is down for a restart or an upgrade is back
+	// in the dashboard within about 30 s of coming up. Refusals that retrying
+	// cannot fix (bad key, pending, 4xx) keep slowRetry.
+	reconnectMin   = time.Second
+	reconnectMax   = 30 * time.Second
 	dismissedRetry = 6 * time.Hour
 
 	helloTimeout = 15 * time.Second
@@ -243,7 +249,7 @@ func (c *Client) Run(ctx context.Context) {
 	if c.o.TLS.Insecure {
 		log.Printf("controller: WARNING certificate verification is DISABLED for %s (announce_tls_insecure)", c.o.ServerURL)
 	}
-	bo := link.Backoff{Min: time.Second, Max: time.Minute}
+	bo := link.Backoff{Min: reconnectMin, Max: reconnectMax}
 	for ctx.Err() == nil {
 		c.mu.Lock()
 		gen := c.gen
@@ -586,6 +592,10 @@ func classify(err error, note *helloNote, bo *link.Backoff) outcome {
 		case se.Status >= 400 && se.Status < 500:
 			// A bad request or another refusal: retrying soon cannot help.
 			return outcome{wait: slowRetry, state: StateError, err: "the controller refused the connection: " + sanitize(se.Error())}
+		case se.RetryAfter > 0 && se.RetryAfter < reconnectMax:
+			// 503 gateway_starting (Retry-After: 1): the controller is
+			// seconds away from taking the socket.
+			return outcome{wait: se.RetryAfter, state: StateError, err: sanitize(se.Error())}
 		}
 		return outcome{wait: bo.Next(), state: StateError, err: sanitize(se.Error())}
 	}

@@ -17,6 +17,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/capthndsme/perch-agentkit/hoststat"
+	"github.com/capthndsme/perch-agentkit/link"
 	"github.com/capthndsme/perch-agentkit/rpc"
 
 	"github.com/capthndsme/perch-collector/internal/aggregator"
@@ -397,6 +398,7 @@ func TestRetryTable(t *testing.T) {
 		{"429 retry-after", &fakeController{status: 429, retryAfter: "7", body: `{"error":"rate_limited"}`}, 7 * time.Second, 7 * time.Second, "error: rate limited by the controller"},
 		{"400 bad request", &fakeController{status: 400, body: `{"error":"unsupported_protocol","message":"This server speaks perch-collector.v1."}`}, slowRetry, slowRetry, ""},
 		{"503 backoff", &fakeController{status: 503, body: `{"error":"shutting_down"}`}, 900 * time.Millisecond, 1100 * time.Millisecond, ""},
+		{"503 gateway starting", &fakeController{status: 503, retryAfter: "1", body: `{"error":"gateway_starting"}`}, time.Second, time.Second, ""},
 		{"close 4001", &fakeController{session: closeAfterHello("adopted", 4001)}, slowRetry, slowRetry, "error: " + msgKey},
 		{"close 4002", &fakeController{session: closeAfterHello("adopted", 4002)}, replacedRetry, replacedRetry, "error: " + msgReplaced},
 		{"close 4003", &fakeController{session: closeAfterHello("dismissed", 4003)}, dismissedRetry, dismissedRetry, "dismissed"},
@@ -644,5 +646,21 @@ func TestHelloWithoutDHCP(t *testing.T) {
 	p := firstPush(t, nil)
 	if _, ok := p["observe"]; ok {
 		t.Fatalf("observe = %s without a DHCP source", p["observe"])
+	}
+}
+
+// A controller that stays down keeps the collector retrying at most about
+// every 30 s (the rc.1 walkthrough saw 1m3s waits after a short outage).
+func TestReconnectLadderIsCapped(t *testing.T) {
+	bo := link.Backoff{Min: reconnectMin, Max: reconnectMax}
+	var last time.Duration
+	for i := 0; i < 12; i++ {
+		last = bo.Next()
+		if last > reconnectMax+reconnectMax/10 {
+			t.Fatalf("attempt %d waits %s, over the %s cap", i+1, last, reconnectMax)
+		}
+	}
+	if last < reconnectMax-reconnectMax/10 {
+		t.Fatalf("the ladder never reached its cap: %s", last)
 	}
 }

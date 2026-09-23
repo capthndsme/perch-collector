@@ -22,11 +22,13 @@ Every release carries the package for OpenWrt 24.10 (`.ipk`, opkg) and 25.12
 | `arm_cortex-a7_neon-vfpv4` | Qualcomm `ipq40xx` |
 | `x86_64` | x86/64: PCs, VMs, containers |
 
-`apk --print-arch` (25.12) or the last line of `opkg print-architecture`
-(24.10) names the router's architecture.
+`. /etc/openwrt_release; echo $DISTRIB_ARCH` names the router's package
+architecture (the last line of `opkg print-architecture` on 24.10 too; on 25.12
+`apk --print-arch` prints only the base one, e.g. `mipsel`).
 
 ```sh
-V=0.2.0 ARCH=mipsel_24kc
+V=1.0.0-rc.2                        # the release; tag and file names both use it
+. /etc/openwrt_release; ARCH=$DISTRIB_ARCH
 BASE=https://github.com/capthndsme/perch-collector/releases/download/v$V
 # OpenWrt 24.10
 opkg update
@@ -44,14 +46,21 @@ depending on the architecture and on the Go the OpenWrt release builds with
 (see "On a router" below for flash and memory). `SHA256SUMS` on the release
 lists every file.
 
-**Release candidates** (tags like `v1.0.0-rc.1`) are GitHub pre-releases, so
-`…/releases/latest` keeps pointing at the last final release. Their packages
-carry the pre-release in the form apk-tools accepts, `1.0.0_rc1`: tag
-`v1.0.0-rc.1` holds `perch-collector_1.0.0_rc1-r1_<arch>.ipk` / `.apk`, and
-`perch-collector --version` prints `1.0.0-rc.1`. apk sorts `1.0.0_rc1` below
-`1.0.0`, so the final release installs over it as an upgrade. opkg sorts it
-above `1.0.0` and answers "Not downgrading": move from a release candidate to
-the final release with `opkg install --force-downgrade`.
+The package starts the daemon right away, with the API on 127.0.0.1 and no
+controller yet; the `uci` lines below point it at yours. The setup wizard and
+the release notes print the same commands with the version filled in.
+
+**Release candidates** (tags like `v1.0.0-rc.2`) are GitHub pre-releases, so
+`…/releases/latest` keeps pointing at the last final release: use the tag's
+URL as above. Release files are named with the release version
+(`perch-collector_1.0.0-rc.2-r1_<arch>.ipk` / `.apk`, from rc.2 on) and
+`perch-collector --version` prints `1.0.0-rc.2`. Inside, the package version is
+in each package manager's pre-release form, so the final release is always an
+upgrade: `1.0.0~rc2` in the `.ipk` (opkg sorts `~` below the release) and
+`1.0.0_rc2` in the `.apk` (apk-tools rejects `~`). **From rc.1 on OpenWrt
+24.10:** rc.1's `.ipk` carried `1.0.0_rc1`, which opkg sorts above every later
+release, so moving off it takes `opkg install --force-downgrade <rc.2 .ipk>`
+once; from rc.2 on, `~rc3` and `1.0.0` install as plain upgrades.
 
 ## Build
 
@@ -93,8 +102,7 @@ release workflow put the source tarball in place themselves.
 # after installing the package (above); the address you open the dashboard at
 uci set perch-collector.main.server_url='http://192.168.1.10:8080'
 uci commit perch-collector
-/etc/init.d/perch-collector enable
-/etc/init.d/perch-collector start
+/etc/init.d/perch-collector restart   # the package already enabled and started it
 logread -e perch-collector
 # → the router appears under Settings → Collectors, pending adoption
 ```
