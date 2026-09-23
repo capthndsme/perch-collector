@@ -86,6 +86,10 @@ type PortalConfig struct {
 	// when Methods.Payment); ClickThrough the click-through limits.
 	Payment      *PaymentConfig      `json:"payment,omitempty"`
 	ClickThrough *ClickThroughConfig `json:"clickThrough,omitempty"`
+	// Bypass are MACs that pass the portal without a grant: members of
+	// the gateway's device groups with a portal bypass. Authorised like a
+	// grant's device, never counted against anything, never ended.
+	Bypass []string `json:"bypass,omitempty"`
 }
 
 // StorageOverride are the gateway's storage settings (decision 18).
@@ -791,6 +795,22 @@ func (e *Engine) desiredAuth(portalID int64) map[string]bool {
 	for _, g := range e.grants {
 		if g.PortalID == portalID && g.Live() {
 			out[g.MAC] = true
+		}
+	}
+	for mac := range e.bypassOf(portalID) {
+		out[mac] = true
+	}
+	return out
+}
+
+// bypassOf is a portal's bypass MACs (normalised).
+func (e *Engine) bypassOf(portalID int64) map[string]bool {
+	out := map[string]bool{}
+	if p := e.portals[portalID]; p != nil {
+		for _, raw := range p.cfg.Bypass {
+			if mac := NormalizeMAC(raw); mac != "" {
+				out[mac] = true
+			}
 		}
 	}
 	return out

@@ -1199,7 +1199,7 @@ exact byte (ARCHITECTURE.md, "Guest portal").
 
 | Method | Params → result |
 |---|---|
-| `portal.configure` | `{revision, gatewayId, keys?:{epoch, gatewayKey}, settings:{enforceIntervalSeconds, usageIntervalSeconds, guestFailuresPerDevicePerMinute, guestFailuresPerDevicePerHour, guestFailuresPerPortalPerMinute, preauthDnsPerDevicePerMinute, offlineRedemption, relayRequestsPerClientPerMinute}, storage?:{path, flushIntervalSeconds, expectMount}, portals:[{portalId, name, network, device?, enabled, methods:{voucher,password}, templateSha256, cspConnectSrc[], privacyNotice, gatewayName, walledGarden[], ipBinding?, relay?}]}` → `{revision, keyEpoch, missingTemplates[], portals:[{portalId, device, state:'active'\|'disabled'\|'waiting_device'\|'error', listen, counting, issues[]}], enforcement, storage, issues[]}` |
+| `portal.configure` | `{revision, gatewayId, keys?:{epoch, gatewayKey}, settings:{enforceIntervalSeconds, usageIntervalSeconds, guestFailuresPerDevicePerMinute, guestFailuresPerDevicePerHour, guestFailuresPerPortalPerMinute, preauthDnsPerDevicePerMinute, offlineRedemption, relayRequestsPerClientPerMinute}, storage?:{path, flushIntervalSeconds, expectMount}, portals:[{portalId, name, network, device?, enabled, methods:{voucher,password}, templateSha256, cspConnectSrc[], privacyNotice, gatewayName, walledGarden[], ipBinding?, relay?, bypass?[]}]}` → `{revision, keyEpoch, missingTemplates[], portals:[{portalId, device, state:'active'\|'disabled'\|'waiting_device'\|'error', listen, counting, issues[]}], enforcement, storage, issues[]}` |
 | `portal.template` | `{sha256, files:[{name, contentType, dataBase64}]}` → `{stored:true}` |
 | `portal.authorize` | docs §6.4 (`full, serverNow, ackedEventSeq, nonce, keyEpoch, groups[+sig], grants[+sig], revertExternals, sig`) → `{results:[{grantId, localRef?, revision, state:'active'\|'pending_device'\|'rejected', error?}], ended:[{grantId, localRef?}]}` |
 | `portal.deauthorize` | `{grantIds, reason, serverNow, nonce, keyEpoch, sig}` → `{ended:[grantId]}` |
@@ -1416,6 +1416,11 @@ start when no guard ran.
 
 The contract is the controller's `docs/gateway/portal.md` §14; this is the
 router's side of it. The hello's `portal` object carries `"hotspot": 1`.
+
+`bypass` (2026-09-24, device groups): MACs that pass the portal without a grant, the
+members of the gateway's device groups with a portal bypass. The router authorises them
+like a grant's device (never external, put back when removed by hand, never ended) until
+a `portal.configure` without them.
 
 `portal.configure` portals gain `methods.payment` and `methods.clickThrough`
 and, when on:

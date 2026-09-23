@@ -398,8 +398,14 @@ func (e *Engine) reconcileSetsLocked(kernel map[int64]map[string]bool, now int64
 			p := e.portals[id]
 			ops.Deauthorize(id, mac, e.countingOf(p))
 		}
+		bypass := e.bypassOf(id)
 		for mac := range applied {
 			if macs[mac] {
+				continue
+			}
+			if bypass[mac] {
+				// A bypass MAC has no grant to end: it goes back in.
+				e.authorizeMACLocked(id, mac, ops)
 				continue
 			}
 			// Removed outside Perch: a deauth, respected.
