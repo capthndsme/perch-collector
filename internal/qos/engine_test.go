@@ -229,14 +229,22 @@ func TestEngineQuotaSeedingAndCounting(t *testing.T) {
 	f := newFakeSys(t)
 	e := NewEngine(f, true)
 	mac := "02:00:00:00:10:14"
-	set := func(used, limit int64) {
-		p := DevicesSetParams{Revision: 1, Devices: []DeviceEntry{{MAC: mac, DownKbit: i64(3000),
-			Quota: &DeviceQuota{LimitBytes: limit, UsedBytes: used, OnExhausted: "block"}}}}
+	set := func(used, limit int64, resetAt string) {
+		q := &DeviceQuota{LimitBytes: limit, UsedBytes: used, OnExhausted: "block"}
+		if resetAt != "" {
+			q.ResetAt = &resetAt
+		}
+		p := DevicesSetParams{Revision: 1, Devices: []DeviceEntry{{MAC: mac, DownKbit: i64(3000), Quota: q}}}
 		if _, err := e.SetDevices(p); err != nil {
 			t.Fatal(err)
 		}
 	}
-	set(100, 10_000)
+	used := func() int64 {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		return e.devices.Quotas[mac].Used
+	}
+	set(100, 10_000, "")
 	st := NewState("x")
 	st.Handles[mac] = 7
 	f.put(statePath, mustJSON(t, st))
@@ -250,24 +258,35 @@ func TestEngineQuotaSeedingAndCounting(t *testing.T) {
 	e.mu.Lock()
 	e.countQuotasLocked(kern(1000)) // first read after start: baseline only
 	e.countQuotasLocked(kern(3000))
-	used := e.devices.Quotas[mac].Used
 	e.mu.Unlock()
-	if used != 100+2000+200 {
-		t.Fatalf("used %d", used)
+	if got := used(); got != 100+2000+200 {
+		t.Fatalf("used %d", got)
 	}
-	// The controller echoes the old seed: ours stays.
-	set(100, 10_000)
-	if got := e.devices.Quotas[mac].Used; got != 2300 {
-		t.Errorf("after an echo: %d", got)
+	// A resend with the controller's older (smaller) count: ours stays.
+	set(1000, 10_000, "")
+	if got := used(); got != 2300 {
+		t.Errorf("after a resend with a smaller count: %d", got)
 	}
-	// A reset from the controller replaces it.
-	set(0, 10_000)
-	if got := e.devices.Quotas[mac].Used; got != 0 {
+	// The controller knows more (another agent's count persisted): the larger wins.
+	set(2500, 10_000, "")
+	if got := used(); got != 2500 {
+		t.Errorf("after a resend with a larger count: %d", got)
+	}
+	// An admin reset starts over from usedBytes, once.
+	set(0, 10_000, "2026-09-23T13:00:00Z")
+	if got := used(); got != 0 {
 		t.Errorf("after a reset: %d", got)
+	}
+	e.mu.Lock()
+	e.countQuotasLocked(kern(4000)) // +1000 +100
+	e.mu.Unlock()
+	set(0, 10_000, "2026-09-23T13:00:00Z") // the same reset again: no rollback
+	if got := used(); got != 1100 {
+		t.Errorf("the same reset resent: %d", got)
 	}
 	e.DrainEvents()
 	e.mu.Lock()
-	e.countQuotasLocked(kern(13000)) // +10000 +1000: over the limit
+	e.countQuotasLocked(kern(14000)) // +10000 +1000: over the limit
 	exhausted := !e.devices.Quotas[mac].ExhaustedAt.IsZero()
 	e.mu.Unlock()
 	if !exhausted {
@@ -278,6 +297,23 @@ func TestEngineQuotaSeedingAndCounting(t *testing.T) {
 	}
 	if !e.exhaustedLocked()[mac] {
 		t.Error("not enforced")
+	}
+	// A raised limit lifts the exhaustion; a newer reset too.
+	set(0, 1<<40, "2026-09-23T13:00:00Z")
+	if e.exhaustedLocked()[mac] || used() != 12100 {
+		t.Errorf("raised limit: exhausted %v used %d", e.exhaustedLocked()[mac], used())
+	}
+}
+
+func TestResetNewer(t *testing.T) {
+	for _, tc := range []struct {
+		a, b string
+		want bool
+	}{{"", "", false}, {"x", "", true}, {"", "x", false}, {"2026-09-23T13:00:00Z", "2026-09-23T12:00:00Z", true},
+		{"2026-09-23T12:00:00Z", "2026-09-23T13:00:00Z", false}, {"2026-09-23T13:00:00.000Z", "2026-09-23T13:00:00Z", false}} {
+		if got := resetNewer(tc.a, tc.b); got != tc.want {
+			t.Errorf("%q vs %q: %v", tc.a, tc.b, got)
+		}
 	}
 }
 

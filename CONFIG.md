@@ -882,7 +882,7 @@ ifup/ifdown/ifupdate (new IPv6 prefixes become exemptions at once).
   `{revision, accepted, rejected:[{mac, error}]}`. `DeviceEntry` is exactly
   the planner's: `{mac, bucket: string|null, downKbit: number|null,
   upKbit: number|null, quota: {limitBytes, usedBytes, onExhausted:
-  'block'|'throttle', throttleDownKbit, throttleUpKbit}|null, expiresAt:
+  'block'|'throttle', throttleDownKbit, throttleUpKbit, resetAt?}|null, expiresAt:
   ISO|null, includeLan?: true, schedules?: string[]}` (null rate =
   unlimited that way). Rejected one by one: `invalid_mac`, `duplicate_mac`,
   `router_mac` (the router's own interfaces), `invalid_rate`,
@@ -890,9 +890,11 @@ ifup/ifdown/ifupdate (new IPv6 prefixes become exemptions at once).
   raised to it. Errors: -32602 (bad params, more than 4096), -32010
   `qos_not_active` (no perch-qos). The set is kept in `/tmp/perch-qos/`
   at once and in `/etc/perch-qos/devices.json` at most once a minute
-  (quota counters at most every 15 minutes). A `usedBytes` equal to the one
-  the controller sent before keeps the agent's own count; a different one
-  (a reset, a new quota) replaces it.
+  (quota counters at most every 15 minutes). Quota counts (controller
+  docs/gateway/qos.md section 6.2): the agent keeps the larger of its own
+  count and `usedBytes`, so a resend never rolls usage back; only a
+  `quota.resetAt` newer than the one its count started from starts over
+  from `usedBytes`.
 - **`qos.status`** `{}` → `{qos: <push section>, lastApply, lans, summary}`.
 - **Push:** `collector.push` gains `qos` (absent = not reported):
 

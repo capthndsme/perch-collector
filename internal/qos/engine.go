@@ -225,13 +225,7 @@ func (e *Engine) SetDevices(p DevicesSetParams) (DevicesSetResult, error) {
 		if en.Quota == nil {
 			continue
 		}
-		old := e.devices.Quotas[en.MAC]
-		if old != nil && old.Seed == en.Quota.UsedBytes {
-			q := *old // the controller's value is the one it sent before: ours is newer
-			next.Quotas[en.MAC] = &q
-		} else {
-			next.Quotas[en.MAC] = &QuotaState{Seed: en.Quota.UsedBytes, Used: en.Quota.UsedBytes}
-		}
+		next.Quotas[en.MAC] = mergeQuota(e.devices.Quotas[en.MAC], en.Quota)
 		if q := next.Quotas[en.MAC]; q.Used < en.Quota.LimitBytes {
 			q.ExhaustedAt = time.Time{}
 		}

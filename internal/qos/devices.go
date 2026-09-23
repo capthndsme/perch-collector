@@ -35,6 +35,10 @@ type DeviceQuota struct {
 	OnExhausted      string `json:"onExhausted"` // block | throttle
 	ThrottleDownKbit *int64 `json:"throttleDownKbit"`
 	ThrottleUpKbit   *int64 `json:"throttleUpKbit"`
+	// ResetAt is set by an admin reset (metrics-be docs/gateway/qos.md
+	// section 6.2): a newer one than the agent holds starts the count over
+	// from UsedBytes; otherwise the agent keeps the larger count.
+	ResetAt *string `json:"resetAt,omitempty"`
 }
 
 // DevicesSetParams are qos.devices.set's params.
@@ -216,9 +220,8 @@ type Devices struct {
 
 // QuotaState counts one MAC's quota.
 type QuotaState struct {
-	// Seed is the usedBytes the controller last sent; a new value means the
-	// controller changed it (a reset, a new quota) and replaces Used.
-	Seed int64 `json:"seed"`
+	// ResetAt is the controller's last reset this count started from.
+	ResetAt string `json:"resetAt,omitempty"`
 	// Used is the running total.
 	Used int64 `json:"used"`
 	// Exhausted since (zero = not exhausted).
@@ -235,4 +238,38 @@ func DecodeDevices(data []byte) (*Devices, error) {
 		d.Quotas = map[string]*QuotaState{}
 	}
 	return &d, nil
+}
+
+// mergeQuota applies a quota the controller sent to the agent's count
+// (docs/gateway/qos.md section 6.2): the larger of the two counts, unless
+// the entry carries a reset newer than the one the count started from.
+func mergeQuota(old *QuotaState, q *DeviceQuota) *QuotaState {
+	reset := ""
+	if q.ResetAt != nil {
+		reset = *q.ResetAt
+	}
+	if old == nil || resetNewer(reset, old.ResetAt) {
+		return &QuotaState{Used: q.UsedBytes, ResetAt: reset}
+	}
+	n := *old
+	if q.UsedBytes > n.Used {
+		n.Used = q.UsedBytes
+	}
+	return &n
+}
+
+// resetNewer compares two resetAt stamps (RFC 3339; "" = never).
+func resetNewer(a, b string) bool {
+	if a == "" || a == b {
+		return false
+	}
+	if b == "" {
+		return true
+	}
+	ta, errA := time.Parse(time.RFC3339Nano, a)
+	tb, errB := time.Parse(time.RFC3339Nano, b)
+	if errA != nil || errB != nil {
+		return true // unreadable but different: the controller changed it
+	}
+	return ta.After(tb)
 }
