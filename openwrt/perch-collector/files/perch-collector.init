@@ -79,6 +79,7 @@ start_service() {
 	local instance_id server_url announce_interval announce_key announce_insecure
 	local transport ca_file gateway_stats wan_interfaces ports dhcp_leases dhcp_leases_refresh
 	local capture_network config_access managed_configs config_allow_insecure config_confirm_max storage_path
+	local config_sign_key package_allow
 	local uci_dirty=0
 
 	config_load "$CONF"
@@ -162,6 +163,8 @@ start_service() {
 	config_get_bool config_allow_insecure main config_allow_insecure 0
 	config_get config_confirm_max main config_confirm_max '600'
 	config_get storage_path main storage_path '/etc/perch-collector'
+	config_get config_sign_key main config_sign_key
+	config_list_foreach main package_allow append_list package_allow
 
 	procd_open_instance
 	# No config file: everything comes from the environment below.
@@ -201,7 +204,9 @@ start_service() {
 		PERCH_COLLECTOR_MANAGED_CONFIGS="${managed_configs:-network,dhcp,firewall}" \
 		PERCH_COLLECTOR_CONFIG_ALLOW_INSECURE="$config_allow_insecure" \
 		PERCH_COLLECTOR_CONFIG_CONFIRM_MAX="$config_confirm_max" \
-		PERCH_COLLECTOR_STORAGE_PATH="$storage_path"
+		PERCH_COLLECTOR_STORAGE_PATH="$storage_path" \
+		PERCH_COLLECTOR_CONFIG_SIGN_KEY="$config_sign_key" \
+		PERCH_COLLECTOR_PACKAGE_ALLOW="$package_allow"
 	procd_set_param respawn 3600 5 0
 	procd_set_param stdout 1
 	procd_set_param stderr 1
