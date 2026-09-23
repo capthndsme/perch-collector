@@ -226,7 +226,7 @@ minus the denylist (never the ledger, which only the agent writes).
   "hashes":{"network":"3f9a…","firewall":"77c0…","perch-managed":"…"},
   "apply":{"state":"pending_confirm","applyId":"g3-a41","kind":"apply","deadline":"2026-09-23T10:01:30Z","protected":true},
   "results":[{"applyId":"g3-a40","kind":"apply","outcome":"rolled_back","reason":"reboot","at":"…","hashes":{…}}],
-  "signing":{"required":true,"challenge":"<32 hex, new per session>","key":"api_key","windowSeconds":300},
+  "signing":{"required":true,"challenge":"<32 hex, new per session>","key":"paired","keyId":"38545dab8f16e8a2","windowSeconds":300},
   "management":{"network":"lan","device":"br-lan","controllerAddress":"192.168.1.5","reportedAt":"…"}}
 ```
 
@@ -238,7 +238,10 @@ readable config file that exists (absent = no file; none at all with access
 `apply` is `{"state":"idle"}` or the pending job (`applying` while it
 commits, `pending_confirm`, `rolling_back`); `results` are outcomes not yet
 acknowledged with `gateway.config.ack`. `signing` and `management` appear with
-access `write`.
+access `write`; `signing.key` is `config_sign_key` (the router's own key is
+set), `paired` with the `keyId` of the pairing's key, or `none` (no key yet:
+signed writes are refused with `not_paired`). The api_key is never a signing
+key.
 
 **`agent.configure`** may carry
 `"gatewayConfig":{"mode":"off"|"observe"|"managed","authoritative":bool,"watchSeconds":30,"debounceSeconds":5}`.
@@ -316,7 +319,8 @@ at a time: a config apply or a package install.
 **Write gate** (every write method): access `write`, else `not_managed`; then
 either `transportOk` (verified TLS), or the router's `config_allow_insecure
 '1'` plus a signed request (below), else `insecure_transport` (no opt-in) or
-`signature_required` (opt-in, unsigned). Apply and package install also need
+`signature_required` (opt-in, unsigned; `not_paired` for a signed request
+when the router has no key). Apply and package install also need
 the controller's `agent.configure` mode `managed` on the session
 (`not_managed`); confirm, rollback and ack do not. Secret values
 (`{"$secret"}`) are refused over anything but verified TLS, signed or not.
@@ -465,7 +469,9 @@ changes it only through the ops and `ledger` of an apply. Nothing is ever marked
 
 `mac` = hex HMAC-SHA256(key, `"perch-config-sig-v1\n" + method + "\n" +
 challenge + "\n" + ts + "\n" + nonce + "\n" + hex(SHA-256(payload bytes))`);
-key = `config_sign_key` when set, else the api_key (`signing.key` says which).
+key = `config_sign_key` when set, else the pairing's key (below; `signing.key`
+says which). A router with neither refuses every signed request
+(`not_paired`).
 Refusals: `bad_signature` (wrong key, method, session challenge, tampered
 payload, malformed), `stale_signature` (|ts − router clock| > 300 s;
 `data.agentTime`), `replayed` (nonce seen in the last 10 minutes). Test vector
@@ -473,9 +479,60 @@ payload, malformed), `stale_signature` (|ts − router clock| > 300 s;
 nonce `nonce-0000000001`, payload `{"applyId":"a1"}`): payload hash
 `275ffaf62583a907a897eaad357b77010508dbaed674bbbd8819b344ceba30e8`, mac
 `2ae21083603b5bf27157bf935395c42b2d4c607e8d6b93cf3abe9ba59d7b7e9e`. Over
-verified TLS a request may be signed or not. The api_key is the connection's
-Bearer token, so over plain HTTP a passive listener has it; `config_sign_key`
-never crosses the wire.
+verified TLS a request may be signed or not. The api_key never signs (owner
+decision 29): it is the connection's Bearer token, so over plain HTTP a
+passive listener has it. Neither `config_sign_key` nor the pairing's key ever
+crosses the wire.
+
+**Pairing** (`internal/gwconfig/pair.go`, `pair_crypto.go`; the controller's
+`docs/gateway/config-plane.md` 4.4). A router with `config_access 'write'` and
+`config_allow_insecure '1'` that talks plain HTTP agrees on a 32-byte signing
+key with the controller over the socket (X25519, a commitment, HKDF), both
+ends show a 6-digit code, the admin types the router's code into the
+controller and confirms on the router. Requests (server → agent, unsigned
+except forget; refusals -32000 with `data.error`):
+
+| Method | Params | Result | Refusals |
+|---|---|---|---|
+| `gateway.pair.begin` | `{pairingId:"<16 hex>", gatewayId:n, controllerPub:"<64 hex>"}` | `{pairingId, routerPub, commitment, expiresAt}` | `not_managed` (access ≠ write), `pairing_not_needed` (verified TLS), `insecure_transport` (no opt-in), `sign_key_configured` (`config_sign_key` set), `bad_params` (incl. a low-order key) |
+| `gateway.pair.reveal` | `{pairingId, controllerNonce:"<64 hex>"}` | `{pairingId, routerNonce}` | `unknown_pairing`; `already_revealed` (a second reveal ends the pairing) |
+| `gateway.pair.status` | `{pairingId}` | `{pairingId, state:"waiting_local"\|"paired"\|"expired"\|"cancelled"\|"unknown", keyId?}` | |
+| `gateway.pair.cancel` | `{pairingId}` | `{pairingId, state:"cancelled"}` (drops it when it is the one in progress) | |
+| `gateway.pair.forget` | `{keyId}` **signed with that key** (unsigned only over verified TLS) | `{state:"forgotten"}` | `not_paired`, `signature_required`, `bad_signature`, `unknown_key` |
+
+Crypto (hex lowercase, keys and nonces 32 bytes): `commitment =
+HMAC-SHA256(routerNonce, "perch-pair-commit-v1" ‖ routerPub ‖ controllerPub)`;
+`key = HKDF-SHA256(ikm = X25519 shared, salt = controllerNonce ‖ routerNonce,
+info = "perch-config-sign-v1:<gatewayId>", 32)`; `SAS =
+uint32_be(SHA-256("perch-pair-sas-v1" ‖ controllerPub ‖ routerPub ‖
+controllerNonce ‖ routerNonce ‖ "<gatewayId>")[0:4]) mod 10^6` (6 digits);
+`keyId = hex(SHA-256("perch-pair-keyid-v1" ‖ key))[0:16]`. The controller's
+pinned vector (RFC 7748 6.1 keys, gatewayId 7, nonces `11`×32 / `22`×32 →
+commitment `ff24b3e8…`, key `6ab9f1d4…`, SAS `331510`, keyId
+`38545dab8f16e8a2`) is `TestPairingVector`. The router commits to its nonce
+before it sees the controller's, and takes one reveal per pairing, so a man in
+the middle gets one guess in 10^6 at matching codes.
+
+Router state: one pairing at a time (a new begin replaces an unfinished one),
+in memory; each step has 10 minutes (begin → reveal, reveal → local confirm),
+then it expires. After the reveal the daemon logs the code (`logread | grep
+PAIRING`). `perch-collector pair confirm <code>` (spaces and dashes ignored)
+with the right code stores the key in `/etc/perch-collector/pairing.json`
+(0600, written atomically; kept over sysupgrade by keep.d, lost by a factory
+reset, removed with the package), sends the notification `gateway.pair.state
+{pairingId, state:"paired", keyId}` and verifies signed writes with it from
+then on (the session's challenge stays). Three wrong codes end the pairing
+(`rejected`); `pair reject` ends it too; the window's end sends `expired`; a
+replayed reveal sends `cancelled`. A later pairing, once confirmed, replaces
+the key (a restored controller pairs again). `pair forget` drops the key and
+redials, so the next hello says `none` and the controller marks its pairing
+`lost`; a signed `gateway.pair.forget` drops it from the controller's side.
+
+The CLI reaches the daemon over `/var/run/perch-collector/pair.sock` (0600 in
+a 0700 directory, and on Linux the peer's uid must be the daemon's, i.e.
+root): one JSON line `{"cmd":"status"|"confirm"|"reject"|"forget","code"?}`,
+one JSON answer `{ok, error?, status?, paired?}`. Without a running daemon
+`pair status` reads the stored key and `pair forget` deletes it.
 
 **`gateway.package.install`** `{applyId, packages:[…1..16], confirmTimeoutSeconds?, dryRun?}` →
 

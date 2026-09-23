@@ -99,6 +99,18 @@ define Package/perch-collector/conffiles
 /etc/config/perch-managed
 endef
 
+# Removing the package (not upgrading it) drops the pairing key of signed
+# config writes (/etc/perch-collector/pairing.json): a reinstall pairs
+# again. A factory reset loses it with the overlay; sysupgrade keeps it
+# (keep.d), like the api_key in /etc/config.
+define Package/perch-collector/postrm
+#!/bin/sh
+[ -n "$${IPKG_INSTROOT}" ] && exit 0
+[ "$${PKG_UPGRADE}" = "1" ] && exit 0
+rm -f /etc/perch-collector/pairing.json
+exit 0
+endef
+
 define Build/Prepare
 	$(call Build/Prepare/Default)
 	$(INSTALL_DIR) $(PKG_BUILD_DIR)/_ndpi
