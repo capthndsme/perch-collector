@@ -171,13 +171,9 @@ define Package/perch-qos/install
 	$(INSTALL_DATA) ./files/perch-qos.keep $(1)/lib/upgrade/keep.d/perch-qos
 endef
 
-# Before removal: take every Perch tc object down (sqm stays).
-define Package/perch-qos/prerm
-#!/bin/sh
-[ -n "$${IPKG_INSTROOT}" ] && exit 0
-/usr/bin/perch-collector qos stop >/dev/null 2>&1
-exit 0
-endef
+# Removal needs no prerm of its own: OpenWrt's default_prerm runs
+# /etc/init.d/perch-qos stop (= perch-collector qos stop), which takes every
+# Perch tc object down; sqm stays.
 
 $(eval $(call GoBinPackage,perch-collector))
 $(eval $(call BuildPackage,perch-collector))
