@@ -244,6 +244,9 @@ func (e *Engine) loadState() error {
 		}
 	}
 	nrows.Close()
+	if err := e.loadHotspotLocked(); err != nil {
+		return err
+	}
 	var seq sql.NullInt64
 	_ = e.store.QueryRow(`SELECT MAX(seq) FROM events`).Scan(&seq)
 	fmt.Sscan(e.store.Meta("lastEventSeq"), &e.lastSeq)

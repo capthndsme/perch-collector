@@ -67,13 +67,16 @@ var TemplateVariables = []string{
 	"portal_name", "gateway_name", "client_mac", "client_ip", "origin_url", "message", "message_code",
 	"assets", "remaining_time", "remaining_data", "expires_at", "privacy_notice", "methods", "status_json",
 	"voucher_form", "login_form", "logout_form",
+	// Paid Hotspot and click-through (§14.7).
+	"checkout_form", "clickthrough_form", "receipt", "reference_code",
 }
 
 var (
 	variableSet  = map[string]bool{}
-	rawVariables = map[string]bool{"voucher_form": true, "login_form": true, "logout_form": true}
-	variableRe   = regexp.MustCompile(`\{\{\s*([^{}]*?)\s*\}\}`)
-	svgRe        = regexp.MustCompile(`(?i)<svg[\s>]`)
+	rawVariables = map[string]bool{"voucher_form": true, "login_form": true, "logout_form": true,
+		"checkout_form": true, "clickthrough_form": true, "receipt": true}
+	variableRe = regexp.MustCompile(`\{\{\s*([^{}]*?)\s*\}\}`)
+	svgRe      = regexp.MustCompile(`(?i)<svg[\s>]`)
 )
 
 func init() {
@@ -101,6 +104,20 @@ var PortalMessages = map[string]string{
 	"connected":              "You are online.",
 	"time_up":                "Your time is up.",
 	"data_used_up":           "Your data is used up.",
+	"checkout_started":       "Insert your coins at the terminal now.",
+	"checkout_closed":        "The payment window closed.",
+	"checkout_cancelled":     "Payment cancelled.",
+	"paid":                   "Payment received. You are online.",
+	"terminal_busy":          "That terminal is in use. Wait a moment or pick another one.",
+	"terminal_offline":       "That terminal is not responding. Pick another one.",
+	"terminal_unknown":       "That terminal is not available here.",
+	"checkout_open":          "You already have a payment in progress at another terminal.",
+	"checkout_paid":          "Coins are already in: press Done to use them.",
+	"below_minimum":          "That is not enough for a rate yet. Add more coins.",
+	"no_checkout":            "There is no payment in progress.",
+	"clickthrough_used":      "Free access is used up for now. Try again later.",
+	"terms_required":         "Accept the terms to continue.",
+	"not_ready":              "Payments are not available right now.",
 }
 
 // Snippets are the three Perch-rendered forms (portalSnippets).
@@ -142,7 +159,7 @@ type Template struct {
 // BuiltinTemplate is the compiled-in set.
 func BuiltinTemplate() *Template {
 	t := &Template{SHA256: EmptySetSHA256, Builtin: true, Files: map[string]TemplateFileData{}}
-	for _, name := range []string{LoginPage, StatusPage, "style.css"} {
+	for _, name := range []string{LoginPage, StatusPage, "style.css", "checkout.js"} {
 		data, err := builtinFS.ReadFile("builtin/" + name)
 		if err != nil {
 			panic(err)
@@ -285,7 +302,12 @@ func SafeOriginURL(u string) string {
 // plain values are HTML-escaped, status_json is script-safe JSON, the forms
 // are inserted as they are.
 func RenderPage(html []byte, values map[string]string, status any, voucher, password bool) []byte {
-	snippets := Snippets(voucher, password)
+	return RenderPageSnippets(html, values, status, Snippets(voucher, password))
+}
+
+// RenderPageSnippets is RenderPage with the raw snippets given (the
+// Perch forms plus the Paid Hotspot ones; a missing one renders empty).
+func RenderPageSnippets(html []byte, values map[string]string, status any, snippets map[string]string) []byte {
 	return variableRe.ReplaceAllFunc(html, func(m []byte) []byte {
 		name := string(variableRe.FindSubmatch(m)[1])
 		switch {

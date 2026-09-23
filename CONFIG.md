@@ -1394,6 +1394,94 @@ package runs it at boot, before the network; on a router without the
 package, add it to an early init script by hand). The daemon does the same at
 start when no guard ran.
 
+### Paid Hotspot checkouts and click-through
+
+The contract is the controller's `docs/gateway/portal.md` §14; this is the
+router's side of it. The hello's `portal` object carries `"hotspot": 1`.
+
+`portal.configure` portals gain `methods.payment` and `methods.clickThrough`
+and, when on:
+
+```
+payment:      {idleTimeoutSeconds (15–600, default 60), priceTableId,
+               terminals: [{terminalId, name, token, mac|null, enabled, priceTableId|null}],
+               priceTables: [{priceTableId, revision, name, currency, decimals, durationMode,
+                              entries: [{amount, minutes, quotaBytes, downKbps, upKbps}]}]}
+clickThrough: {minutes (1–1440), quotaBytes, downKbps, upKbps, windowHours (1–720), perWindow (1–24), terms}
+```
+
+A terminal's table is its `priceTableId`, else the portal's. Pricing is greedy
+(the largest rate as often as it fits, then smaller ones; time and data add
+up, the speed tier is the most expensive rate taken, the rest below the
+smallest rate is `unusedAmount`). The voucher form (and `/portal/voucher`) is
+on when `voucher` or `payment` is: a reference code is a voucher code.
+
+**Terminal API** on the guest-page listener, every request signed:
+`X-Perch-Terminal`, `X-Perch-Session` (empty for `/session`), `X-Perch-Seq` (0
+for `/session`, then strictly increasing), `X-Perch-Signature` =
+base64url(HMAC-SHA256(token, "perch-terminal-v1\n" METHOD "\n" PATH "\n"
+terminalId "\n" session "\n" seq "\n" hex(sha256(body)))). The token never
+crosses the guest network.
+
+| Route | Body → answer |
+|---|---|
+| `POST /portal/v1/terminal/session` | `{nonce}` (16–64 `[A-Za-z0-9_-]`, never reused) → `{session, heartbeatSeconds:5, terminal:{terminalId, name, portalId}, currency, decimals, now}` |
+| `POST /portal/v1/terminal/heartbeat` | `{status?:{acceptor:"on"\|"off", firmware, error}}` → `{checkout, heartbeatSeconds, now}` |
+| `GET /portal/v1/terminal/checkout` | → `{checkout}` |
+| `POST /portal/v1/terminal/coins` | `{checkoutRef, eventId, amount (1–1000000)}` → `{accepted, checkout}`; 409 `checkout_closed`/`checkout_full` `{recorded:true}` (journaled `checkout_unclaimed` once per eventId); 422 `bad_amount` |
+| `POST /portal/v1/terminal/done` | `{checkoutRef}` → `{checkout}` (finalised, reason `terminal`); 409 `no_checkout`, `below_minimum` |
+
+`checkout` = the terminal's open checkout, else its last closed one for 120 s:
+`{checkoutRef, state:open|finalized|cancelled|expired, amount, amountText,
+currency, decimals, preview:{durationSeconds, quotaBytes, downKbps, upKbps,
+unusedAmount}, previewText, openedAt, idleDeadline, idleSecondsLeft,
+referenceCode?}` (`referenceCode` in display form while finalised, for a
+receipt printer; never the guest's MAC). Errors are `{error, message}`: 400
+`bad_request`, 401 `unknown_terminal`/`invalid_signature`/`session_unknown`,
+403 `wrong_portal`/`terminal_disabled`/`mac_mismatch`, 404 `not_found`, 405,
+409 `stale_seq {lastSeq}`/`nonce_reused`, 429 `rate_limited` (120 requests a
+minute per address; 20 auth failures in 15 minutes block the address). A
+terminal is online while it made an authenticated request in the last 20 s.
+
+**Guest routes**: `GET /portal/checkout` → `{checkout, terminals:[{terminalId,
+name, state:free|busy|offline|yours}], rates:{currency, decimals,
+entries:[{amount, amountText, minutes, quotaBytes, downKbps, upKbps, text}]},
+receipt:{referenceCode, amount, amountText, durationSeconds, quotaBytes, text,
+finalizedAt}, clickThrough:{available, retryAfterSeconds, minutes, terms}}`
+(`checkout` = the device's open checkout or its last one within 10 minutes:
+`{checkoutRef, terminalId, terminalName, state, amount, amountText, currency,
+decimals, preview, previewText, idleSecondsLeft, terminalOnline, openedAt,
+closedAt}`); `POST /portal/checkout` `terminalId` (→ `checkout_started`;
+`terminal_busy`, `terminal_offline`, `terminal_unknown`, `checkout_open`,
+`not_ready`), `POST /portal/checkout/done` (→ `paid`; `no_checkout`,
+`below_minimum`), `POST /portal/checkout/cancel` (→ `checkout_cancelled`;
+`checkout_paid` once coins are in), `POST /portal/clickthrough` `accept=1`
+(→ `connected`; `terms_required`, `already_authorized`, `clickthrough_used`
+429 + Retry-After). Form posts answer 303 `/?m=<code>`, JSON posts `{ok, code,
+status, hotspot}`. `status_json` and `/portal/api/status` carry `hotspot` when
+the portal offers either method. Template variables `checkout_form`,
+`clickthrough_form`, `receipt` (snippets) and `reference_code`; the builtin
+pages load `checkout.js` for the live total.
+
+**Journal** (`portal.event`/`portal.sync`): `checkout_finalized` `{portalId,
+mac, localRef, ip?, hostname?, checkoutRef, terminalId, amount, currency,
+priceTableId, priceRevision, durationMode, durationSeconds, quotaBytes,
+downKbps, upKbps, openedAt, finalizedAt, reason:done|timeout|terminal,
+unusedAmount, coinCount, coins:[{eventId, amount, at}], keyEpoch, sig,
+placement, demotedGrantId?, demotedLocalRef?, startsAt?, expiresAt?}` (the
+record fields signed with the signKey; `quotaBytes/downKbps/upKbps` null
+when unset); `checkout_unclaimed` `{portalId, mac:"" (or the terminal's
+pinned MAC), terminalId, eventId ("" for below_minimum), amount, currency,
+checkoutRef?, reason:late|full|below_minimum}`; `clickthrough_granted`
+`{portalId, mac, localRef, ip?, hostname?, startsAt, expiresAt,
+durationSeconds, quotaBytes, downKbps, upKbps}`; `offline_redeemed` of a
+reference code the controller has not acknowledged yet carries `voucherId: 0`
+and `checkoutRef`. Notification `portal.terminals` `{collectedAt,
+terminals:[{terminalId, portalId, online, lastSeenAt, status, checkout:
+{checkoutRef, state, amount, openedAt}|null}]}` every 30 s while terminals are
+configured, and at once when a session opens, a checkout opens or closes, or a
+terminal goes quiet.
+
 ## Packaged deployments
 
 The OpenWrt init script and the Docker image configure the daemon through

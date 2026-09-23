@@ -5,14 +5,18 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{portal_name}}</title>
 <link rel="stylesheet" href="{{assets}}/style.css">
+<script src="{{assets}}/checkout.js" defer></script>
 </head>
 <body>
 <main class="card">
   <h1>{{portal_name}}</h1>
   <p class="lead">Welcome to {{gateway_name}}. Sign in to use the internet.</p>
   <p class="message" data-code="{{message_code}}">{{message}}</p>
+  {{receipt}}
+  {{checkout_form}}
   {{voucher_form}}
   {{login_form}}
+  {{clickthrough_form}}
   <p class="notice">{{privacy_notice}}</p>
   <p class="device">Device {{client_mac}}</p>
 </main>

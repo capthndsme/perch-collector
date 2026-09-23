@@ -111,6 +111,8 @@ func (e *Engine) Authorize(ctx context.Context, p AuthorizeParams) (AuthorizeRes
 		res.Results = append(res.Results, r)
 	}
 	if p.Full {
+		// The controller recorded every payment up to its acked seq.
+		e.dropAckedLocalVouchersLocked(p.AckedEventSeq)
 		for _, g := range e.sortedGrants() {
 			if listed[g.LID] {
 				continue
@@ -207,7 +209,7 @@ func (e *Engine) upsertGrantLocked(sg SignedGrant, now int64, ops *ElementOps) *
 		e.grants[g.LID] = g
 	}
 	wasLive := g.Live()
-	oldMAC, oldPortal := g.MAC, g.PortalID
+	oldMAC, oldPortal, oldKey := g.MAC, g.PortalID, g.GroupKey
 	if sg.GrantID != nil {
 		id := *sg.GrantID
 		g.GrantID = &id
@@ -229,6 +231,10 @@ func (e *Engine) upsertGrantLocked(sg SignedGrant, now int64, ops *ElementOps) *
 	e.authorizeMACLocked(g.PortalID, g.MAC, ops)
 	e.startGroupClockLocked(g, now)
 	e.saveGrant(g, ClassGrant)
+	if oldKey != "" && oldKey != g.GroupKey && isLocalGroupKey(oldKey) {
+		// The controller took over a checkout's or click-through's grant.
+		e.renameLocalGroupLocked(oldKey, g.GroupKey)
+	}
 	return g
 }
 
@@ -518,6 +524,7 @@ func (e *Engine) Vouchers(ctx context.Context, p VouchersParams) (VouchersResult
 	for id, v := range next {
 		e.voucherByVerifier[v.Verifier] = id
 	}
+	e.dropListedLocalVouchersLocked()
 	res.Stored = len(added)
 	if p.Parts > 1 {
 		e.log.Debug("portal: offline vouchers part", "part", p.Part, "parts", p.Parts, "stored", res.Stored, "held", len(next))

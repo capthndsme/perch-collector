@@ -207,7 +207,11 @@ func (f *FAS) Shutdown(ctx context.Context) error {
 
 func securityHeaders(h http.Header) {
 	h.Set("X-Content-Type-Options", "nosniff")
-	h.Set("Referrer-Policy", "no-referrer")
+	// same-origin, not no-referrer: under no-referrer browsers send
+	// "Origin: null" on form posts, which sameOrigin refuses (every form
+	// of the builtin pages failed in a real browser). Other sites still
+	// get no referrer.
+	h.Set("Referrer-Policy", "same-origin")
 	h.Set("X-Frame-Options", "DENY")
 }
 
@@ -257,6 +261,11 @@ func (f *FAS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.apiStatus(w, pv, c, base)
 	case r.URL.Path == "/portal/voucher" || r.URL.Path == "/portal/login" || r.URL.Path == "/portal/logout":
 		f.action(w, r, pv, c, base)
+	case r.URL.Path == "/portal/checkout" || r.URL.Path == "/portal/checkout/done" ||
+		r.URL.Path == "/portal/checkout/cancel" || r.URL.Path == "/portal/clickthrough":
+		f.hotspot(w, r, pv, c, base)
+	case strings.HasPrefix(r.URL.Path, TerminalPathPrefix):
+		f.terminal(w, r, pv, c)
 	case strings.HasPrefix(r.URL.Path, "/assets/"):
 		f.asset(w, r, pv)
 	case strings.HasPrefix(r.URL.Path, "/portal/v1/authorizations"):
@@ -414,6 +423,18 @@ func (f *FAS) page(w http.ResponseWriter, r *http.Request, pv PortalView, c Clie
 	if pv.Methods.Password {
 		methods = append(methods, "password")
 	}
+	if pv.Methods.Payment {
+		methods = append(methods, "payment")
+	}
+	if pv.Methods.ClickThrough {
+		methods = append(methods, "clickthrough")
+	}
+	hs := f.e.GuestHotspot(c)
+	snippets := Snippets(pv.Methods.Voucher || pv.Methods.Payment, pv.Methods.Password)
+	extra := HotspotSnippets(hs)
+	for _, k := range []string{"checkout_form", "clickthrough_form", "receipt"} {
+		snippets[k] = extra[k]
+	}
 	expires := ""
 	if st.ExpiresAt != nil {
 		expires = time.UnixMilli(*st.ExpiresAt).UTC().Format(time.RFC3339)
@@ -424,8 +445,9 @@ func (f *FAS) page(w http.ResponseWriter, r *http.Request, pv PortalView, c Clie
 		"assets": "/assets/" + t.SHA256, "remaining_time": formatDuration(st.RemainingSeconds),
 		"remaining_data": formatBytes(st.RemainingBytes), "expires_at": expires,
 		"privacy_notice": pv.PrivacyNotice, "methods": strings.Join(methods, ","),
+		"reference_code": extra["reference_code"],
 	}
-	body := RenderPage(file.Data, values, statusJSON(pv, c, st), pv.Methods.Voucher, pv.Methods.Password)
+	body := RenderPageSnippets(file.Data, values, withHotspot(statusJSON(pv, c, st), hs), snippets)
 	h := w.Header()
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	h.Set("Cache-Control", "no-store")
@@ -440,7 +462,7 @@ func (f *FAS) apiStatus(w http.ResponseWriter, pv PortalView, c Client, base str
 	st := f.e.StatusOf(c)
 	online := st.State == StateActive || st.State == StatePending
 	out := map[string]any{"captive": !online, "user-portal-url": base + "/", "can-extend-session": false,
-		"perch": statusJSON(pv, c, st)}
+		"perch": withHotspot(statusJSON(pv, c, st), f.e.GuestHotspot(c))}
 	if online && st.RemainingSeconds != nil {
 		out["seconds-remaining"] = *st.RemainingSeconds
 	}
@@ -481,7 +503,7 @@ func (f *FAS) action(w http.ResponseWriter, r *http.Request, pv PortalView, c Cl
 			if o.OK {
 				st := f.e.StatusOf(c)
 				w.WriteHeader(http.StatusOK)
-				_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "status": statusJSON(pv, c, st)})
+				_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "status": withHotspot(statusJSON(pv, c, st), f.e.GuestHotspot(c))})
 				return
 			}
 			w.WriteHeader(o.Status)

@@ -56,6 +56,10 @@ func (s Settings) normalized() Settings {
 type Methods struct {
 	Voucher  bool `json:"voucher"`
 	Password bool `json:"password"`
+	// Payment: checkout at a coin terminal (Paid Hotspot, §14).
+	Payment bool `json:"payment"`
+	// ClickThrough: accept the terms for a free, limited grant (decision 32).
+	ClickThrough bool `json:"clickThrough"`
 }
 
 // PortalConfig is one portal of portal.configure.
@@ -78,6 +82,10 @@ type PortalConfig struct {
 	IPBinding bool `json:"ipBinding,omitempty"`
 	// Relay serves /portal/v1/authorizations for integrations (decision 22).
 	Relay bool `json:"relay,omitempty"`
+	// Payment is the checkout method's terminals and price tables (present
+	// when Methods.Payment); ClickThrough the click-through limits.
+	Payment      *PaymentConfig      `json:"payment,omitempty"`
+	ClickThrough *ClickThroughConfig `json:"clickThrough,omitempty"`
 }
 
 // StorageOverride are the gateway's storage settings (decision 18).
@@ -150,6 +158,8 @@ type Hello struct {
 	Storage        StorageInfo `json:"storage"`
 	Port           int         `json:"port"`
 	MaxPortals     int         `json:"maxPortals"`
+	// Hotspot: 1 = checkouts, coin terminals and click-through (§14).
+	Hotspot int `json:"hotspot"`
 }
 
 // MaxPortals bounds the portals of one gateway.
@@ -255,6 +265,8 @@ type Engine struct {
 
 	failMin, failHour, failPortal *Window
 	relayLimit, relayPortal       *Window
+
+	hotspotState
 }
 
 // Maximum journal length (docs: ring of 1000).
@@ -284,6 +296,7 @@ func New(o Options) (*Engine, error) {
 		tickNow: time.Now, leases: o.Leases,
 		failMin: NewWindow(5, time.Minute), failHour: NewWindow(20, time.Hour), failPortal: NewWindow(60, time.Minute),
 		relayLimit: NewWindow(60, time.Minute), relayPortal: NewWindow(600, time.Minute),
+		hotspotState: newHotspotState(),
 	}
 	if err := e.loadState(); err != nil {
 		return nil, fmt.Errorf("portal state: %w", err)
@@ -335,7 +348,7 @@ func (e *Engine) Probe(ctx context.Context) {
 func (e *Engine) Hello() Hello {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	h := Hello{Version: 1, Enforcement: e.enf, Storage: e.storage, Port: e.port, MaxPortals: MaxPortals}
+	h := Hello{Version: 1, Enforcement: e.enf, Storage: e.storage, Port: e.port, MaxPortals: MaxPortals, Hotspot: 1}
 	if e.keys != nil {
 		v := e.keys.Epoch
 		h.KeyEpoch = &v
@@ -548,6 +561,7 @@ func (e *Engine) Configure(ctx context.Context, c Config) (ConfigureResult, erro
 	if err := e.applyStructuralLocked(); err != nil {
 		issues = append(issues, err.Error())
 	}
+	e.hotspotConfiguredLocked()
 	// A new walled garden is resolved on the next tick (without nftset).
 	e.lastResolve = time.Time{}
 	e.syncListenLocked()

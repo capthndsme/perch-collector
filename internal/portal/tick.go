@@ -195,6 +195,7 @@ func (e *Engine) Tick(ctx context.Context) {
 	}
 	e.observeNeighborsLocked(now, ops)
 	e.enforceLimitsLocked(now, ops)
+	e.hotspotTickLocked(now, ops)
 	if e.currentAgent() == nil {
 		e.promoteQueuedLocked(now, ops)
 	}

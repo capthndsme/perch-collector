@@ -56,9 +56,16 @@ var storeTables = []string{
 	`CREATE TABLE IF NOT EXISTS nonces (nonce TEXT PRIMARY KEY, at INTEGER NOT NULL)`,
 	`CREATE TABLE IF NOT EXISTS templates (sha TEXT NOT NULL, name TEXT NOT NULL, content_type TEXT NOT NULL, data BLOB NOT NULL, PRIMARY KEY (sha, name))`,
 	`CREATE TABLE IF NOT EXISTS ended_usage (id INTEGER PRIMARY KEY, group_key TEXT NOT NULL, seq INTEGER NOT NULL, time_used INTEGER NOT NULL, bytes_used INTEGER NOT NULL)`,
+	// Paid Hotspot and click-through (hotspot.go); older snapshots load
+	// without them.
+	`CREATE TABLE IF NOT EXISTS terminals (terminal_id INTEGER PRIMARY KEY, data TEXT NOT NULL)`,
+	`CREATE TABLE IF NOT EXISTS checkouts (ref TEXT PRIMARY KEY, data TEXT NOT NULL)`,
+	`CREATE TABLE IF NOT EXISTS local_vouchers (ref TEXT PRIMARY KEY, data TEXT NOT NULL)`,
+	`CREATE TABLE IF NOT EXISTS clickthrough_uses (id INTEGER PRIMARY KEY, portal_id INTEGER NOT NULL, mac TEXT NOT NULL, at INTEGER NOT NULL)`,
 }
 
-var tableNames = []string{"meta", "groups", "grants", "events", "vouchers", "nonces", "templates", "ended_usage"}
+var tableNames = []string{"meta", "groups", "grants", "events", "vouchers", "nonces", "templates", "ended_usage",
+	"terminals", "checkouts", "local_vouchers", "clickthrough_uses"}
 
 // OpenStore opens the RAM database and loads the snapshot at path, if any.
 // A snapshot that cannot be read is moved aside (<path>.corrupt) and the
