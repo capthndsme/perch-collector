@@ -24,6 +24,9 @@ BUILD_FLAGS  ?= -trimpath
 # at HEAD without its v, else the commit; override with VERSION=.
 VERSION      ?= $(or $(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v//'),dev)
 LDFLAGS      ?= -s -w -X main.version=$(VERSION)
+# The portal store is SQLite (mattn/go-sqlite3, cgo, the amalgamation built
+# in): no extension loading, so a static build needs no dlopen.
+GO_TAGS      ?= sqlite_omit_load_extension
 
 # Non-system nDPI install (see scripts/build-ndpi.sh). Points pkg-config
 # at it for the cgo build, the test runner's dynamic linker at its lib/,
@@ -40,10 +43,10 @@ endif
 .PHONY: build build-ndpi test test-ndpi clean check-ndpi-deps docker
 
 build:
-	$(GO) build $(BUILD_FLAGS) -ldflags '$(LDFLAGS)' -o $(BIN) .
+	$(GO) build $(BUILD_FLAGS) -tags '$(GO_TAGS)' -ldflags '$(LDFLAGS)' -o $(BIN) .
 
 build-ndpi: check-ndpi-deps
-	$(NDPI_ENV) CGO_ENABLED=1 $(GO) build $(BUILD_FLAGS) -tags ndpi -ldflags '$(LDFLAGS)' -o $(BIN) .
+	$(NDPI_ENV) CGO_ENABLED=1 $(GO) build $(BUILD_FLAGS) -tags 'ndpi $(GO_TAGS)' -ldflags '$(LDFLAGS)' -o $(BIN) .
 
 test:
 	$(GO) test $(PKG)
@@ -51,7 +54,7 @@ test:
 # Runs the cgo nDPI build path so any header/linker drift in libndpi
 # surfaces in CI as a build failure rather than at first start.
 test-ndpi: check-ndpi-deps
-	$(NDPI_ENV) CGO_ENABLED=1 $(GO) test -tags ndpi $(PKG)
+	$(NDPI_ENV) CGO_ENABLED=1 $(GO) test -tags 'ndpi $(GO_TAGS)' $(PKG)
 
 check-ndpi-deps:
 	@command -v pkg-config >/dev/null || { echo "pkg-config not installed; apt install pkg-config"; exit 1; }

@@ -1,0 +1,4 @@
+table inet perch_portal
+delete table inet perch_portal
+table netdev perch_portal_acct
+delete table netdev perch_portal_acct

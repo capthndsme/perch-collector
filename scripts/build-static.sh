@@ -46,6 +46,6 @@ docker run --rm -v "$PWD":/src -w /src "${KIT_MOUNT[@]}" -e CGO_ENABLED=1 -e GOA
       export GOWORK=/tmp/go.work
     fi
     echo "libndpi $(pkg-config --modversion libndpi) (static)"
-    go build -trimpath -tags ndpi -ldflags "-s -w -linkmode external -extldflags -static -X main.version=$VERSION" -o "$OUT" .
+    go build -trimpath -tags "ndpi sqlite_omit_load_extension" -ldflags "-s -w -linkmode external -extldflags -static -X main.version=$VERSION" -o "$OUT" .
   '
 file "$OUT" | grep -q "statically linked" && echo "built $OUT ($(stat -c %s "$OUT") bytes, static, version $VERSION)"

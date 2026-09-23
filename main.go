@@ -191,6 +191,14 @@ func main() {
 	// OpenWrt). With it the runtime actions: conntrack flush and backups.
 	gw := buildGatewayFeatures(cfg, gateway.OnOpenWrt(hoststat.FS{}))
 
+	// The guest portal: Perch-owned nftables enforcement and the guest
+	// pages, configured by the controller over the socket. Held grants are
+	// re-applied right here, before any controller is reached.
+	gp := buildPortal(cfg, gateway.OnOpenWrt(hoststat.FS{}), transport)
+	if gp != nil {
+		gw.portal = gp.engine
+	}
+
 	// Build the announcer or the controller client (when the daemon has a
 	// server) before the API server starts, so its status can be part of
 	// every meta block without racing the first request. Either is only
@@ -274,6 +282,7 @@ func main() {
 	case <-ctlDone:
 	case <-time.After(6 * time.Second):
 	}
+	gp.stop()
 
 	if err := apiServer.Shutdown(); err != nil {
 		log.Printf("api shutdown: %v", err)
@@ -365,6 +374,7 @@ func buildController(cfg config.Config, agg *aggregator.Aggregator, cls classifi
 		DHCPRefresh:      time.Duration(cfg.DHCPLeasesRefresh) * time.Second,
 		ObserveRefresh:   time.Duration(cfg.ObserveRefresh) * time.Second,
 		Conntrack:        gw.conntrack,
+		Portal:           gw.portal,
 		Backup:           gw.backup,
 		AddressCache:     cfg.ControllerAddressCache,
 	})

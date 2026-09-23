@@ -221,6 +221,26 @@ type Config struct {
 	// good address, dialed when its name does not resolve. "" = memory only.
 	ControllerAddressCache string `yaml:"controller_address_cache"`
 
+	// Portal offers the guest portal to the controller (capability
+	// "portal": Perch-owned nftables enforcement and the guest pages).
+	// "auto" (the default) is on under OpenWrt with the WebSocket
+	// transport; "off" also removes any enforcement a previous run left.
+	Portal string `yaml:"portal"`
+	// PortalPort is the guest pages' port (plain HTTP, every address; only
+	// the portal devices may reach it).
+	PortalPort int `yaml:"portal_port"`
+	// PortalStoragePath is where the portal state is snapshotted (grants,
+	// vouchers, journal); "" = /etc/perch-collector/portal/state.db.
+	PortalStoragePath string `yaml:"portal_storage_path"`
+	// PortalFlushInterval is how often, in seconds, counters are written
+	// there; 0 = by storage kind (300 on flash, every tick on eMMC/disks).
+	// Grants are written at once regardless.
+	PortalFlushInterval int `yaml:"portal_flush_interval"`
+	// PortalStorageMount is the mount point PortalStoragePath must be on
+	// (a USB disk, say); when it is not mounted the state stays in RAM and
+	// goes to the default path instead, never onto an empty mount point.
+	PortalStorageMount string `yaml:"portal_storage_mount"`
+
 	// Deprecated lists the pre-rename GOCOLLECTOR_* variables that supplied
 	// a value, so main can say once that each has a new name. Never YAML.
 	Deprecated []string `yaml:"-"`
@@ -332,8 +352,13 @@ func Defaults() Config {
 		ConntrackFlush:              GatewayStatsAuto,
 		GatewayBackup:               GatewayBackupRedacted,
 		ControllerAddressCache:      DefaultControllerAddressCache,
+		Portal:                      GatewayStatsAuto,
+		PortalPort:                  DefaultPortalPort,
 	}
 }
+
+// DefaultPortalPort is the guest pages' port.
+const DefaultPortalPort = 2080
 
 // Load reads configuration from a YAML file, then applies CLI flag overrides,
 // then applies environment variable overrides. Precedence: env > CLI > YAML > defaults.
@@ -442,6 +467,11 @@ func load(configPath string, cli cliOverrides) (Config, error) {
 	env.str("CONNTRACK_FLUSH", &cfg.ConntrackFlush)
 	env.str("GATEWAY_BACKUP", &cfg.GatewayBackup)
 	env.str("CONTROLLER_ADDRESS_CACHE", &cfg.ControllerAddressCache)
+	env.str("PORTAL", &cfg.Portal)
+	env.integer("PORTAL_PORT", func(n int) { cfg.PortalPort = n })
+	env.str("PORTAL_STORAGE_PATH", &cfg.PortalStoragePath)
+	env.integer("PORTAL_FLUSH_INTERVAL", func(n int) { cfg.PortalFlushInterval = n })
+	env.str("PORTAL_STORAGE_MOUNT", &cfg.PortalStorageMount)
 	cfg.Deprecated = env.deprecated
 	if env.err != nil {
 		return cfg, env.err
@@ -857,7 +887,42 @@ func (c *Config) validateObserve() error {
 		return fmt.Errorf("gateway_backup must be redacted, full or off, got %q", c.GatewayBackup)
 	}
 	c.ControllerAddressCache = strings.TrimSpace(c.ControllerAddressCache)
+	return c.validatePortal()
+}
+
+func (c *Config) validatePortal() error {
+	p, ok := normalizeAutoOnOff(c.Portal)
+	if !ok {
+		return fmt.Errorf("portal must be auto, on or off, got %q", c.Portal)
+	}
+	c.Portal = p
+	if c.PortalPort == 0 {
+		c.PortalPort = DefaultPortalPort
+	}
+	if c.PortalPort < 1 || c.PortalPort > 65535 || c.PortalPort == 80 || c.PortalPort == 53 || c.PortalPort == 67 {
+		return fmt.Errorf("portal_port must be a free TCP port (not 53, 67 or 80), got %d", c.PortalPort)
+	}
+	if c.PortalFlushInterval < 0 || c.PortalFlushInterval > 3600 {
+		return fmt.Errorf("portal_flush_interval must be 0 (auto) or 5-3600 seconds, got %d", c.PortalFlushInterval)
+	}
+	if c.PortalFlushInterval > 0 && c.PortalFlushInterval < 5 {
+		c.PortalFlushInterval = 5
+	}
+	c.PortalStoragePath = strings.TrimSpace(c.PortalStoragePath)
+	c.PortalStorageMount = strings.TrimSpace(c.PortalStorageMount)
 	return nil
+}
+
+// PortalEnabled resolves Portal; "auto" = on OpenWrt with the WebSocket
+// transport (the portal is configured over the socket).
+func (c Config) PortalEnabled(onOpenWrt bool, websocket bool) bool {
+	switch c.Portal {
+	case GatewayStatsOn:
+		return true
+	case GatewayStatsOff:
+		return false
+	}
+	return onOpenWrt && websocket
 }
 
 // ObserveEnabled resolves Observe; onOpenWrt is what "auto" becomes.

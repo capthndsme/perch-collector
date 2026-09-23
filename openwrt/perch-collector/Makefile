@@ -47,7 +47,7 @@ GO_PKG:=github.com/capthndsme/perch-collector
 GO_PKG_BUILD_PKG:=$(GO_PKG)
 GO_PKG_LDFLAGS:=-s -w
 GO_PKG_LDFLAGS_X:=main.version=$(PERCH_VERSION)
-GO_PKG_TAGS:=ndpi
+GO_PKG_TAGS:=ndpi sqlite_omit_load_extension
 GO_PKG_INSTALL_BIN_PATH:=/usr/bin
 
 include $(INCLUDE_DIR)/package.mk
@@ -75,7 +75,7 @@ define Package/perch-collector
   SUBMENU:=Network Monitoring
   TITLE:=Perch Network Collector
   URL:=https://github.com/capthndsme/perch-collector
-  DEPENDS:=$(GO_ARCH_DEPENDS) +libpcap +kmod-nf-conntrack-netlink
+  DEPENDS:=$(GO_ARCH_DEPENDS) +libpcap +kmod-nf-conntrack-netlink +kmod-nft-netdev
 endef
 
 define Package/perch-collector/description
@@ -134,6 +134,27 @@ define Package/perch-collector/install
 	$(INSTALL_CONF) ./files/perch-collector.config $(1)/etc/config/perch-collector
 	$(INSTALL_DIR) $(1)/etc/uci-defaults
 	$(INSTALL_BIN) ./files/perch-collector.defaults $(1)/etc/uci-defaults/90-perch-collector
+endef
+
+# Removing the package takes the guest portal's enforcement down with it
+# (its nftables tables, the fw4 drop-in and the dnsmasq walled-garden file);
+# an upgrade keeps it, so guests stay online while the new binary starts.
+define Package/perch-collector/prerm
+#!/bin/sh
+[ -n "$${IPKG_INSTROOT}" ] && exit 0
+[ "$${PKG_UPGRADE}" = "1" ] && exit 0
+/etc/init.d/perch-collector stop 2>/dev/null
+nft delete table inet perch_portal 2>/dev/null
+nft delete table netdev perch_portal_acct 2>/dev/null
+if [ -f /usr/share/nftables.d/chain-pre/input/30-perch-portal.nft ]; then
+	rm -f /usr/share/nftables.d/chain-pre/input/30-perch-portal.nft
+	fw4 -q reload 2>/dev/null
+fi
+for f in /tmp/dnsmasq*.d/perch-portal-walled-garden.conf; do
+	[ -f "$$f" ] && rm -f "$$f" && restart_dnsmasq=1
+done
+[ -n "$$restart_dnsmasq" ] && /etc/init.d/dnsmasq restart 2>/dev/null
+exit 0
 endef
 
 $(eval $(call GoBinPackage,perch-collector))
