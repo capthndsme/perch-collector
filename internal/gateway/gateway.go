@@ -39,6 +39,70 @@ type Stats struct {
 	// reported" and an empty list as "no ports"). A pointer because
 	// omitempty would drop an empty list as well.
 	Ports *[]hoststat.Port `json:"ports,omitempty"`
+	// Networks is the router's LAN-side networks (gateway plan 1 section
+	// 8.3): every netifd interface that is not a WAN, with its interface
+	// counters and what the collector captures on it. Absent = not
+	// reported (not OpenWrt, netifd not answering, or an old collector);
+	// [] = none. A pointer for the same reason as Ports.
+	Networks *[]Network `json:"networks,omitempty"`
+}
+
+// Network is one LAN-side network of the router in the gateway report.
+// Byte counters are the L3 device's interface counters (/proc/net/dev), from
+// the router's side: rx = received from the network (its devices'
+// uploads, and traffic routed out of it), tx = sent into it. They are
+// cumulative and reset when the device is recreated; absent while the
+// device does not exist.
+type Network struct {
+	Name string `json:"name"`
+	// Device is the L3 device ("br-lan", "br-trunk.110"); "" when netifd
+	// has none for it (down).
+	Device string   `json:"device"`
+	Proto  string   `json:"proto"`
+	Up     bool     `json:"up"`
+	IPv4   []string `json:"ipv4"`
+	// IPv6 holds the addresses and the prefixes assigned from a delegated
+	// prefix.
+	IPv6    []string `json:"ipv6"`
+	RxBytes *uint64  `json:"rxBytes,omitempty"`
+	TxBytes *uint64  `json:"txBytes,omitempty"`
+	// RxRate / TxRate are bytes per second over the interval since the
+	// collector's previous read of this device (at least one second
+	// apart); absent on the first read and after a counter reset.
+	RxRate *float64 `json:"rxRate,omitempty"`
+	TxRate *float64 `json:"txRate,omitempty"`
+	// Captured: the collector captures this network's traffic (its
+	// devices carry it as DeviceStats.network).
+	Captured bool `json:"captured"`
+	// Devices is the number of device rows attributed to this network
+	// (DeviceStats.network), ActiveDevices those with a frame in the last
+	// five minutes. Both 0 when not captured.
+	Devices       int `json:"devices"`
+	ActiveDevices int `json:"activeDevices"`
+	// Capture is the capture's own byte and packet counters of this
+	// network, split WAN / LAN by the scope rule, from the devices' side
+	// (In = received by the network's devices). Present when captured.
+	Capture *NetworkCapture `json:"capture,omitempty"`
+}
+
+// NetworkCapture mirrors aggregator.NetworkCounters on the wire.
+type NetworkCapture struct {
+	BytesInWAN    uint64 `json:"bytesInWan"`
+	BytesOutWAN   uint64 `json:"bytesOutWan"`
+	BytesInLAN    uint64 `json:"bytesInLan"`
+	BytesOutLAN   uint64 `json:"bytesOutLan"`
+	PacketsInWAN  uint64 `json:"packetsInWan"`
+	PacketsOutWAN uint64 `json:"packetsOutWan"`
+	PacketsInLAN  uint64 `json:"packetsInLan"`
+	PacketsOutLAN uint64 `json:"packetsOutLan"`
+	// Scope is the scope rule the split follows: "routed" (routed LAN and
+	// the router's LAN addresses count as LAN) or "legacy".
+	Scope string `json:"scope"`
+	// KernelDrops is the number of frames the kernel dropped for this
+	// network's capture since that capture started (its ring buffer was
+	// full: the counters above miss them). Absent when unknown. It restarts
+	// at 0 when the capture restarts (the network went away and came back).
+	KernelDrops *uint64 `json:"kernelDrops,omitempty"`
 }
 
 // Conntrack is the connection-tracking table fill.
@@ -77,6 +141,9 @@ type Reader struct {
 	// reporting off. Copies of a Reader share it, and with it the port
 	// cache.
 	Ports *Ports
+	// Networks adds the LAN-side networks to every report; nil = not
+	// reported. It returns nil when it cannot tell (netifd not answering).
+	Networks func() *[]Network
 	// Now stamps CollectedAt (tests).
 	Now func() time.Time
 }
@@ -191,6 +258,9 @@ func (r Reader) Read() *Stats {
 		if ports := r.Ports.Read(names); ports != nil {
 			s.Ports = &ports
 		}
+	}
+	if r.Networks != nil {
+		s.Networks = r.Networks()
 	}
 	return s
 }

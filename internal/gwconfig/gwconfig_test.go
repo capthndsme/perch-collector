@@ -337,3 +337,21 @@ func TestSessionUsers(t *testing.T) {
 		t.Fatal("empty")
 	}
 }
+
+func TestCaptureNetworksLiveMultiCapture(t *testing.T) {
+	p := New(Options{CaptureNetwork: "lan", CaptureDevice: "br-lan"})
+	if got := p.captureNetworks(); !reflect.DeepEqual(got, []CaptureNetwork{{Network: "lan", Device: "br-lan"}}) {
+		t.Fatalf("single: %+v", got)
+	}
+	p = New(Options{CapturedNetworks: func() map[string]string {
+		return map[string]string{"br-lan": "lan", "br-guest": "guest"}
+	}})
+	want := []CaptureNetwork{{Network: "guest", Device: "br-guest"}, {Network: "lan", Device: "br-lan"}}
+	if got := p.captureNetworks(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("multi: %+v", got)
+	}
+	p = New(Options{CapturedNetworks: func() map[string]string { return nil }})
+	if got := p.captureNetworks(); got == nil || len(got) != 0 {
+		t.Fatalf("empty multi must be [] not nil: %#v", got)
+	}
+}

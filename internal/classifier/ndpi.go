@@ -120,14 +120,90 @@ const ndpiMaxPacketsPerFlow = 24
 // ndpiPartialExtraPackets lives in ndpi_partial.go (untagged) so the config
 // layer can set it in every build.
 
-// NDPIClassifier wraps a single libndpi detection module behind a
-// per-flow state table. Per the library's contract, the detection
-// module is NOT thread-safe, so all cgo calls are serialised through
-// `mu`. With a single capture goroutine this is essentially uncontended.
+// ndpiModule is one libndpi detection module and the lock every cgo call
+// on it takes (the module is NOT thread-safe). Several classifiers may
+// share one (NDPIModule): each keeps its own flow table and flow structs,
+// so a flow routed between two captured networks is never fed to one flow
+// struct twice, while the module's protocol tables and automata (the bulk
+// of its ~12 MB) exist once. refs counts the classifiers and the owner.
+type ndpiModule struct {
+	mu   sync.Mutex
+	mod  unsafe.Pointer // *C.struct_ndpi_detection_module_struct
+	refs int
+}
+
+// release drops one reference; the last one tears the module down.
+// Caller holds m.mu.
+func (m *ndpiModule) releaseLocked() {
+	m.refs--
+	if m.refs <= 0 && m.mod != nil {
+		C.ndpi_exit_detection_module((*C.struct_ndpi_detection_module_struct)(m.mod))
+		m.mod = nil
+	}
+}
+
+// newNDPIModule initializes and finalizes a detection module (nDPI 5
+// enables every built-in protocol by default).
+func newNDPIModule() (*ndpiModule, error) {
+	mod := C.ndpi_init_detection_module(nil)
+	if mod == nil {
+		return nil, errors.New("ndpi_init_detection_module returned NULL")
+	}
+	if rc := C.ndpi_finalize_initialization(mod); rc != 0 {
+		C.ndpi_exit_detection_module(mod)
+		return nil, fmt.Errorf("ndpi_finalize_initialization failed (rc=%d)", int(rc))
+	}
+	return &ndpiModule{mod: unsafe.Pointer(mod)}, nil
+}
+
+// NDPIModule is a detection module that several classifiers share (one
+// per capture, each with its own flow table). Close it once the
+// classifiers are made: the module lives until the last one is closed.
+type NDPIModule struct {
+	m      *ndpiModule
+	closed atomic.Bool
+}
+
+// NewNDPIModule initializes a detection module to share.
+func NewNDPIModule() (*NDPIModule, error) {
+	m, err := newNDPIModule()
+	if err != nil {
+		return nil, err
+	}
+	m.refs = 1
+	return &NDPIModule{m: m}, nil
+}
+
+// NewClassifier makes a classifier with a flow table of its own on the
+// shared module.
+func (s *NDPIModule) NewClassifier(maxFlows, idleSeconds int) (*NDPIClassifier, error) {
+	s.m.mu.Lock()
+	if s.m.mod == nil {
+		s.m.mu.Unlock()
+		return nil, errors.New("the shared nDPI module is closed")
+	}
+	s.m.refs++
+	s.m.mu.Unlock()
+	return newNDPIClassifierOn(s.m, maxFlows, time.Duration(idleSeconds)*time.Second, 0), nil
+}
+
+// Close drops the owner's reference.
+func (s *NDPIModule) Close() {
+	if !s.closed.CompareAndSwap(false, true) {
+		return
+	}
+	s.m.mu.Lock()
+	s.m.releaseLocked()
+	s.m.mu.Unlock()
+}
+
+// NDPIClassifier is a per-flow state table on a libndpi detection module
+// (its own, or a shared NDPIModule). All cgo calls are serialised through
+// the module's lock; with one capture goroutine per module this is
+// essentially uncontended.
 type NDPIClassifier struct {
-	mod    unsafe.Pointer // *C.struct_ndpi_detection_module_struct
+	m      *ndpiModule
 	table  *flow.Table
-	mu     sync.Mutex
 	closed atomic.Bool
 
 	// evictedFlows counts flows whose native state was released by
@@ -152,26 +228,25 @@ func NewNDPIClassifier(maxFlows, idleSeconds int) (*NDPIClassifier, error) {
 // timeout and sweep interval as durations (0 sweep = the table's
 // default), so tests can drive eviction in milliseconds.
 func newNDPIClassifier(maxFlows int, idle, sweep time.Duration) (*NDPIClassifier, error) {
-	mod := C.ndpi_init_detection_module(nil)
-	if mod == nil {
-		return nil, errors.New("ndpi_init_detection_module returned NULL")
+	m, err := newNDPIModule()
+	if err != nil {
+		return nil, err
 	}
-	if rc := C.ndpi_finalize_initialization(mod); rc != 0 {
-		C.ndpi_exit_detection_module(mod)
-		return nil, fmt.Errorf("ndpi_finalize_initialization failed (rc=%d)", int(rc))
-	}
-
-	c := &NDPIClassifier{
-		mod:  unsafe.Pointer(mod),
-		port: NewPortClassifier(),
-	}
-	c.table = flow.NewTable(maxFlows, idle, c.freeFlowFromTable)
-	c.table.SetSweepInterval(sweep)
-	c.table.Run()
-
+	m.refs = 1
+	c := newNDPIClassifierOn(m, maxFlows, idle, sweep)
 	log.Printf("classifier: nDPI %s (api %d) initialized (max_flows=%d idle=%s partial_extra_packets=%d)",
 		NDPIVersion(), NDPIAPIVersion(), maxFlows, idle, ndpiPartialExtraPackets.Load())
 	return c, nil
+}
+
+// newNDPIClassifierOn builds a classifier on module m, whose reference the
+// caller has already taken for it.
+func newNDPIClassifierOn(m *ndpiModule, maxFlows int, idle, sweep time.Duration) *NDPIClassifier {
+	c := &NDPIClassifier{m: m, port: NewPortClassifier()}
+	c.table = flow.NewTable(maxFlows, idle, c.freeFlowFromTable)
+	c.table.SetSweepInterval(sweep)
+	c.table.Run()
+	return c
 }
 
 // NDPIVersion is the release string of the linked libndpi
@@ -198,12 +273,12 @@ func NDPIAPIVersion() int {
 // per-packet attribution isn't lost during the first packets of a
 // connection.
 //
-// Concurrency: serialises through c.mu because libndpi's detection
+// Concurrency: serialises through c.m.mu because libndpi's detection
 // module is not thread-safe per-detector. Every Entry field except the
-// table-owned LastSeen is read and written under c.mu only; the table's
-// eviction callback takes c.mu too. The lookup happens outside c.mu, so
+// table-owned LastSeen is read and written under c.m.mu only; the table's
+// eviction callback takes c.m.mu too. The lookup happens outside c.m.mu, so
 // an entry may be evicted in between: its Evicted flag is checked under
-// c.mu before any native state is attached to it.
+// c.m.mu before any native state is attached to it.
 func (c *NDPIClassifier) Classify(srcIP, dstIP []byte, srcPort, dstPort uint16, transportProto uint8, ipPacket []byte) Result {
 	if c.closed.Load() {
 		return c.port.Classify(srcIP, dstIP, srcPort, dstPort, transportProto, ipPacket)
@@ -227,12 +302,12 @@ func (c *NDPIClassifier) Classify(srcIP, dstIP []byte, srcPort, dstPort uint16, 
 	// traffic (its SNI would otherwise be lost to an idle eviction).
 	entry, created := c.table.GetOrCreateAt(key, now)
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.m.mu.Lock()
+	defer c.m.mu.Unlock()
 
 	// Re-check under the lock: Close may have run since the check above
 	// and torn the module down; never touch nDPI or allocate then.
-	if c.closed.Load() || c.mod == nil {
+	if c.closed.Load() || c.m.mod == nil {
 		return c.port.Classify(srcIP, dstIP, srcPort, dstPort, transportProto, ipPacket)
 	}
 
@@ -255,7 +330,7 @@ func (c *NDPIClassifier) Classify(srcIP, dstIP []byte, srcPort, dstPort uint16, 
 	}
 
 	// The sweeper may have evicted this entry between the lookup and
-	// taking c.mu (eviction frees UserData under c.mu, so it is nil now).
+	// taking c.m.mu (eviction frees UserData under c.m.mu, so it is nil now).
 	// Anything attached from here on would never be freed: answer from
 	// the port table and let the next packet start a fresh flow.
 	if entry.Evicted() {
@@ -273,7 +348,7 @@ func (c *NDPIClassifier) Classify(srcIP, dstIP []byte, srcPort, dstPort uint16, 
 		}
 	}
 
-	mod := (*C.struct_ndpi_detection_module_struct)(c.mod)
+	mod := (*C.struct_ndpi_detection_module_struct)(c.m.mod)
 	flowPtr := (*C.struct_ndpi_flow_struct)(entry.UserData)
 	pkt := (*C.uchar)(unsafe.Pointer(&ipPacket[0]))
 	// nDPI takes a 16-bit length. Anything longer (a BIG TCP super-packet)
@@ -344,7 +419,7 @@ type resolved struct {
 }
 
 // resolve maps an nDPI result plus the flow's metadata to our label
-// namespace. Caller must hold c.mu.
+// namespace. Caller must hold c.m.mu.
 func (c *NDPIClassifier) resolve(proto C.ndpi_protocol, f *C.struct_ndpi_flow_struct, srcPort, dstPort uint16, transportProto uint8) resolved {
 	app, master := uint16(proto.proto.app_protocol), uint16(proto.proto.master_protocol)
 	var r resolved
@@ -378,12 +453,12 @@ func (c *NDPIClassifier) portResult(srcIP, dstIP []byte, srcPort, dstPort uint16
 }
 
 // categoryName resolves the slug for a detection result's category.
-// Caller must hold c.mu (the detection module is not thread-safe).
+// Caller must hold c.m.mu (the detection module is not thread-safe).
 func (c *NDPIClassifier) categoryName(p C.ndpi_protocol) string {
-	if c.mod == nil {
+	if c.m.mod == nil {
 		return ""
 	}
-	cs := C.gc_ndpi_category_name((*C.struct_ndpi_detection_module_struct)(c.mod), p)
+	cs := C.gc_ndpi_category_name((*C.struct_ndpi_detection_module_struct)(c.m.mod), p)
 	if cs == nil {
 		return ""
 	}
@@ -395,12 +470,12 @@ func (c *NDPIClassifier) categoryName(p C.ndpi_protocol) string {
 // Labels that several nDPI ids share (e.g. "google") keep the first
 // category seen in id order. Sorted by label; nil when nDPI is closed.
 func (c *NDPIClassifier) ProtocolCategories() []ProtocolCategory {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.closed.Load() || c.mod == nil {
+	c.m.mu.Lock()
+	defer c.m.mu.Unlock()
+	if c.closed.Load() || c.m.mod == nil {
 		return nil
 	}
-	mod := (*C.struct_ndpi_detection_module_struct)(c.mod)
+	mod := (*C.struct_ndpi_detection_module_struct)(c.m.mod)
 	n := int(C.ndpi_get_num_protocols(mod))
 	seen := make(map[string]struct{}, n)
 	out := make([]ProtocolCategory, 0, n)
@@ -456,12 +531,9 @@ func (c *NDPIClassifier) Close() {
 		return
 	}
 	c.table.Stop()
-	c.mu.Lock()
-	if c.mod != nil {
-		C.ndpi_exit_detection_module((*C.struct_ndpi_detection_module_struct)(c.mod))
-		c.mod = nil
-	}
-	c.mu.Unlock()
+	c.m.mu.Lock()
+	c.m.releaseLocked()
+	c.m.mu.Unlock()
 }
 
 // FlowCount exposes the current per-classifier flow-table size for
@@ -484,14 +556,14 @@ func (c *NDPIClassifier) freeFlowFromTable(e *flow.Entry) {
 	if e == nil {
 		return
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.m.mu.Lock()
+	defer c.m.mu.Unlock()
 	f := (*C.struct_ndpi_flow_struct)(e.UserData)
 	if f == nil {
 		return
 	}
-	if c.mod != nil {
-		C.ndpi_detection_giveup((*C.struct_ndpi_detection_module_struct)(c.mod), f)
+	if c.m.mod != nil {
+		C.ndpi_detection_giveup((*C.struct_ndpi_detection_module_struct)(c.m.mod), f)
 	}
 	C.gc_ndpi_free_flow(f)
 	e.UserData = nil
@@ -503,11 +575,11 @@ func (c *NDPIClassifier) freeFlowFromTable(e *flow.Entry) {
 // tail of nDPI detections (e.g. obscure gaming/IM apps) so they still
 // surface as something more useful than "https".
 func (c *NDPIClassifier) protocolName(id uint16) string {
-	if c.mod == nil {
+	if c.m.mod == nil {
 		return ""
 	}
 	cs := C.ndpi_get_proto_name(
-		(*C.struct_ndpi_detection_module_struct)(c.mod),
+		(*C.struct_ndpi_detection_module_struct)(c.m.mod),
 		C.u_int16_t(id),
 	)
 	if cs == nil {

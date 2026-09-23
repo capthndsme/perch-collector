@@ -1,0 +1,32 @@
+{
+	"interface": [
+		{ "interface": "lan", "up": true, "l3_device": "br-lan", "device": "br-lan", "proto": "static",
+		  "ipv4-address": [ { "address": "192.168.1.1", "mask": 24 } ],
+		  "ipv6-address": [ { "address": "fd00:1::1", "mask": 64 } ],
+		  "ipv6-prefix-assignment": [ { "address": "2001:db8:0:10::", "mask": 64, "local-address": { "address": "2001:db8:0:10::1", "mask": 64 } } ],
+		  "route": [] },
+		{ "interface": "lan6", "up": true, "l3_device": "br-lan", "device": "br-lan", "proto": "static",
+		  "ipv6-address": [ { "address": "fd00:2::1", "mask": 64 } ], "route": [] },
+		{ "interface": "guest", "up": true, "l3_device": "br-guest", "device": "br-guest", "proto": "static",
+		  "ipv4-address": [ { "address": "192.168.20.1", "mask": 24 } ], "route": [] },
+		{ "interface": "iot", "up": true, "l3_device": "br-iot", "device": "br-iot", "proto": "static",
+		  "ipv4-address": [ { "address": "192.168.30.1", "mask": 24 } ], "route": [] },
+		{ "interface": "trunk", "up": true, "l3_device": "br-trunk", "device": "br-trunk", "proto": "none", "route": [] },
+		{ "interface": "vlan110", "up": true, "l3_device": "br-trunk.110", "device": "br-trunk.110", "proto": "static",
+		  "ipv4-address": [ { "address": "192.168.110.1", "mask": 24 } ], "route": [] },
+		{ "interface": "vlan120", "up": true, "l3_device": "br-trunk.120", "device": "br-trunk.120", "proto": "static",
+		  "ipv4-address": [ { "address": "192.168.120.1", "mask": 24 } ], "route": [] },
+		{ "interface": "port4", "up": true, "l3_device": "lan4", "device": "lan4", "proto": "none", "route": [] },
+		{ "interface": "office", "up": false, "device": "br-office", "proto": "static", "route": [] },
+		{ "interface": "loopback", "up": true, "l3_device": "lo", "device": "lo", "proto": "static",
+		  "ipv4-address": [ { "address": "127.0.0.1", "mask": 8 } ], "route": [] },
+		{ "interface": "wan", "up": true, "l3_device": "wan", "device": "wan", "proto": "dhcp", "metric": 0,
+		  "ipv4-address": [ { "address": "203.0.113.10", "mask": 24 } ],
+		  "route": [ { "target": "0.0.0.0", "mask": 0, "nexthop": "203.0.113.1" } ] },
+		{ "interface": "wan2", "up": true, "l3_device": "wan2", "device": "wan2", "proto": "static", "metric": 20,
+		  "ipv4-address": [ { "address": "198.51.100.2", "mask": 24 } ],
+		  "route": [ { "target": "0.0.0.0", "mask": 0, "nexthop": "198.51.100.1" } ] },
+		{ "interface": "wan3", "up": true, "l3_device": "wan3", "device": "wan3", "proto": "static",
+		  "ipv4-address": [ { "address": "192.0.2.2", "mask": 24 } ], "route": [] }
+	]
+}

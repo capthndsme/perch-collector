@@ -1,13 +1,18 @@
 #!/bin/sh /etc/rc.common
 # Perch Network Collector: UCI (/etc/config/perch-collector) → environment
-# variables of the daemon. Restarts when the capture or listen network comes
-# up so the capture device and the listen address are always current.
+# variables of the daemon. With one capture network it restarts when that
+# network or the listen network comes up, so the capture device and the
+# listen address are always current. With capture_networks the daemon
+# follows the networks itself: interface events only make it re-read them
+# (SIGHUP, `rescan`), without a restart.
 
 START=95
 STOP=10
 USE_PROCD=1
 PROG=/usr/bin/perch-collector
 CONF=perch-collector
+EXTRA_COMMANDS="rescan"
+EXTRA_HELP="	rescan	Re-read the networks now (capture_networks)"
 
 . /lib/functions/network.sh
 
@@ -73,6 +78,21 @@ append_wan() {
 	append_list "${dev:-$1}" "$2"
 }
 
+# capture_networks set: multi-interface capture.
+multi_capture() {
+	local nets
+	config_load "$CONF"
+	config_list_foreach main capture_networks append_list nets
+	[ -n "$nets" ]
+}
+
+rescan() {
+	local pid
+	for pid in $(pidof perch-collector); do
+		kill -HUP "$pid" 2>/dev/null
+	done
+}
+
 start_service() {
 	local enabled api_key mode snap promisc bpf dev listen gateway_macs subnets
 	local top_peers top_lan top_services top_dest top_unnamed flows idle partial
@@ -82,6 +102,7 @@ start_service() {
 	local portal portal_port portal_path portal_flush portal_mount
 	local capture_network config_access managed_configs config_allow_insecure config_confirm_max storage_path
 	local config_sign_key package_allow
+	local capture_networks capture_exclude capture_rescan routed_lan ndpi_module
 	local uci_dirty=0
 
 	config_load "$CONF"
@@ -118,7 +139,17 @@ start_service() {
 		uci -q commit "$CONF"
 	fi
 
-	dev="$(resolve_capture_device)"
+	config_list_foreach main capture_networks append_list capture_networks
+	config_list_foreach main capture_exclude append_list capture_exclude
+	config_get capture_rescan main capture_rescan '30'
+	config_get routed_lan main routed_lan 'auto'
+	config_get ndpi_module main ndpi_module 'shared'
+	if [ -n "$capture_networks" ]; then
+		# The daemon finds the devices (and the router's MACs) in netifd.
+		dev=""
+	else
+		dev="$(resolve_capture_device)"
+	fi
 	listen="$(resolve_listen)"
 	if [ -z "$listen" ]; then
 		logger -t perch-collector "listen network has no address yet; waiting for it to come up"
@@ -126,7 +157,7 @@ start_service() {
 	fi
 
 	config_list_foreach main gateway_mac append_list gateway_macs
-	if [ -z "$gateway_macs" ] && [ -r "/sys/class/net/$dev/address" ]; then
+	if [ -z "$gateway_macs" ] && [ -n "$dev" ] && [ -r "/sys/class/net/$dev/address" ]; then
 		# On the gateway itself every LAN↔WAN frame carries this MAC.
 		gateway_macs="$(cat "/sys/class/net/$dev/address")"
 	fi
@@ -171,6 +202,8 @@ start_service() {
 
 	# The config plane: what the controller may read of this router's UCI.
 	config_get capture_network main capture_network 'lan'
+	# With capture_networks the daemon reports its live captures instead.
+	[ -n "$capture_networks" ] && capture_network=""
 	config_get config_access main config_access 'none'
 	config_list_foreach main managed_config append_list managed_configs
 	config_get_bool config_allow_insecure main config_allow_insecure 0
@@ -184,6 +217,11 @@ start_service() {
 	procd_set_param command "$PROG"
 	procd_set_param env \
 		PERCH_COLLECTOR_INTERFACE="$dev" \
+		PERCH_COLLECTOR_CAPTURE_NETWORKS="$capture_networks" \
+		PERCH_COLLECTOR_CAPTURE_EXCLUDE="$capture_exclude" \
+		PERCH_COLLECTOR_CAPTURE_RESCAN="$capture_rescan" \
+		PERCH_COLLECTOR_ROUTED_LAN="$routed_lan" \
+		PERCH_COLLECTOR_NDPI_MODULE="$ndpi_module" \
 		PERCH_COLLECTOR_LISTEN="$listen" \
 		PERCH_COLLECTOR_API_KEY="$api_key" \
 		PERCH_COLLECTOR_CLASSIFICATION_MODE="$mode" \
@@ -235,7 +273,7 @@ start_service() {
 	procd_set_param stdout 1
 	procd_set_param stderr 1
 	procd_close_instance
-	logger -t perch-collector "starting on $dev, API on $listen ($mode)${server_url:+, controller $server_url}"
+	logger -t perch-collector "starting on ${dev:-networks $capture_networks}, API on $listen ($mode)${server_url:+, controller $server_url}"
 }
 
 # procd reloads the service when an allowlisted config is committed through
@@ -262,6 +300,11 @@ service_triggers() {
 			esac
 		done
 	fi
-	procd_add_interface_trigger "interface.*.up" "$capture" /etc/init.d/perch-collector reload
+	if multi_capture; then
+		# Any interface coming, going or changing: re-read the networks.
+		procd_add_raw_trigger "interface.*" 2000 /etc/init.d/perch-collector rescan
+	else
+		procd_add_interface_trigger "interface.*.up" "$capture" /etc/init.d/perch-collector reload
+	fi
 	[ "$listen" = "$capture" ] || procd_add_interface_trigger "interface.*.up" "$listen" /etc/init.d/perch-collector reload
 }

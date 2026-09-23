@@ -34,11 +34,13 @@ var (
 
 // configPlane builds the config plane when the collector runs on OpenWrt;
 // nil elsewhere (a collector on a server has no UCI to offer).
-func configPlane(cfg config.Config) *gwconfig.Plane {
+func configPlane(cfg config.Config, captured func() map[string]string) *gwconfig.Plane {
 	if !gateway.OnOpenWrt(hoststat.FS{}) {
 		return nil
 	}
-	p := gwconfig.New(planeOptions(cfg))
+	o := planeOptions(cfg)
+	o.CapturedNetworks = captured
+	p := gwconfig.New(o)
 	switch {
 	case p.Access() == gwconfig.AccessNone:
 		log.Printf("config plane: config_access none: the controller cannot read this router's configuration")

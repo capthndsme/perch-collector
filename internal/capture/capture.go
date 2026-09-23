@@ -1,9 +1,13 @@
 package capture
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
+	"sync"
+	"time"
 
 	"github.com/capthndsme/perch-collector/internal/aggregator"
 	"github.com/capthndsme/perch-collector/internal/classifier"
@@ -35,19 +39,41 @@ func SnapLen(configured int32, inspectsPayload bool) int32 {
 	return configured
 }
 
+// readTimeout bounds one blocking read, so Stop never waits on a quiet
+// interface for longer than this.
+const readTimeout = 250 * time.Millisecond
+
 // Engine captures packets from a network interface and feeds them to an Aggregator.
 type Engine struct {
 	handle     *pcap.Handle
 	agg        *aggregator.Aggregator
 	classifier classifier.Classifier
 	iface      string
-	done       chan struct{}
+	// network is the capture network's name ("lan"), stamped on every
+	// frame for per-network attribution; "" when not known.
+	network  string
+	done     chan struct{}
+	exited   chan struct{}
+	mu       sync.Mutex // guards started and stopped
+	started  bool
+	stopped  bool
+	stopOnce sync.Once
 }
 
-// New creates a new capture engine.
+// New creates a new capture engine for a device whose network is unknown.
 func New(iface string, snapLen int32, promisc bool, bpfFilter string, agg *aggregator.Aggregator, cls classifier.Classifier) (*Engine, error) {
-	// Open the pcap handle.
-	handle, err := pcap.OpenLive(iface, snapLen, promisc, pcap.BlockForever)
+	return NewForNetwork(iface, "", snapLen, promisc, bpfFilter, agg, cls)
+}
+
+// NewForNetwork creates a capture engine on iface whose frames belong to the
+// capture network named network (the UCI network, "" = unknown). Each
+// engine has its own classifier: a stateful one (nDPI) keeps a flow table
+// that a routed flow seen on two interfaces must not share.
+func NewForNetwork(iface, network string, snapLen int32, promisc bool, bpfFilter string, agg *aggregator.Aggregator, cls classifier.Classifier) (*Engine, error) {
+	// Open the pcap handle. A read timeout instead of BlockForever lets the
+	// loop see Stop between reads; Stop closes the handle only after the
+	// loop has left it.
+	handle, err := pcap.OpenLive(iface, snapLen, promisc, readTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("opening interface %q: %w", iface, err)
 	}
@@ -66,38 +92,95 @@ func New(iface string, snapLen int32, promisc bool, bpfFilter string, agg *aggre
 		agg:        agg,
 		classifier: cls,
 		iface:      iface,
+		network:    network,
 		done:       make(chan struct{}),
+		exited:     make(chan struct{}),
 	}, nil
 }
 
+// Dropped is the number of frames the kernel dropped for this capture since
+// it started (libpcap's ps_drop: the ring buffer was full), ok false when
+// the handle cannot say or the engine has stopped.
+func (e *Engine) Dropped() (uint64, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.stopped {
+		return 0, false
+	}
+	st, err := e.handle.Stats()
+	if err != nil || st == nil {
+		return 0, false
+	}
+	return uint64(st.PacketsDropped), true
+}
+
+// Interface is the device the engine captures on.
+func (e *Engine) Interface() string { return e.iface }
+
+// Network is the capture network the engine's frames are attributed to.
+func (e *Engine) Network() string { return e.network }
+
+// Classifier is the engine's own classifier.
+func (e *Engine) Classifier() classifier.Classifier { return e.classifier }
+
 // Run starts the packet capture loop. It blocks until Stop() is called.
 func (e *Engine) Run() {
-	log.Printf("capture: starting on interface %s", e.iface)
+	e.mu.Lock()
+	if e.started || e.stopped {
+		e.mu.Unlock()
+		return
+	}
+	e.started = true
+	e.mu.Unlock()
+	defer close(e.exited)
+	if e.network != "" {
+		log.Printf("capture: starting on interface %s (network %s)", e.iface, e.network)
+	} else {
+		log.Printf("capture: starting on interface %s", e.iface)
+	}
 
 	packetSource := gopacket.NewPacketSource(e.handle, e.handle.LinkType())
 	packetSource.NoCopy = true
 
+	// Consecutive read errors back off (a device that went away errors on
+	// every read until the reconciler stops its engine), and are logged
+	// once per streak rather than per read.
+	backoff := time.Duration(0)
 	for {
 		select {
 		case <-e.done:
-			log.Println("capture: stopped")
+			log.Printf("capture: stopped on %s", e.iface)
 			return
 		default:
 		}
 
 		packet, err := packetSource.NextPacket()
 		if err != nil {
-			// Check if we were stopped.
+			if errors.Is(err, pcap.NextErrorTimeoutExpired) {
+				continue
+			}
 			select {
 			case <-e.done:
-				log.Println("capture: stopped")
+				log.Printf("capture: stopped on %s", e.iface)
 				return
 			default:
 			}
-			// Log non-fatal errors and continue.
-			log.Printf("capture: error reading packet: %v", err)
+			if backoff == 0 {
+				log.Printf("capture: error reading packet on %s: %v", e.iface, err)
+				backoff = 50 * time.Millisecond
+			} else if backoff < 5*time.Second {
+				backoff *= 2
+			}
+			if err == io.EOF {
+				backoff = 5 * time.Second
+			}
+			select {
+			case <-e.done:
+			case <-time.After(backoff):
+			}
 			continue
 		}
+		backoff = 0
 
 		e.processPacket(packet)
 	}
@@ -160,6 +243,7 @@ func (e *Engine) processPacket(packet gopacket.Packet) {
 			Category:     result.Category,
 			ToServer:     result.ToServer,
 			NameExpected: result.NameExpected,
+			Network:      e.network,
 		})
 	}
 }
@@ -189,14 +273,19 @@ func networkBytes(header, payload []byte) []byte {
 	return out
 }
 
-// Stop signals the capture loop to exit and closes the pcap handle.
+// Stop signals the capture loop to exit, waits for it (at most one read
+// timeout) and closes the pcap handle. Safe to call more than once, and
+// before or without Run.
 func (e *Engine) Stop() {
-	select {
-	case <-e.done:
-		// Already stopped.
-		return
-	default:
+	e.stopOnce.Do(func() {
+		e.mu.Lock()
+		e.stopped = true
+		started := e.started
+		e.mu.Unlock()
 		close(e.done)
+		if started {
+			<-e.exited
+		}
 		e.handle.Close()
-	}
+	})
 }

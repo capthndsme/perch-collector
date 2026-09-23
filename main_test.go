@@ -262,3 +262,18 @@ func TestDHCPCommand(t *testing.T) {
 		t.Fatalf("an argument must be refused, exit %d", code)
 	}
 }
+
+func TestFlowsPerEngine(t *testing.T) {
+	cases := []struct{ total, n, want int }{
+		{50000, 1, 50000},
+		{50000, 6, 8333},
+		{50000, 20, ndpiFlowsFloor},
+		{2000, 3, 2000}, // never more than the configured total
+		{50000, 0, 50000},
+	}
+	for _, c := range cases {
+		if got := flowsPerEngine(c.total, c.n); got != c.want {
+			t.Errorf("flowsPerEngine(%d, %d) = %d, want %d", c.total, c.n, got, c.want)
+		}
+	}
+}

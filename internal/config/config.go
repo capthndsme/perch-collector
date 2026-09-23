@@ -19,6 +19,38 @@ type Config struct {
 	// default route. Use "any" to capture on all interfaces.
 	Interface string `yaml:"interface"`
 
+	// CaptureNetworks turns on multi-interface capture (gateway plan 1
+	// section 8.3): UCI network names, device names, or "auto" (every
+	// LAN-side network netifd has: up, proto static or none, not a WAN).
+	// The daemon captures on each network's L3 device with an engine and
+	// classifier of its own, re-reads netifd every CaptureRescan seconds
+	// and on SIGHUP, and adds or removes engines without a restart. Empty
+	// (the default) = the single Interface, exactly as before.
+	CaptureNetworks []string `yaml:"capture_networks"`
+
+	// CaptureExclude removes networks (or devices) from CaptureNetworks,
+	// e.g. a guest network that must not be captured.
+	CaptureExclude []string `yaml:"capture_exclude"`
+
+	// CaptureRescan is how often, in seconds, netifd is re-read for
+	// networks that appeared or went away. Clamped to 5..3600.
+	CaptureRescan int `yaml:"capture_rescan"`
+
+	// RoutedLAN is the scope rule (owner decision 8): "on" counts traffic
+	// routed between two local networks, and traffic to the router's own
+	// LAN addresses, as LAN instead of WAN; "off" keeps the original rule
+	// (everything through the router is WAN). "auto" (the default) is on
+	// with CaptureNetworks and off with the single Interface, so an
+	// existing single-interface collector keeps its WAN/LAN split.
+	RoutedLAN string `yaml:"routed_lan"`
+
+	// NDPIModule is how the captures of CaptureNetworks use nDPI: "shared"
+	// (the default) runs one detection module (its protocol tables, about
+	// 12 MB) for every capture, each still with a classifier and flow
+	// table of its own; "per_network" gives every capture a module of its
+	// own (about 12 MB more per network, nDPI work spread over the CPUs).
+	NDPIModule string `yaml:"ndpi_module"`
+
 	// BPFFilter is a BPF filter expression applied to the capture.
 	BPFFilter string `yaml:"bpf_filter"`
 
@@ -288,6 +320,19 @@ var ObservePartNames = []string{"neighbors", "interfaces", "upnp", "mwan3", "res
 // is kept when controller_address_cache is not set.
 const DefaultControllerAddressCache = "/var/lib/perch-collector/controller-address"
 
+// NDPIModule values.
+const (
+	NDPIModuleShared     = "shared"
+	NDPIModulePerNetwork = "per_network"
+)
+
+// Capture rescan bounds and default, in seconds.
+const (
+	CaptureRescanMin     = 5
+	CaptureRescanMax     = 3600
+	CaptureRescanDefault = 30
+)
+
 // DHCP lease refresh bounds and default, in seconds. The controller treats a
 // router that has not sent its leases for twice the maximum as gone.
 const (
@@ -320,6 +365,9 @@ const LegacyInstanceIDFile = "/var/lib/go-collector/instance-id"
 func Defaults() Config {
 	return Config{
 		Interface:                   "",
+		CaptureRescan:               CaptureRescanDefault,
+		RoutedLAN:                   GatewayStatsAuto,
+		NDPIModule:                  NDPIModuleShared,
 		BPFFilter:                   "",
 		ClassificationMode:          "port",
 		NDPIMaxFlows:                50000,
@@ -427,6 +475,15 @@ func load(configPath string, cli cliOverrides) (Config, error) {
 	// the new one is unset, and is listed in cfg.Deprecated.
 	env := &envReader{}
 	env.str("INTERFACE", &cfg.Interface)
+	if list, ok := env.list("CAPTURE_NETWORKS"); ok {
+		cfg.CaptureNetworks = list
+	}
+	if list, ok := env.list("CAPTURE_EXCLUDE"); ok {
+		cfg.CaptureExclude = list
+	}
+	env.integer("CAPTURE_RESCAN", func(n int) { cfg.CaptureRescan = n })
+	env.str("ROUTED_LAN", &cfg.RoutedLAN)
+	env.str("NDPI_MODULE", &cfg.NDPIModule)
 	env.str("LISTEN", &cfg.Listen)
 	env.str("API_KEY", &cfg.APIKey)
 	env.str("BPF_FILTER", &cfg.BPFFilter)
@@ -623,6 +680,35 @@ func (c *Config) Validate() error {
 	if c.ServerCAFile != "" && c.ServerURL != "" && !strings.HasPrefix(c.ServerURL, "https://") {
 		fmt.Fprintf(os.Stderr, "WARNING: server_ca_file has no effect with an http:// server_url (%s).\n", c.ServerURL)
 	}
+	c.CaptureNetworks = cleanList(c.CaptureNetworks)
+	for i, n := range c.CaptureNetworks {
+		if strings.EqualFold(n, "auto") {
+			c.CaptureNetworks[i] = "auto"
+		}
+	}
+	c.CaptureExclude = cleanList(c.CaptureExclude)
+	if c.CaptureRescan == 0 {
+		c.CaptureRescan = CaptureRescanDefault
+	}
+	if c.CaptureRescan < CaptureRescanMin {
+		c.CaptureRescan = CaptureRescanMin
+	}
+	if c.CaptureRescan > CaptureRescanMax {
+		c.CaptureRescan = CaptureRescanMax
+	}
+	rl, ok := normalizeAutoOnOff(c.RoutedLAN)
+	if !ok {
+		return fmt.Errorf("routed_lan must be auto, on or off, got %q", c.RoutedLAN)
+	}
+	c.RoutedLAN = rl
+	switch m := strings.ToLower(strings.TrimSpace(c.NDPIModule)); m {
+	case "", NDPIModuleShared:
+		c.NDPIModule = NDPIModuleShared
+	case NDPIModulePerNetwork, "per-network", "separate":
+		c.NDPIModule = NDPIModulePerNetwork
+	default:
+		return fmt.Errorf("ndpi_module must be shared or per_network, got %q", c.NDPIModule)
+	}
 	gs, ok := normalizeAutoOnOff(c.GatewayStats)
 	if !ok {
 		return fmt.Errorf("gateway_stats must be auto, on or off, got %q", c.GatewayStats)
@@ -684,6 +770,21 @@ func (c Config) EffectiveTransport() string {
 		return TransportWebSocket
 	}
 	return TransportPoll
+}
+
+// MultiCapture reports whether the collector captures on several networks
+// (CaptureNetworks set) instead of the single Interface.
+func (c Config) MultiCapture() bool { return len(c.CaptureNetworks) > 0 }
+
+// RoutedLANEnabled resolves RoutedLAN: "auto" is on with multi-capture.
+func (c Config) RoutedLANEnabled() bool {
+	switch c.RoutedLAN {
+	case GatewayStatsOn:
+		return true
+	case GatewayStatsOff:
+		return false
+	}
+	return c.MultiCapture()
 }
 
 // GatewayStatsEnabled resolves GatewayStats; onOpenWrt is what "auto"

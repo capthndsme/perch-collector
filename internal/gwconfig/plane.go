@@ -96,6 +96,10 @@ type Options struct {
 	// CaptureNetwork and CaptureDevice describe what the collector captures.
 	CaptureNetwork string
 	CaptureDevice  string
+	// CapturedNetworks, when set, is the live capture of a multi-network
+	// collector (capture_networks): device → UCI network. It replaces the
+	// two fields above in gateway.capabilities.
+	CapturedNetworks func() map[string]string
 
 	// Root prefixes every path ("" = /; tests).
 	Root string

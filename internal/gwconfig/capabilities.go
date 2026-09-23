@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/capthndsme/perch-agentkit/openwrt/pkgdb"
@@ -128,9 +129,7 @@ func (p *Plane) Capabilities(ctx context.Context, challenge string) *Capabilitie
 		c.Uncommitted = p.filterReadable(pending.Uncommitted)
 		c.LuciPending = pending.LuciPending
 	}
-	if p.o.CaptureDevice != "" {
-		c.Capture.Networks = append(c.Capture.Networks, CaptureNetwork{Network: p.o.CaptureNetwork, Device: p.o.CaptureDevice})
-	}
+	c.Capture.Networks = p.captureNetworks()
 	if mounts, err := pkgdb.Mounts(p.o.Root); err == nil {
 		fp := pkgdb.FlashPath(mounts)
 		if s, err := pkgdb.FreeSpace(rooted(p.o.Root, fp)); err == nil {
@@ -187,6 +186,23 @@ func shellVars(path string) map[string]string {
 			continue
 		}
 		out[key] = strings.Trim(value, `"'`)
+	}
+	return out
+}
+
+// captureNetworks lists what the collector captures, sorted by device: the
+// live multi-network capture when there is one, else the single interface.
+func (p *Plane) captureNetworks() []CaptureNetwork {
+	out := []CaptureNetwork{}
+	if p.o.CapturedNetworks != nil {
+		for dev, network := range p.o.CapturedNetworks() {
+			out = append(out, CaptureNetwork{Network: network, Device: dev})
+		}
+		sort.Slice(out, func(i, j int) bool { return out[i].Device < out[j].Device })
+		return out
+	}
+	if p.o.CaptureDevice != "" {
+		out = append(out, CaptureNetwork{Network: p.o.CaptureNetwork, Device: p.o.CaptureDevice})
 	}
 	return out
 }

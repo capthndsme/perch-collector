@@ -21,7 +21,6 @@ import (
 	"github.com/capthndsme/perch-collector/internal/aggregator"
 	"github.com/capthndsme/perch-collector/internal/announce"
 	"github.com/capthndsme/perch-collector/internal/api"
-	"github.com/capthndsme/perch-collector/internal/capture"
 	"github.com/capthndsme/perch-collector/internal/classifier"
 	"github.com/capthndsme/perch-collector/internal/config"
 	"github.com/capthndsme/perch-collector/internal/controller"
@@ -84,7 +83,7 @@ func main() {
 		log.Printf("config: %s is deprecated; use %s%s", name, config.EnvPrefix, strings.TrimPrefix(name, config.LegacyEnvPrefix))
 	}
 
-	if cfg.Interface == "" {
+	if cfg.Interface == "" && !cfg.MultiCapture() {
 		iface, err := netutil.DetectDefaultInterface()
 		if err != nil {
 			log.Fatalf("interface: auto-detection failed: %v; set interface in collector.yaml or PERCH_COLLECTOR_INTERFACE", err)
@@ -93,8 +92,16 @@ func main() {
 		cfg.Interface = iface
 	}
 
-	log.Printf("config: interface=%s listen=%s promisc=%v snap_len=%d",
-		cfg.Interface, cfg.Listen, cfg.Promisc, cfg.SnapLen)
+	if cfg.MultiCapture() {
+		if cfg.Interface != "" {
+			log.Printf("config: capture_networks is set: interface %s is not captured on its own (it only seeds the instance id)", cfg.Interface)
+		}
+		log.Printf("config: capture_networks=%s listen=%s promisc=%v snap_len=%d",
+			strings.Join(cfg.CaptureNetworks, ","), cfg.Listen, cfg.Promisc, cfg.SnapLen)
+	} else {
+		log.Printf("config: interface=%s listen=%s promisc=%v snap_len=%d",
+			cfg.Interface, cfg.Listen, cfg.Promisc, cfg.SnapLen)
+	}
 	if cfg.FlushFile != "" {
 		log.Printf("config: flush_file=%s flush_interval=%ds", cfg.FlushFile, cfg.FlushInterval)
 	}
@@ -107,11 +114,23 @@ func main() {
 
 	// Resolve gateway MACs: union of explicit YAML/env config and (when the
 	// config list is empty) auto-detection of the default-route gateway.
-	gatewayMACs := resolveGatewayMACs(cfg)
+	// With capture_networks the router's own MACs and networks come from
+	// netifd (the reconciler), on top of the configured ones.
+	var gatewayMACs []net.HardwareAddr
+	if cfg.MultiCapture() {
+		gatewayMACs = configuredGatewayMACs(cfg)
+	} else {
+		gatewayMACs = resolveGatewayMACs(cfg)
+	}
 
 	// Resolve local subnets: auto-detected from the interface, plus any
 	// explicit CIDRs supplied via YAML.
-	localSubnets := resolveLocalSubnets(cfg)
+	var localSubnets []*net.IPNet
+	if cfg.MultiCapture() {
+		localSubnets = configuredSubnets(cfg)
+	} else {
+		localSubnets = resolveLocalSubnets(cfg)
+	}
 
 	log.Printf("config: top_peers_count=%d top_lan_peers_count=%d top_services_count=%d top_destinations_count=%d",
 		cfg.TopPeersCount, cfg.TopLANPeersCount, cfg.TopServicesCount, cfg.TopDestinationsCount)
@@ -122,46 +141,19 @@ func main() {
 	agg.SetTopDestinationsCount(cfg.TopDestinationsCount)
 	agg.SetTopUnnamedDestinationsCount(cfg.TopUnnamedDestinationsCount)
 
-	// Initialize the protocol classifier. nDPI is opt-in (requires the
-	// `ndpi` build tag and libndpi at runtime); on any failure we
-	// degrade to the always-available port-based classifier so the
-	// collector never crashes on a misconfigured nDPI install.
-	var cls classifier.Classifier
-	inspectsPayload := false
-	switch cfg.ClassificationMode {
-	case "ndpi":
-		classifier.SetNDPIPartialExtraPackets(cfg.NDPIPartialExtraPackets)
-		ndpiCls, err := classifier.NewNDPIClassifier(cfg.NDPIMaxFlows, cfg.NDPIFlowIdleSeconds)
-		if err != nil {
-			log.Printf("classifier: nDPI requested but unavailable (%v); falling back to port-based", err)
-			cls = classifier.NewPortClassifier()
-		} else {
-			log.Printf("classifier: using nDPI (max_flows=%d idle=%ds, NDPIAvailable=%v)",
-				cfg.NDPIMaxFlows, cfg.NDPIFlowIdleSeconds, classifier.NDPIAvailable)
-			cls = ndpiCls
-			inspectsPayload = true
+	// Start the capture: one engine on the interface, or one per LAN-side
+	// network (capture_networks), each with a classifier of its own. nDPI
+	// is opt-in (requires the `ndpi` build tag and libndpi at runtime); on
+	// any failure it degrades to the always-available port-based
+	// classifier so the collector never crashes on a misconfigured nDPI
+	// install.
+	captures := startCapture(cfg, agg, gatewayMACs, localSubnets)
+	if cfg.MultiCapture() && cfg.Interface == "" {
+		// The instance id falls back to a MAC: the first captured device's.
+		if first := strings.Split(captures.CaptureInterface("")(), ",")[0]; first != "none" && !strings.HasPrefix(first, "+") {
+			cfg.Interface = first
 		}
-	case "port":
-		log.Println("classifier: using stateless port-based classification")
-		cls = classifier.NewPortClassifier()
-	default:
-		log.Printf("classifier: unknown mode %q, falling back to port-based", cfg.ClassificationMode)
-		cls = classifier.NewPortClassifier()
 	}
-
-	// Initialize the capture engine. nDPI needs whole packets (a truncated
-	// TLS ClientHello loses its server name), whatever snap_len says.
-	snapLen := capture.SnapLen(cfg.SnapLen, inspectsPayload)
-	if snapLen != cfg.SnapLen {
-		log.Printf("capture: snap_len %d raised to %d: nDPI inspects whole packets", cfg.SnapLen, snapLen)
-	}
-	captureEngine, err := capture.New(cfg.Interface, snapLen, cfg.Promisc, cfg.BPFFilter, agg, cls)
-	if err != nil {
-		log.Fatalf("capture: %v", err)
-	}
-
-	// Start capture in a goroutine.
-	go captureEngine.Run()
 
 	// Start the flusher if configured.
 	var flush *flusher.Flusher
@@ -181,7 +173,7 @@ func main() {
 	var gatewayStats func() *gateway.Stats
 	gatewayOn := cfg.GatewayStatsEnabled(gateway.OnOpenWrt(hoststat.FS{}))
 	if gatewayOn {
-		reader := gateway.Reader{WANInterfaces: cfg.WANInterfaces}
+		reader := gateway.Reader{WANInterfaces: cfg.WANInterfaces, Networks: captures.Networks()}
 		if cfg.PortsEnabled(gatewayOn) {
 			reader.Ports = gateway.NewPorts(hoststat.FS{})
 		}
@@ -191,6 +183,9 @@ func main() {
 			log.Printf("gateway: reporting router stats; WAN interfaces %s (configured)", strings.Join(cfg.WANInterfaces, ","))
 		} else {
 			log.Printf("gateway: reporting router stats; WAN interfaces = those holding a default route (now: %s)", describeWAN(first))
+		}
+		if first.Networks != nil {
+			log.Printf("gateway: reporting networks: %s", describeNetworks(first))
 		}
 		if reader.Ports != nil {
 			log.Printf("gateway: reporting ports: %s", describePorts(first))
@@ -226,7 +221,7 @@ func main() {
 	)
 	switch transport {
 	case config.TransportWebSocket:
-		ctl = buildController(cfg, agg, cls, gatewayStats, gw)
+		ctl = buildController(cfg, agg, captures, gatewayStats, gw)
 	case config.TransportPoll:
 		ann = buildAnnouncer(cfg)
 	}
@@ -234,8 +229,8 @@ func main() {
 	// Start the HTTP API server. The protocol → category table is a
 	// property of the classifier build, so it is exported once here.
 	apiServer := api.New(cfg.Listen, agg, cfg.APIKey, cfg.Interface, version)
-	if lister, ok := cls.(classifier.CategoryLister); ok {
-		categories := lister.ProtocolCategories()
+	apiServer.SetCaptureInterface(captures.CaptureInterface(cfg.Interface))
+	if categories := captures.categories; len(categories) > 0 {
 		apiServer.SetProtocolCategories(categories)
 		log.Printf("classifier: exporting %d protocol categories at /api/v1/protocols", len(categories))
 	}
@@ -276,17 +271,25 @@ func main() {
 	}
 
 	// SIGHUP: re-hash the router's configs now (procd's reload trigger).
+	// signal.Notify delivers it to this watcher and to the loop below.
 	watchReloadSignal()
 
 	// Wait for shutdown signal.
+	// SIGHUP also re-reads the router's networks (multi-capture); it never
+	// stops the daemon.
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	sig := <-sigCh
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	var sig os.Signal
+	for sig = range sigCh {
+		if sig != syscall.SIGHUP {
+			break
+		}
+		captures.Rescan()
+	}
 	log.Printf("received signal %s, shutting down", sig)
 
 	// Graceful shutdown in order.
-	captureEngine.Stop()
-	cls.Close()
+	captures.Stop()
 
 	if flush != nil {
 		flush.Stop()
@@ -361,7 +364,7 @@ func buildAnnouncer(cfg config.Config) *announce.Announcer {
 
 // buildController prepares the WebSocket client (transport websocket). The
 // socket carries everything the controller would otherwise poll.
-func buildController(cfg config.Config, agg *aggregator.Aggregator, cls classifier.Classifier, gatewayStats func() *gateway.Stats, gw gatewayFeatures) *controller.Client {
+func buildController(cfg config.Config, agg *aggregator.Aggregator, captures *captureSet, gatewayStats func() *gateway.Stats, gw gatewayFeatures) *controller.Client {
 	instanceID := resolveInstanceID(cfg)
 	if instanceID == "" {
 		log.Fatalf("controller: no usable instance id; cannot connect to %s", cfg.ServerURL)
@@ -374,29 +377,29 @@ func buildController(cfg config.Config, agg *aggregator.Aggregator, cls classifi
 	if gw.observer != nil {
 		source.Observe = gw.observer
 	}
-	if lister, ok := cls.(classifier.CategoryLister); ok {
-		categories := lister.ProtocolCategories()
+	if categories := captures.categories; len(categories) > 0 {
 		source.Protocols = func() []classifier.ProtocolCategory { return categories }
 	}
 	ctl, err := controller.New(controller.Options{
-		ServerURL:        cfg.ServerURL,
-		InstanceID:       instanceID,
-		APIKey:           cfg.APIKey,
-		SendAPIKey:       cfg.AnnounceAPIKey,
-		Hostname:         hostname(),
-		Version:          version,
-		CaptureInterface: cfg.Interface,
-		Listen:           cfg.Listen,
-		TLS:              link.TLSOptions{Insecure: cfg.AnnounceTLSInsecure, CAFile: cfg.ServerCAFile},
-		System:           controller.SystemInfo(hoststat.FS{}, runtime.GOARCH),
-		Source:           source,
-		DHCPRefresh:      time.Duration(cfg.DHCPLeasesRefresh) * time.Second,
-		ObserveRefresh:   time.Duration(cfg.ObserveRefresh) * time.Second,
-		Conntrack:        gw.conntrack,
-		Portal:           gw.portal,
-		Backup:           gw.backup,
-		AddressCache:     cfg.ControllerAddressCache,
-		Config:           configPlane(cfg),
+		ServerURL:            cfg.ServerURL,
+		InstanceID:           instanceID,
+		APIKey:               cfg.APIKey,
+		SendAPIKey:           cfg.AnnounceAPIKey,
+		Hostname:             hostname(),
+		Version:              version,
+		CaptureInterface:     cfg.Interface,
+		CaptureInterfaceFunc: captures.CaptureInterface(cfg.Interface),
+		Listen:               cfg.Listen,
+		TLS:                  link.TLSOptions{Insecure: cfg.AnnounceTLSInsecure, CAFile: cfg.ServerCAFile},
+		System:               controller.SystemInfo(hoststat.FS{}, runtime.GOARCH),
+		Source:               source,
+		DHCPRefresh:          time.Duration(cfg.DHCPLeasesRefresh) * time.Second,
+		ObserveRefresh:       time.Duration(cfg.ObserveRefresh) * time.Second,
+		Conntrack:            gw.conntrack,
+		Portal:               gw.portal,
+		Backup:               gw.backup,
+		AddressCache:         cfg.ControllerAddressCache,
+		Config:               configPlane(cfg, captures.Captured()),
 	})
 	if err != nil {
 		log.Fatalf("controller: %v", err)
@@ -436,6 +439,28 @@ func describeWAN(s *gateway.Stats) string {
 		names[i] = w.Name
 	}
 	return strings.Join(names, ",")
+}
+
+// describeNetworks renders the networks of one gateway report for a log line.
+func describeNetworks(s *gateway.Stats) string {
+	if s == nil || s.Networks == nil {
+		return "not reported"
+	}
+	if len(*s.Networks) == 0 {
+		return "none"
+	}
+	var parts []string
+	for _, n := range *s.Networks {
+		p := n.Name
+		if n.Device != "" {
+			p += " (" + n.Device + ")"
+		}
+		if n.Captured {
+			p += " captured"
+		}
+		parts = append(parts, p)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // describePorts renders the ports of one gateway report for a log line.
@@ -554,6 +579,26 @@ func resolveGatewayMACs(cfg config.Config) []net.HardwareAddr {
 		}
 		log.Printf("gateway: auto-detected MAC %s on %s", mac, cfg.Interface)
 		out = append(out, mac)
+	}
+	return out
+}
+
+// configuredGatewayMACs are the gateway_macs of the configuration alone.
+func configuredGatewayMACs(cfg config.Config) []net.HardwareAddr {
+	var out []net.HardwareAddr
+	for _, s := range cfg.GatewayMACs {
+		if mac, err := net.ParseMAC(s); err == nil {
+			out = append(out, mac)
+		}
+	}
+	return out
+}
+
+// configuredSubnets are the local_subnets of the configuration alone.
+func configuredSubnets(cfg config.Config) []*net.IPNet {
+	out, err := netutil.ParseCIDRs(cfg.LocalSubnets)
+	if err != nil {
+		log.Fatalf("config: %v", err)
 	}
 	return out
 }

@@ -36,6 +36,11 @@ type Interface struct {
 	// Error is netifd's first error code for the interface, if any
 	// ("NO_DEVICE", …).
 	Error string `json:"error,omitempty"`
+	// IPv6Assigned are the prefixes netifd assigned to this (LAN)
+	// interface from a delegated prefix (ipv6-prefix-assignment), as
+	// prefix/len. Not on the wire of the interfaces part (it predates
+	// them); the multi-capture reconciler counts them as local.
+	IPv6Assigned []string `json:"-"`
 }
 
 // MaxInterfaces caps the interfaces part.
@@ -66,6 +71,10 @@ func ParseInterfaceDump(data []byte) ([]Interface, bool) {
 				Mask    int    `json:"mask"`
 				Nexthop string `json:"nexthop"`
 			} `json:"route"`
+			Assign []struct {
+				Address string `json:"address"`
+				Mask    int    `json:"mask"`
+			} `json:"ipv6-prefix-assignment"`
 			DNS    []string `json:"dns-server"`
 			Errors []struct {
 				Code string `json:"code"`
@@ -97,6 +106,11 @@ func ParseInterfaceDump(data []byte) ([]Interface, bool) {
 		for _, a := range it.IPv6 {
 			if p, ok := prefixString(a.Address, a.Mask, true); ok && len(i.IPv6) < 32 {
 				i.IPv6 = append(i.IPv6, p)
+			}
+		}
+		for _, a := range it.Assign {
+			if p, ok := prefixString(a.Address, a.Mask, true); ok && len(i.IPv6Assigned) < 32 {
+				i.IPv6Assigned = append(i.IPv6Assigned, p)
 			}
 		}
 		for _, r := range it.Route {
@@ -239,3 +253,17 @@ func (r *InterfaceReader) Subnets() []Subnet {
 	list, _ := r.Read()
 	return Subnets(list)
 }
+
+// Interfaces asks netifd for its interfaces right now (`ubus call
+// network.interface dump`), uncached; ok is false when netifd did not
+// answer or the answer did not parse.
+func (e *Env) Interfaces() ([]Interface, bool) {
+	out, err := e.run("ubus", "call", "network.interface", "dump")
+	if err != nil {
+		return nil, false
+	}
+	return ParseInterfaceDump(out)
+}
+
+// UCI runs `uci -q show <pkg>` and parses it; ok is false when uci failed.
+func (e *Env) UCI(pkg string) ([]UCISection, bool) { return e.uciShow(pkg) }
