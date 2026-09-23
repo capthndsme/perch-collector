@@ -2,6 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -30,13 +34,26 @@ import (
 var version = "dev"
 
 func main() {
+	// A subcommand is the first argument and runs before anything else:
+	// no configuration, no capture, no listener, no network.
+	if len(os.Args) > 1 && os.Args[1] == "ports" {
+		os.Exit(portsCommand(os.Args[2:], os.Stdout, os.Stderr, hoststat.FS{}))
+	}
+
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
+	flag.Usage = usage
 	log.Printf("perch-collector %s starting", version)
 
 	// Load configuration.
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("config: %v", err)
+	}
+	// The daemon takes flags only. Refuse anything else before capture
+	// starts, so a subcommand typed after a flag (`-config x ports`) or
+	// misspelt cannot start a second collector instead.
+	if args := flag.Args(); len(args) > 0 {
+		log.Fatalf("unexpected argument %q: the daemon takes flags only, and a subcommand goes first (perch-collector ports)", args[0])
 	}
 	for _, name := range cfg.Deprecated {
 		log.Printf("config: %s is deprecated; use %s%s", name, config.EnvPrefix, strings.TrimPrefix(name, config.LegacyEnvPrefix))
@@ -126,16 +143,30 @@ func main() {
 	transport := cfg.EffectiveTransport()
 
 	// Gateway stats: the router's own health, reported with the traffic
-	// when the collector runs on the router (gateway_stats auto = OpenWrt).
+	// when the collector runs on the router (gateway_stats auto = OpenWrt),
+	// and with them the router's Ethernet ports (ports auto = with gateway
+	// stats): this collector is then the Gateway agent.
 	var gatewayStats func() *gateway.Stats
-	if cfg.GatewayStatsEnabled(gateway.OnOpenWrt(hoststat.FS{})) {
+	gatewayOn := cfg.GatewayStatsEnabled(gateway.OnOpenWrt(hoststat.FS{}))
+	if gatewayOn {
 		reader := gateway.Reader{WANInterfaces: cfg.WANInterfaces}
+		if cfg.PortsEnabled(gatewayOn) {
+			reader.Ports = gateway.NewPorts(hoststat.FS{})
+		}
 		gatewayStats = reader.Read
+		first := reader.Read()
 		if len(cfg.WANInterfaces) > 0 {
 			log.Printf("gateway: reporting router stats; WAN interfaces %s (configured)", strings.Join(cfg.WANInterfaces, ","))
 		} else {
-			log.Printf("gateway: reporting router stats; WAN interfaces = those holding a default route (now: %s)", describeWAN(reader.Read()))
+			log.Printf("gateway: reporting router stats; WAN interfaces = those holding a default route (now: %s)", describeWAN(first))
 		}
+		if reader.Ports != nil {
+			log.Printf("gateway: reporting ports: %s", describePorts(first))
+		} else {
+			log.Printf("gateway: not reporting ports (ports %s)", cfg.Ports)
+		}
+	} else if cfg.Ports == config.PortsOn {
+		log.Printf("config: ports on has no effect with gateway stats off: the ports travel in the gateway report")
 	}
 
 	// Build the announcer or the controller client (when the daemon has a
@@ -341,6 +372,75 @@ func describeWAN(s *gateway.Stats) string {
 		names[i] = w.Name
 	}
 	return strings.Join(names, ",")
+}
+
+// describePorts renders the ports of one gateway report for a log line.
+func describePorts(s *gateway.Stats) string {
+	if s == nil || s.Ports == nil {
+		return "cannot list /sys/class/net; left out until it can be"
+	}
+	ports := *s.Ports
+	if len(ports) == 0 {
+		return "none found"
+	}
+	names := make([]string, len(ports))
+	for i, p := range ports {
+		names[i] = p.Name
+		if p.Role != "" {
+			names[i] += " (" + p.Role + ")"
+		}
+	}
+	return strings.Join(names, ", ")
+}
+
+// usage is the -h text: the daemon's flags and the subcommand.
+func usage() {
+	out := flag.CommandLine.Output()
+	fmt.Fprintf(out, "perch-collector %s: Perch Network Collector\n\n"+
+		"Usage:\n"+
+		"  perch-collector [flags]   run the collector (every setting: CONFIG.md)\n"+
+		"  perch-collector ports     print the Ethernet ports the Gateway agent reports, as JSON\n\n"+
+		"Flags:\n", version)
+	flag.PrintDefaults()
+}
+
+const portsUsage = `usage: perch-collector ports
+
+Prints the host's Ethernet ports as the gateway report carries them, as
+JSON, and exits. It reads /sys/class/net, /etc/board.json and the routing
+table, and nothing else: no configuration, no capture, no listener, no
+network. The WAN interfaces (role "wan") are those holding a default route;
+a configured wan_interfaces list is not known here.
+`
+
+// portsCommand is `perch-collector ports`, for a read-only look at a router.
+// It builds the ports part of a gateway report under fs and prints it. The
+// configuration is never read, so the result is what the report carries with
+// the defaults: WAN interfaces from the default routes, and the ports
+// whatever the ports and gateway_stats settings say. Exit status 1 when
+// /sys/class/net cannot be listed, 2 on a usage error.
+func portsCommand(args []string, stdout, stderr io.Writer, fs hoststat.FS) int {
+	if len(args) > 0 {
+		switch args[0] {
+		case "-h", "-help", "--help", "help":
+			fmt.Fprint(stdout, portsUsage)
+			return 0
+		}
+		fmt.Fprintf(stderr, "unexpected argument %q\n\n%s", args[0], portsUsage)
+		return 2
+	}
+	ports := gateway.Reader{FS: fs, Ports: gateway.NewPorts(fs)}.ReadPorts()
+	if ports == nil {
+		fmt.Fprintln(stderr, "perch-collector ports: cannot list /sys/class/net")
+		return 1
+	}
+	enc := json.NewEncoder(stdout)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(ports); err != nil {
+		fmt.Fprintf(stderr, "perch-collector ports: %v\n", err)
+		return 1
+	}
+	return 0
 }
 
 // resolveGatewayMACs returns the deduplicated set of MAC addresses to treat

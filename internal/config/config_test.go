@@ -476,7 +476,7 @@ func TestInstanceIDPath(t *testing.T) {
 
 func TestDefaultsTransport(t *testing.T) {
 	cfg := Defaults()
-	if cfg.Transport != TransportAuto || cfg.GatewayStats != GatewayStatsAuto || cfg.WANInterfaces != nil || cfg.ServerCAFile != "" {
+	if cfg.Transport != TransportAuto || cfg.GatewayStats != GatewayStatsAuto || cfg.WANInterfaces != nil || cfg.ServerCAFile != "" || cfg.Ports != PortsAuto {
 		t.Errorf("defaults: %+v", cfg)
 	}
 	if cfg.InstanceIDFile != "/var/lib/perch-collector/instance-id" {
@@ -493,7 +493,80 @@ func TestExampleConfigLoads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("collector.example.yaml: %v", err)
 	}
-	if cfg.Transport != TransportAuto || cfg.GatewayStats != GatewayStatsAuto || cfg.InstanceIDFile != DefaultInstanceIDFile {
-		t.Errorf("example: transport=%q gateway_stats=%q instance_id_file=%q", cfg.Transport, cfg.GatewayStats, cfg.InstanceIDFile)
+	if cfg.Transport != TransportAuto || cfg.GatewayStats != GatewayStatsAuto || cfg.InstanceIDFile != DefaultInstanceIDFile || cfg.Ports != PortsAuto {
+		t.Errorf("example: transport=%q gateway_stats=%q instance_id_file=%q ports=%q", cfg.Transport, cfg.GatewayStats, cfg.InstanceIDFile, cfg.Ports)
+	}
+}
+
+// ports: auto | on | off, with the spellings gateway_stats takes (UCI's '1'
+// and '0' included), and what each means with gateway stats on and off.
+func TestPortsSetting(t *testing.T) {
+	for in, want := range map[string]string{"": "auto", "auto": "auto", " AUTO ": "auto", "on": "on", "1": "on", "true": "on", "off": "off", "Off": "off", "0": "off", "no": "off"} {
+		cfg := Defaults()
+		cfg.Ports = in
+		if err := cfg.Validate(); err != nil || cfg.Ports != want {
+			t.Errorf("%q -> %q %v, want %q", in, cfg.Ports, err, want)
+		}
+	}
+	cfg := Defaults()
+	cfg.Ports = "sometimes"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "ports") {
+		t.Errorf("ports sometimes: %v", err)
+	}
+	for _, tc := range []struct {
+		setting      string
+		gatewayStats bool
+		want         bool
+	}{
+		{PortsAuto, true, true}, {PortsAuto, false, false},
+		{PortsOn, true, true}, {PortsOn, false, false}, // no gateway report, no ports
+		{PortsOff, true, false}, {PortsOff, false, false},
+	} {
+		cfg := Config{Ports: tc.setting}
+		if got := cfg.PortsEnabled(tc.gatewayStats); got != tc.want {
+			t.Errorf("ports %s with gateway stats %v: %v, want %v", tc.setting, tc.gatewayStats, got, tc.want)
+		}
+	}
+}
+
+// YAML, then PERCH_COLLECTOR_PORTS over it (what the OpenWrt init script
+// sets from UCI `option ports`), and GOCOLLECTOR_PORTS as the pre-rename
+// fallback.
+func TestPortsPrecedence(t *testing.T) {
+	path := writeYAML(t, "gateway_stats: on\nports: off\n")
+	cfg, err := load(path, cliOverrides{})
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Ports != PortsOff || cfg.PortsEnabled(cfg.GatewayStatsEnabled(false)) {
+		t.Fatalf("YAML: ports=%q enabled=%v", cfg.Ports, cfg.PortsEnabled(true))
+	}
+
+	t.Setenv("GOCOLLECTOR_PORTS", "on")
+	cfg, err = load(path, cliOverrides{})
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Ports != PortsOn || strings.Join(cfg.Deprecated, ",") != "GOCOLLECTOR_PORTS" {
+		t.Fatalf("legacy env: ports=%q deprecated=%v", cfg.Ports, cfg.Deprecated)
+	}
+
+	t.Setenv("PERCH_COLLECTOR_PORTS", "0") // UCI option ports '0'
+	cfg, err = load(path, cliOverrides{})
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Ports != PortsOff || len(cfg.Deprecated) != 0 {
+		t.Fatalf("env: ports=%q deprecated=%v", cfg.Ports, cfg.Deprecated)
+	}
+
+	t.Setenv("PERCH_COLLECTOR_PORTS", "auto")
+	if cfg, err = load(path, cliOverrides{}); err != nil || cfg.Ports != PortsAuto || !cfg.PortsEnabled(true) {
+		t.Fatalf("env auto: ports=%q %v", cfg.Ports, err)
+	}
+
+	t.Setenv("PERCH_COLLECTOR_PORTS", "maybe")
+	if _, err := load(path, cliOverrides{}); err == nil {
+		t.Fatal("PERCH_COLLECTOR_PORTS=maybe accepted")
 	}
 }

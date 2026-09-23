@@ -1,10 +1,13 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/capthndsme/perch-agentkit/hoststat"
 
 	"github.com/capthndsme/perch-collector/internal/aggregator"
 	"github.com/capthndsme/perch-collector/internal/gateway"
@@ -148,5 +151,53 @@ func TestSummaryGatewayAndTransport(t *testing.T) {
 	}
 	if _, ok := body["summary"].(map[string]any); !ok {
 		t.Errorf("summary missing: %v", body)
+	}
+}
+
+// GET /api/v1/summary serialises the gateway report whole, so the Gateway
+// agent's ports reach a polling controller as they reach a pushed one:
+// absent with ports off, [] when the router has none, the list otherwise.
+func TestSummaryGatewayPorts(t *testing.T) {
+	up, down := true, false
+	speed := 10000
+	some := []hoststat.Port{
+		{Name: "wan0", Label: "wan0", Role: "wan", Medium: "virtual", MAC: "02:00:00:00:00:31", AdminUp: &up, Carrier: &up, Operstate: "up", SpeedMbps: &speed, Duplex: "full"},
+		{Name: "lan0", Label: "lan0", Medium: "virtual", MAC: "02:00:00:00:00:32", AdminUp: &up, Carrier: &down, Operstate: "lowerlayerdown"},
+	}
+	for _, tc := range []struct {
+		name  string
+		ports *[]hoststat.Port
+		want  string // gateway.ports, compact; "" = the key is absent
+	}{
+		{"ports off", nil, ""},
+		{"no ports", &[]hoststat.Port{}, `[]`},
+		{"two ports", &some, `[{"name":"wan0","label":"wan0","role":"wan","medium":"virtual","mac":"02:00:00:00:00:31","adminUp":true,"carrier":true,"operstate":"up","speedMbps":10000,"duplex":"full"},` +
+			`{"name":"lan0","label":"lan0","medium":"virtual","mac":"02:00:00:00:00:32","adminUp":true,"carrier":false,"operstate":"lowerlayerdown"}]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestServer()
+			s.SetGatewayStats(func() *gateway.Stats {
+				return &gateway.Stats{WAN: []gateway.Interface{}, WANSource: gateway.SourceDefaultRoute, Ports: tc.ports}
+			})
+			rec := httptest.NewRecorder()
+			s.mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/summary", nil))
+			var body struct {
+				Gateway map[string]json.RawMessage `json:"gateway"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || body.Gateway == nil {
+				t.Fatalf("summary %s: %v", rec.Body.String(), err)
+			}
+			raw, ok := body.Gateway["ports"]
+			if tc.want == "" {
+				if ok {
+					t.Fatalf("gateway.ports = %s, want the key absent", raw)
+				}
+				return
+			}
+			var got bytes.Buffer
+			if !ok || json.Compact(&got, raw) != nil || got.String() != tc.want {
+				t.Fatalf("gateway.ports = %s (present %v)\nwant %s", raw, ok, tc.want)
+			}
+		})
 	}
 }

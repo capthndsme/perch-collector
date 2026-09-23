@@ -1,4 +1,4 @@
-# Perch Network Collector
+# Perch Network Collector / Perch Network Gateway
 
 `perch-collector` is the capture daemon of Perch, a home-network looking
 glass in the UniFi style. It captures packet headers via libpcap, keeps
@@ -7,9 +7,13 @@ per-device (per-MAC) counters with protocol and application classification
 [Perch Network Controller](https://github.com/capthndsme/perch-controller):
 pushed over a WebSocket the collector dials itself, or polled from its JSON
 API. On the router it also reports the router's own health (connection
-tracking, WAN rate, load) for the controller's Gateway page.
+tracking, WAN rate, load) for the controller's Gateway page, and its
+Ethernet ports for the infrastructure view.
 
 Designed for low overhead, 24/7 operation on a router or server.
+
+Since this primarily runs on gateways, this grew from network collection agent to
+Perch Network Gateway agent. Which means Perch can now have gateway related settings.
 
 ## Features
 
@@ -20,6 +24,7 @@ Designed for low overhead, 24/7 operation on a router or server.
 - **Services and destinations** — per device, bytes *served* per server name (for hosts you run) and bytes *sent to* each site (name, category, protocol) for the "where is my traffic going" view; unnamed TLS/HTTP/QUIC flows are keyed by peer address so a consumer can group them by network. All bounded per device
 - **Talks to the controller over its own socket** — dials the controller, authenticates with its API key and pushes on the schedule the controller sets (JSON-RPC 2.0 over WebSocket, compressed); nothing has to reach the collector. Or announces itself over HTTP and is polled
 - **Gateway stats** — on the router: conntrack fill, established TCP, load, memory and per-interface WAN counters, read from `/proc`, so the controller needs no node_exporter
+- **The Gateway agent's ports** — on the router: every Ethernet port with its live link state (carrier, speed, duplex, link flaps), read from `/sys`, for the controller's infrastructure view
 - **No ASN database** — peer enrichment (ASN, rDNS) is left to the controller
 - **JSON HTTP API** — live device stats, `?since=` windows, protocol → category list
 - **Periodic disk flush** — optional JSON snapshots to disk
@@ -126,6 +131,11 @@ sudo ./out/perch-collector -config /etc/perch-collector/collector.yaml
 
 # Override specific settings via CLI
 sudo ./out/perch-collector -interface br-lan -listen 127.0.0.1:9800
+
+# Print the Ethernet ports as the Gateway agent reports them, and exit. It
+# reads /sys and the routing table only, so it is safe next to a running
+# collector (see "The Gateway agent's ports")
+./out/perch-collector ports
 ```
 
 ## Install as systemd Service
@@ -277,7 +287,8 @@ curl http://127.0.0.1:9800/api/v1/devices/02:aa:bb:cc:dd:ee
 Returns aggregate totals (`total_devices`, `total_bytes`, `total_packets`) and
 daemon uptime (`started_at` changes on every restart, which is how the
 controller tells a restart from traffic). With gateway stats on, a top-level
-`gateway` object sits next to `summary` (see [Gateway stats](#gateway-stats)).
+`gateway` object sits next to `summary` (see [Gateway stats](#gateway-stats)
+and [The Gateway agent's ports](#the-gateway-agents-ports)).
 
 ### `POST /api/v1/reset`
 
@@ -394,6 +405,63 @@ every time, so a PPPoE link that comes up later joins in), or the configured
 `wan_interfaces` (`wanSource: "configured"`). Anything the kernel does not
 expose (no conntrack module, an old kernel without `MemAvailable`) is left
 out rather than reported as zero.
+
+## The Gateway agent's ports
+
+On the router, with gateway stats on, the collector is the Perch Network
+Gateway agent. Its gateway report also lists the router's Ethernet ports with
+their live link state, for the controller's infrastructure view: which ports
+exist, which have a link and at what speed. The operator draws the cables
+between them in the controller.
+
+```json
+"gateway": {
+  "collectedAt": "2026-09-23T11:17:10Z",
+  "wan": [ { "name": "wan", "rxBytes": 693974698743, "txBytes": 1697321558462 } ],
+  "wanSource": "default-route",
+  "ports": [
+    { "name": "wan", "label": "wan", "role": "wan", "medium": "copper", "mac": "02:00:00:00:00:11",
+      "adminUp": true, "carrier": true, "operstate": "up", "speedMbps": 1000, "duplex": "full", "carrierChanges": 3 },
+    { "name": "lan1", "label": "lan1", "role": "lan", "medium": "copper", "mac": "02:00:00:00:00:10",
+      "adminUp": true, "carrier": false, "operstate": "lowerlayerdown", "carrierChanges": 0 }
+  ]
+}
+```
+
+(`conntrack`, `load` and the rest as above, left out here.)
+
+- **What a port is.** A port is whatever `/sys/class/net` shows as one: DSA
+  switch ports (`lan1` …), NICs backed by a device (`wan`, `eth1`), and a
+  cellular modem in Ethernet mode (`medium: "wireless"`). Bridges, VLANs,
+  bonds, the switch's CPU port, Wi-Fi, tunnels and `ifb` are not ports. A
+  router in a container has no hardware port, only veths, so it reports those
+  (`medium: "virtual"`). Labels come from the device tree. The display order
+  and the LAN/WAN roles printed on the case come from OpenWrt's
+  `/etc/board.json`, for hardware ports only (a container's `board.json` is
+  its host's). The interfaces the report counts as WAN (`wan_interfaces`, else
+  the default routes) are role `wan` whatever `board.json` says.
+- **When they are sent.** The ports ride in every report, on both transports:
+  the push and `GET /api/v1/summary`. `ports: auto`, the default
+  (`PERCH_COLLECTOR_PORTS`, `option ports` in UCI), reports them whenever
+  gateway stats are on, and `off` leaves them out. With gateway stats off
+  there is no gateway report, so there are no ports. `"ports": []` means the
+  router has no port. A missing key means "not reported": ports are off, the
+  collector is older, or `/sys/class/net` could not be listed. The controller
+  keeps what it already knows in that case.
+- **Cost.** Each report lists `/sys/class/net` and reads about seven small
+  files per port. The facts that do not change (kind, label, medium, MAC) are
+  cached for five minutes.
+- **Read-only check.** `perch-collector ports` prints the array and exits
+  before it reads any configuration, starts a capture, listens or connects
+  anywhere, so it can run next to the live daemon. Without the configuration
+  it takes the WAN interfaces from the default routes: a `wan_interfaces`
+  list (`list wan_interface` in UCI) is not applied. It prints the ports
+  whatever `ports` and `gateway_stats` say.
+
+A PPPoE WAN is counted on `pppoe-wan`, which is not an Ethernet port. The port
+it runs over gets its `wan` role from `board.json` on OpenWrt hardware, or
+from the operator in the controller. Perch never writes to a port: it does not
+enable, disable or rename one.
 
 ## How the controller uses the data
 

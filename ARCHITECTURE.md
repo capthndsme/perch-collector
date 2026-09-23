@@ -9,7 +9,8 @@ memory with two parallel bounded peer lists per device — `top_peers` for WAN
 remotes and `top_lan_peers` for LAN neighbours. It hands them to the Perch
 Network Controller either by pushing them over a WebSocket it dials
 (`internal/controller`) or by serving them on its HTTP API to be polled; on
-the router it adds the router's own health (`internal/gateway`).
+the router it adds the router's own health and its Ethernet ports
+(`internal/gateway`), which makes it the Perch Network Gateway agent.
 
 ## Component Diagram
 
@@ -79,13 +80,17 @@ the router it adds the router's own health (`internal/gateway`).
    b. Flusher    → Aggregator.Snapshot()       → JSON file on disk
    c. Controller → Aggregator.Snapshot() + GetSummary() + gateway.Read()
                    → collector.push over the WebSocket, on the controller's schedule
+   gateway.Read() (gateway stats on) is /proc for the health and the WAN
+   counters, then /sys/class/net for the ports, with the WAN list it just
+   counted passed on as role "wan". GET /api/v1/summary serves the same
+   report to a polling controller.
 ```
 
 ## Package Structure
 
 ```
 perch-collector/
-├── main.go                    # Entry point, wiring, gateway/subnet resolution, transport
+├── main.go                    # Entry point, `ports` subcommand, wiring, gateway/subnet resolution, transport
 ├── collector.example.yaml     # Configuration template (copy to collector.yaml)
 ├── internal/
 │   ├── config/
@@ -105,7 +110,7 @@ perch-collector/
 │   ├── controller/
 │   │   └── controller.go      # WebSocket session to the controller (transport websocket)
 │   ├── gateway/
-│   │   └── gateway.go         # Router health from /proc: conntrack, TCP, load, memory, WAN
+│   │   └── gateway.go         # Router health from /proc (conntrack, TCP, load, memory, WAN) + ports from /sys
 │   └── flusher/
 │       └── flusher.go         # Periodic JSON file writer
 ├── README.md
@@ -126,6 +131,11 @@ perch-collector/
   pinger, the pusher (one push at a time, `Aggregator.Snapshot()` under the
   read lock) and short-lived goroutines for the controller's requests; one
   reconnect loop around them.
+- **Gateway reports** — built by the pusher and by `GET /api/v1/summary`
+  handlers, possibly at the same time, from copies of one `gateway.Reader`.
+  They share its `gateway.Ports`: the kit's port reader and its cache,
+  behind a mutex that covers setting the report's WAN list and reading (the
+  kit's reader must not have its options changed during a read).
 - **Main goroutine** — blocks on the OS signal channel, then orchestrates
   graceful shutdown.
 
@@ -149,6 +159,31 @@ two natural bounds:
 
 In aggregate this keeps RSS well below ~15 MB even when a torrent client
 contacts thousands of unique IPs per minute.
+
+## The Gateway agent's ports
+
+With gateway stats on and `ports` not `off`, `main` gives the gateway reader
+a `gateway.Ports` (the kit's `hoststat.PortReader`, which applies
+docs/infrastructure-view.md section 2.1 of the controller) and logs the port
+names once. Every report then carries `ports`, the router's Ethernet ports in
+display order with their link state:
+
+```
+gateway.Reader.Read()
+  WAN list = wan_interfaces, else the default-route interfaces (/proc/net/route, ipv6_route)
+  → WAN counters from /proc/net/dev
+  → Ports.Read(WAN list): one listing of /sys/class/net, cached facts per
+    name + ifindex (5 min), link state read fresh; role "wan" for the WAN list,
+    board.json roles for hardware ports
+  → Stats.Ports: a pointer, so [] (no ports) and absent (off, or
+    /sys/class/net unreadable) stay different on the wire
+```
+
+`perch-collector ports` is the first thing `main` checks: it runs the same
+ports read with the default-route WAN list, prints the JSON and exits, before
+logging, configuration, capture, the listener or any connection. The daemon
+itself takes flags only and refuses a leftover argument before capture
+starts, so a subcommand typed after a flag cannot start a second collector.
 
 ## Graceful Shutdown
 
@@ -178,5 +213,6 @@ perch-collector :9800 ←──poll── Perch Network Controller
                 (GET /api/v1/summary + /api/v1/devices)
 ```
 
-The shared protocol code (JSON-RPC, the session, `/proc` readers) is the
-`perch-agentkit` module, which the Perch AP Daemon uses as well.
+The shared protocol code (JSON-RPC, the session, the `/proc` readers and the
+port reader) is the `perch-agentkit` module, which the Perch AP Daemon uses
+as well: both agents report ports as the same JSON array.

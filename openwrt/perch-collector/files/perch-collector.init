@@ -77,7 +77,7 @@ start_service() {
 	local enabled api_key mode snap promisc bpf dev listen gateway_macs subnets
 	local top_peers top_lan top_services top_dest top_unnamed flows idle partial
 	local instance_id server_url announce_interval announce_key announce_insecure
-	local transport ca_file gateway_stats wan_interfaces
+	local transport ca_file gateway_stats wan_interfaces ports
 	local uci_dirty=0
 
 	config_load "$CONF"
@@ -150,6 +150,7 @@ start_service() {
 	config_get_bool announce_insecure main announce_tls_insecure 0
 	config_get ca_file main server_ca_file
 	config_get gateway_stats main gateway_stats 'auto'
+	config_get ports main ports 'auto'
 
 	procd_open_instance
 	# No config file: everything comes from the environment below.
@@ -180,7 +181,8 @@ start_service() {
 		PERCH_COLLECTOR_ANNOUNCE_TLS_INSECURE="$announce_insecure" \
 		PERCH_COLLECTOR_SERVER_CA_FILE="$ca_file" \
 		PERCH_COLLECTOR_GATEWAY_STATS="$gateway_stats" \
-		PERCH_COLLECTOR_WAN_INTERFACES="$wan_interfaces"
+		PERCH_COLLECTOR_WAN_INTERFACES="$wan_interfaces" \
+		PERCH_COLLECTOR_PORTS="$ports"
 	procd_set_param respawn 3600 5 0
 	procd_set_param stdout 1
 	procd_set_param stderr 1

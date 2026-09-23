@@ -481,3 +481,84 @@ func TestSystemInfo(t *testing.T) {
 		t.Fatalf("%+v", s)
 	}
 }
+
+// firstPush runs a session whose gateway source is gw (nil = gateway stats
+// off) and returns the params of its first collector.push, raw.
+func firstPush(t *testing.T, gw func() *gateway.Stats) map[string]json.RawMessage {
+	t.Helper()
+	got := make(chan map[string]json.RawMessage, 1)
+	fc := &fakeController{t: t}
+	fc.session = func(ctx context.Context, c *websocket.Conn, frames <-chan []byte, hello rpc.Message) {
+		answerHello(ctx, c, hello, "adopted")
+		send(ctx, c, `{"jsonrpc":"2.0","method":"agent.configure","params":{"metricsIntervalSeconds":5,"lifecycle":"adopted"}}`)
+		for data := range frames {
+			var m rpc.Message
+			if json.Unmarshal(data, &m) != nil || m.Method != "collector.push" {
+				continue
+			}
+			var p map[string]json.RawMessage
+			json.Unmarshal(m.Params, &p)
+			got <- p
+			break
+		}
+		for range frames { // until the collector hangs up
+		}
+	}
+	srv := httptest.NewServer(fc)
+	defer srv.Close()
+	_, _, stop := newTestClient(t, srv, func(o *Options) { o.Source.Gateway = gw })
+	defer stop()
+	select {
+	case p := <-got:
+		return p
+	case <-time.After(5 * time.Second):
+		t.Fatal("no push")
+	}
+	return nil
+}
+
+// collector.push carries the Gateway agent's ports inside `gateway`: absent
+// with ports off, [] when the router has none, the list otherwise; and with
+// gateway stats off there is no gateway object at all.
+func TestPushCarriesGatewayPorts(t *testing.T) {
+	up := true
+	speed := 10000
+	some := []hoststat.Port{{Name: "wan0", Label: "wan0", Role: "wan", Medium: "virtual", MAC: "02:00:00:00:00:31", AdminUp: &up, Carrier: &up, Operstate: "up", SpeedMbps: &speed, Duplex: "full"}}
+	report := func(ports *[]hoststat.Port) func() *gateway.Stats {
+		return func() *gateway.Stats {
+			return &gateway.Stats{CollectedAt: started, WAN: []gateway.Interface{{Name: "wan0", RxBytes: 5, TxBytes: 6}}, WANSource: gateway.SourceDefaultRoute, Ports: ports}
+		}
+	}
+	for _, tc := range []struct {
+		name  string
+		gw    func() *gateway.Stats
+		ports string // raw gateway.ports; "" = absent, "-" = no gateway object
+	}{
+		{"gateway stats off", nil, "-"},
+		{"ports off", report(nil), ""},
+		{"no ports", report(&[]hoststat.Port{}), `[]`},
+		{"one port", report(&some), `[{"name":"wan0","label":"wan0","role":"wan","medium":"virtual","mac":"02:00:00:00:00:31","adminUp":true,"carrier":true,"operstate":"up","speedMbps":10000,"duplex":"full"}]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := firstPush(t, tc.gw)
+			raw, ok := p["gateway"]
+			if tc.ports == "-" {
+				if ok {
+					t.Fatalf("gateway = %s with gateway stats off", raw)
+				}
+				return
+			}
+			var g map[string]json.RawMessage
+			if !ok || json.Unmarshal(raw, &g) != nil || string(g["wanSource"]) != `"default-route"` {
+				t.Fatalf("gateway = %s", raw)
+			}
+			ports, ok := g["ports"]
+			switch {
+			case tc.ports == "" && ok:
+				t.Fatalf("gateway.ports = %s with ports off, want the key absent", ports)
+			case tc.ports != "" && string(ports) != tc.ports:
+				t.Fatalf("gateway.ports = %s (present %v)\nwant %s", ports, ok, tc.ports)
+			}
+		})
+	}
+}

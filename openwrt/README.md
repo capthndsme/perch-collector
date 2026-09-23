@@ -146,6 +146,7 @@ adopted by …`, `pushing every 5s`) — never one per push, and never the key.
 | `announce_interval` | `60` | Seconds between HTTP announces (`transport 'poll'` only; the controller's reply overrides it). |
 | `gateway_stats` | `auto` | Report the router's own health for the Gateway page. `auto` = on (this is the router); `on` / `off`. |
 | `wan_interface` (list) | the default-route interfaces | UCI networks (`wan`) or devices (`pppoe-wan`) whose counters make the WAN rate. Set it when WAN routes live outside the main table (mwan3, policy routing). |
+| `ports` | `auto` | The router's Ethernet ports and their link state for the controller's infrastructure view (this is the Perch Network Gateway agent); the WAN interfaces are role `wan`. `auto` = whenever `gateway_stats` is on; `off` leaves them out. |
 | `capture_network` / `capture_device` | `lan` / (its device) | Where to capture. The network's device is resolved at start (`br-lan`, `lan0`, …). |
 | `listen_network` / `listen_address` / `port` | `loopback` / (its address) / `9800` | Where the local API listens. `loopback` is enough for the WebSocket transport; `lan` to be polled; `listen_address '0.0.0.0'` for everything. |
 | `api_key` | generated | The collector's credential towards the controller and the bearer token of the local API. |
@@ -169,7 +170,9 @@ wget -qO- --header "Authorization: Bearer $(uci get perch-collector.main.api_key
 ```
 
 `meta.transport` says `websocket`, `meta.announce_status` how the controller
-sees the collector, and `gateway` is what the Gateway page gets.
+sees the collector, and `gateway` is what the Gateway page gets (its `ports`
+feed the infrastructure view). `perch-collector ports` prints just the ports,
+without reading the configuration or touching the running daemon.
 
 ## Polled instead of pushing
 

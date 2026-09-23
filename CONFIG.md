@@ -198,6 +198,13 @@ gateway_stats: auto
 # default route, re-read on every report.
 # Default: []
 wan_interfaces: []
+
+# The router's Ethernet ports and their link state, in the gateway report
+# (the Gateway agent's ports, below): "auto" and "on" = whenever gateway
+# stats are on, "off" = leave them out. Without gateway stats there is no
+# gateway report, so there are no ports either way.
+# Default: "auto"
+ports: auto
 ```
 
 ## Environment Variables
@@ -235,6 +242,7 @@ Configuration values can also be set via environment variables. They take the hi
 | `PERCH_COLLECTOR_SERVER_CA_FILE` | `server_ca_file` |
 | `PERCH_COLLECTOR_GATEWAY_STATS` | `gateway_stats` (`auto`, `on`, `off`) |
 | `PERCH_COLLECTOR_WAN_INTERFACES` | `wan_interfaces` (comma-separated) |
+| `PERCH_COLLECTOR_PORTS` | `ports` (`auto`, `on`, `off`) |
 
 The names before the rename, `GOCOLLECTOR_<NAME>`, are still read when
 `PERCH_COLLECTOR_<NAME>` is unset; the daemon logs one deprecation line per
@@ -416,7 +424,7 @@ the collector's id, name and lifecycle, then sends `agent.configure`
 gets). The collector never pushes before that; from then on it sends
 `collector.push` every interval — `seq`, `collectedAt`, the `summary`,
 `meta` and `devices` of the HTTP API in one compact message, plus `gateway`
-with gateway stats on — and answers `collector.status` and
+with gateway stats on (the ports included) — and answers `collector.status` and
 `collector.protocols`. Adopting, disabling or re-timing the collector in the
 dashboard reaches it at once, as a new `agent.configure`.
 
@@ -517,6 +525,32 @@ report. Counters are cumulative; the controller derives the rates. A part the
 kernel does not expose is left out, never reported as zero. Only turn it on
 where the collector runs on the router: anywhere else these are the numbers
 of the wrong machine.
+
+### The Gateway agent's ports
+
+With gateway stats on, the collector is the Perch Network Gateway agent, and
+`ports: auto` (the default) adds `ports` to the same `gateway` object: the
+router's Ethernet ports in display order, with their link state, for the
+controller's infrastructure view.
+
+```json
+"ports":[
+  {"name":"wan0","label":"wan0","role":"wan","medium":"virtual","mac":"02:00:00:00:00:31",
+   "adminUp":true,"carrier":true,"operstate":"up","speedMbps":10000,"duplex":"full","carrierChanges":2},
+  {"name":"lan0","label":"lan0","medium":"virtual","mac":"02:00:00:00:00:32",
+   "adminUp":true,"carrier":true,"operstate":"up","speedMbps":10000,"duplex":"full","carrierChanges":2}]
+```
+
+The ports come from `/sys/class/net`, with labels from the device tree and
+roles from OpenWrt's `/etc/board.json` for hardware ports. The interfaces the
+report counts as WAN (`wan_interfaces`, else the default routes) are role
+`wan`. A router in a container has no hardware port, so it reports its veths
+(`medium: "virtual"`). `[]` means the router has no port; the key is left out
+with `ports: off` and while `/sys/class/net` cannot be listed. The controller
+reads a missing key as "not reported", never as "no ports". `on` behaves like
+`auto`; `1` and `0` (UCI) mean on and off. `perch-collector ports` prints the
+array once and exits without reading this configuration (README, "The
+Gateway agent's ports").
 
 ## Packaged deployments
 

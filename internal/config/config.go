@@ -173,6 +173,13 @@ type Config struct {
 	// routing, mwan3).
 	WANInterfaces []string `yaml:"wan_interfaces"`
 
+	// Ports reports the router's Ethernet ports and their link state in the
+	// gateway report, for the controller's infrastructure view. "auto" (the
+	// default) and "on" report them whenever gateway stats are on; "off"
+	// leaves them out. They travel in the gateway report, so with gateway
+	// stats off there are none either way (see PortsEnabled).
+	Ports string `yaml:"ports"`
+
 	// Deprecated lists the pre-rename GOCOLLECTOR_* variables that supplied
 	// a value, so main can say once that each has a new name. Never YAML.
 	Deprecated []string `yaml:"-"`
@@ -190,6 +197,13 @@ const (
 	GatewayStatsAuto = "auto"
 	GatewayStatsOn   = "on"
 	GatewayStatsOff  = "off"
+)
+
+// Ports values.
+const (
+	PortsAuto = "auto"
+	PortsOn   = "on"
+	PortsOff  = "off"
 )
 
 // Announce interval bounds. The lower bound keeps a misconfigured collector
@@ -245,6 +259,7 @@ func Defaults() Config {
 		ServerCAFile:                "",
 		GatewayStats:                GatewayStatsAuto,
 		WANInterfaces:               nil,
+		Ports:                       PortsAuto,
 	}
 }
 
@@ -344,6 +359,7 @@ func load(configPath string, cli cliOverrides) (Config, error) {
 	if list, ok := env.list("WAN_INTERFACES"); ok {
 		cfg.WANInterfaces = list
 	}
+	env.str("PORTS", &cfg.Ports)
 	cfg.Deprecated = env.deprecated
 	if env.err != nil {
 		return cfg, env.err
@@ -492,12 +508,17 @@ func (c *Config) Validate() error {
 	if c.ServerCAFile != "" && c.ServerURL != "" && !strings.HasPrefix(c.ServerURL, "https://") {
 		fmt.Fprintf(os.Stderr, "WARNING: server_ca_file has no effect with an http:// server_url (%s).\n", c.ServerURL)
 	}
-	gs, ok := normalizeGatewayStats(c.GatewayStats)
+	gs, ok := normalizeAutoOnOff(c.GatewayStats)
 	if !ok {
 		return fmt.Errorf("gateway_stats must be auto, on or off, got %q", c.GatewayStats)
 	}
 	c.GatewayStats = gs
 	c.WANInterfaces = cleanList(c.WANInterfaces)
+	ports, ok := normalizeAutoOnOff(c.Ports)
+	if !ok {
+		return fmt.Errorf("ports must be auto, on or off, got %q", c.Ports)
+	}
+	c.Ports = ports
 
 	// Clamped unconditionally so the value in the struct is always the value
 	// the daemon would actually use.
@@ -541,6 +562,13 @@ func (c Config) GatewayStatsEnabled(onOpenWrt bool) bool {
 	return onOpenWrt
 }
 
+// PortsEnabled resolves Ports; gatewayStats is what GatewayStatsEnabled
+// said. Ports travel in the gateway report, so without one there are none:
+// "auto" and "on" both follow gateway stats, "off" turns them off.
+func (c Config) PortsEnabled(gatewayStats bool) bool {
+	return gatewayStats && c.Ports != PortsOff
+}
+
 // InstanceIDPath is the file the instance id is resolved from and persisted
 // to: InstanceIDFile, except that the default path yields to the pre-rename
 // LegacyInstanceIDFile while only that one exists, so a bare-metal upgrade
@@ -562,14 +590,17 @@ func instanceIDPath(configured, def, legacy string) string {
 	return def
 }
 
-func normalizeGatewayStats(v string) (string, bool) {
+// normalizeAutoOnOff reads an auto/on/off switch (gateway_stats, ports):
+// empty is auto, and the usual boolean spellings (UCI's '1' and '0'
+// included) are on and off.
+func normalizeAutoOnOff(v string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(v)) {
-	case "", GatewayStatsAuto:
-		return GatewayStatsAuto, true
-	case GatewayStatsOn, "true", "1", "yes", "enabled":
-		return GatewayStatsOn, true
-	case GatewayStatsOff, "false", "0", "no", "disabled":
-		return GatewayStatsOff, true
+	case "", "auto":
+		return "auto", true
+	case "on", "true", "1", "yes", "enabled":
+		return "on", true
+	case "off", "false", "0", "no", "disabled":
+		return "off", true
 	}
 	return "", false
 }
