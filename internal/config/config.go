@@ -192,6 +192,35 @@ type Config struct {
 	// Clamped to DHCPLeasesRefreshMin..DHCPLeasesRefreshMax.
 	DHCPLeasesRefresh int `yaml:"dhcp_leases_refresh"`
 
+	// Observe reports the router's other runtime state beside the DHCP
+	// leases (gateway plan 2 section 3): the neighbour table, the
+	// interfaces and their default routes, UPnP mappings, mwan3, who
+	// answers DNS, and the system. "auto" (the default) is on when the
+	// collector runs on OpenWrt; "on" and "off" force it.
+	Observe string `yaml:"observe"`
+
+	// ObserveParts limits Observe to these parts (neighbors, interfaces,
+	// upnp, mwan3, resolver, system). Empty = all of them.
+	ObserveParts []string `yaml:"observe_parts"`
+
+	// ObserveRefresh is how often, in seconds, an unchanged part is sent
+	// again. Clamped like DHCPLeasesRefresh.
+	ObserveRefresh int `yaml:"observe_refresh"`
+
+	// ConntrackFlush lets the controller delete a device's conntrack
+	// entries (net.conntrack_flush), so a WAN block also ends the flows
+	// already running. auto (default) = on with Observe.
+	ConntrackFlush string `yaml:"conntrack_flush"`
+
+	// GatewayBackup is what gateway.backup hands out: "redacted" (the
+	// default: secrets replaced, private keys left out), "full" (the
+	// sysupgrade -b archive as is) or "off" (no backups).
+	GatewayBackup string `yaml:"gateway_backup"`
+
+	// ControllerAddressCache is the file that keeps the controller's last
+	// good address, dialed when its name does not resolve. "" = memory only.
+	ControllerAddressCache string `yaml:"controller_address_cache"`
+
 	// Deprecated lists the pre-rename GOCOLLECTOR_* variables that supplied
 	// a value, so main can say once that each has a new name. Never YAML.
 	Deprecated []string `yaml:"-"`
@@ -218,7 +247,21 @@ const (
 	PortsOff  = "off"
 )
 
-// DHCPLeases values are GatewayStats's: auto, on, off.
+// DHCPLeases, Observe and ConntrackFlush values are GatewayStats's: auto, on, off.
+
+// GatewayBackup values.
+const (
+	GatewayBackupOff      = "off"
+	GatewayBackupRedacted = "redacted"
+	GatewayBackupFull     = "full"
+)
+
+// ObservePartNames are the parts ObserveParts may name.
+var ObservePartNames = []string{"neighbors", "interfaces", "upnp", "mwan3", "resolver", "system"}
+
+// DefaultControllerAddressCache is where the last good controller address
+// is kept when controller_address_cache is not set.
+const DefaultControllerAddressCache = "/var/lib/perch-collector/controller-address"
 
 // DHCP lease refresh bounds and default, in seconds. The controller treats a
 // router that has not sent its leases for twice the maximum as gone.
@@ -284,6 +327,11 @@ func Defaults() Config {
 		Ports:                       PortsAuto,
 		DHCPLeases:                  GatewayStatsAuto,
 		DHCPLeasesRefresh:           DHCPLeasesRefreshDefault,
+		Observe:                     GatewayStatsAuto,
+		ObserveRefresh:              DHCPLeasesRefreshDefault,
+		ConntrackFlush:              GatewayStatsAuto,
+		GatewayBackup:               GatewayBackupRedacted,
+		ControllerAddressCache:      DefaultControllerAddressCache,
 	}
 }
 
@@ -386,6 +434,14 @@ func load(configPath string, cli cliOverrides) (Config, error) {
 	env.str("PORTS", &cfg.Ports)
 	env.str("DHCP_LEASES", &cfg.DHCPLeases)
 	env.integer("DHCP_LEASES_REFRESH", func(n int) { cfg.DHCPLeasesRefresh = n })
+	env.str("OBSERVE", &cfg.Observe)
+	if list, ok := env.list("OBSERVE_PARTS"); ok {
+		cfg.ObserveParts = list
+	}
+	env.integer("OBSERVE_REFRESH", func(n int) { cfg.ObserveRefresh = n })
+	env.str("CONNTRACK_FLUSH", &cfg.ConntrackFlush)
+	env.str("GATEWAY_BACKUP", &cfg.GatewayBackup)
+	env.str("CONTROLLER_ADDRESS_CACHE", &cfg.ControllerAddressCache)
 	cfg.Deprecated = env.deprecated
 	if env.err != nil {
 		return cfg, env.err
@@ -558,6 +614,9 @@ func (c *Config) Validate() error {
 	}
 	if c.DHCPLeasesRefresh > DHCPLeasesRefreshMax {
 		c.DHCPLeasesRefresh = DHCPLeasesRefreshMax
+	}
+	if err := c.validateObserve(); err != nil {
+		return err
 	}
 
 	// Clamped unconditionally so the value in the struct is always the value
@@ -750,4 +809,92 @@ func (r *envReader) list(name string) ([]string, bool) {
 		}
 	}
 	return out, true
+}
+
+func (c *Config) validateObserve() error {
+	o, ok := normalizeAutoOnOff(c.Observe)
+	if !ok {
+		return fmt.Errorf("observe must be auto, on or off, got %q", c.Observe)
+	}
+	c.Observe = o
+	var parts []string
+	for _, p := range cleanList(c.ObserveParts) {
+		p = strings.ToLower(p)
+		known := false
+		for _, n := range ObservePartNames {
+			if p == n {
+				known = true
+			}
+		}
+		if !known {
+			return fmt.Errorf("observe_parts: unknown part %q (known: %s)", p, strings.Join(ObservePartNames, ", "))
+		}
+		parts = append(parts, p)
+	}
+	c.ObserveParts = parts
+	if c.ObserveRefresh == 0 {
+		c.ObserveRefresh = DHCPLeasesRefreshDefault
+	}
+	if c.ObserveRefresh < DHCPLeasesRefreshMin {
+		c.ObserveRefresh = DHCPLeasesRefreshMin
+	}
+	if c.ObserveRefresh > DHCPLeasesRefreshMax {
+		c.ObserveRefresh = DHCPLeasesRefreshMax
+	}
+	ct, ok := normalizeAutoOnOff(c.ConntrackFlush)
+	if !ok {
+		return fmt.Errorf("conntrack_flush must be auto, on or off, got %q", c.ConntrackFlush)
+	}
+	c.ConntrackFlush = ct
+	switch strings.ToLower(strings.TrimSpace(c.GatewayBackup)) {
+	case "", GatewayBackupRedacted:
+		c.GatewayBackup = GatewayBackupRedacted
+	case GatewayBackupFull:
+		c.GatewayBackup = GatewayBackupFull
+	case GatewayBackupOff, "0", "no", "false", "disabled":
+		c.GatewayBackup = GatewayBackupOff
+	default:
+		return fmt.Errorf("gateway_backup must be redacted, full or off, got %q", c.GatewayBackup)
+	}
+	c.ControllerAddressCache = strings.TrimSpace(c.ControllerAddressCache)
+	return nil
+}
+
+// ObserveEnabled resolves Observe; onOpenWrt is what "auto" becomes.
+func (c Config) ObserveEnabled(onOpenWrt bool) bool {
+	switch c.Observe {
+	case GatewayStatsOn:
+		return true
+	case GatewayStatsOff:
+		return false
+	}
+	return onOpenWrt
+}
+
+// ObservePartEnabled reports whether a part is on (Observe resolved to
+// observeOn, and the part listed in ObserveParts or the list empty).
+func (c Config) ObservePartEnabled(observeOn bool, part string) bool {
+	if !observeOn {
+		return false
+	}
+	if len(c.ObserveParts) == 0 {
+		return true
+	}
+	for _, p := range c.ObserveParts {
+		if p == part {
+			return true
+		}
+	}
+	return false
+}
+
+// ConntrackFlushEnabled resolves ConntrackFlush; "auto" follows observeOn.
+func (c Config) ConntrackFlushEnabled(observeOn bool) bool {
+	switch c.ConntrackFlush {
+	case GatewayStatsOn:
+		return true
+	case GatewayStatsOff:
+		return false
+	}
+	return observeOn
 }

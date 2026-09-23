@@ -31,6 +31,7 @@ import (
 	"github.com/capthndsme/perch-collector/internal/announce"
 	"github.com/capthndsme/perch-collector/internal/classifier"
 	"github.com/capthndsme/perch-collector/internal/gateway"
+	"github.com/capthndsme/perch-collector/internal/gatewayops"
 	"github.com/capthndsme/perch-collector/internal/observe"
 )
 
@@ -102,6 +103,9 @@ type Source struct {
 	// when the observation is off. A push carries it when the fingerprint
 	// differs from the last one sent in this session, and every DHCPRefresh.
 	DHCP func() (*observe.DHCP, string)
+	// Observe reports every observation part (gateway.go); it replaces
+	// DHCP when set. nil = no observation beyond DHCP.
+	Observe Observation
 }
 
 // System describes the host in the hello (display only).
@@ -132,6 +136,15 @@ type Options struct {
 	Source Source
 	// DHCPRefresh resends an unchanged DHCP observation; 0 = DefaultDHCPRefresh.
 	DHCPRefresh time.Duration
+	// ObserveRefresh resends the other unchanged parts; 0 = observe.DefaultRefresh.
+	ObserveRefresh time.Duration
+	// Conntrack serves net.conntrack_flush; nil = not offered.
+	Conntrack *gatewayops.Flusher
+	// Backup serves gateway.backup; nil = not offered.
+	Backup *gatewayops.Backuper
+	// AddressCache is the file keeping the controller's last good address
+	// ("" = memory only). Used only with the default HTTP client.
+	AddressCache string
 
 	// HTTPClient performs the handshake (tests); nil = link.NewHTTPClient(TLS).
 	HTTPClient *http.Client
@@ -180,10 +193,11 @@ type Client struct {
 	name        string
 	interval    time.Duration
 	configured  bool
-	// The DHCP observation last sent, per session (dhcpGen).
-	dhcpGen    uint64
-	dhcpFP     string
-	dhcpSentAt time.Time
+	// pacer decides which observation parts ride in a push (gateway.go).
+	pacer *observe.Pacer
+	// dialer resolves the controller and remembers its last good address
+	// (lastgood.go); nil with a caller-supplied HTTP client.
+	dialer *fallbackDialer
 	// gen counts sessions. A session's goroutines may still report (a hello
 	// answered just before the close) after Run has moved on; anything they
 	// report for an older generation is dropped.
@@ -200,12 +214,17 @@ func New(o Options) (*Client, error) {
 		return nil, errors.New("the WebSocket transport needs an instance id and an api_key")
 	}
 	client := o.HTTPClient
+	var dialer *fallbackDialer
 	if client == nil {
 		if client, err = link.NewHTTPClient(o.TLS); err != nil {
 			return nil, err
 		}
+		dialer = newFallbackDialer(o.AddressCache)
+		if !dialer.install(client) {
+			dialer = nil
+		}
 	}
-	c := &Client{o: o, url: u, http: client, sleep: o.Sleep, log: o.Log, intervalOf: o.intervalOf}
+	c := &Client{o: o, url: u, http: client, sleep: o.Sleep, log: o.Log, intervalOf: o.intervalOf, dialer: dialer}
 	if c.sleep == nil {
 		c.sleep = sleepCtx
 	}
@@ -219,6 +238,10 @@ func New(o Options) (*Client, error) {
 	c.dispatcher = rpc.NewDispatcher()
 	c.dispatcher.Register("collector.status", c.handleStatus)
 	c.dispatcher.Register("collector.protocols", c.handleProtocols)
+	c.registerGateway()
+	if o.Conntrack != nil && o.Conntrack.Protected == nil {
+		o.Conntrack.Protected = c.connectionEndpoints
+	}
 	return c, nil
 }
 
@@ -336,9 +359,7 @@ func (c *Client) hello() helloParams {
 	if c.o.Source.Gateway != nil {
 		p.Capabilities = append(p.Capabilities, CapabilityGatewayStats)
 	}
-	if c.o.Source.DHCP != nil {
-		p.Capabilities = append(p.Capabilities, CapabilityObserveDHCP)
-	}
+	p.Capabilities = append(p.Capabilities, c.gatewayCapabilities()...)
 	return p
 }
 
@@ -489,13 +510,8 @@ func (c *Client) push(s *link.Session, seq uint64, gen uint64) {
 	if c.o.Source.Gateway != nil {
 		p.Gateway = c.o.Source.Gateway()
 	}
-	dhcpFP := ""
-	if c.o.Source.DHCP != nil {
-		if d, fp := c.o.Source.DHCP(); d != nil && c.dhcpDue(gen, fp) {
-			p.Observe = &observe.Section{DHCP: d}
-			dhcpFP = fp
-		}
-	}
+	observed, commit := c.observeFor(gen)
+	p.Observe = observed
 	b, err := json.Marshal(p)
 	if err != nil {
 		c.log.Error("encoding a push", "err", err)
@@ -505,31 +521,12 @@ func (c *Client) push(s *link.Session, seq uint64, gen uint64) {
 		c.log.Debug("push not sent", "seq", seq, "err", err)
 		return
 	}
-	if dhcpFP != "" {
-		c.dhcpSent(gen, dhcpFP)
+	if commit != nil {
+		commit()
 	}
 	if seq == 1 {
 		log.Printf("controller: first push of this session: %d devices, %d KiB before compression", len(p.Devices), len(b)/1024)
 	}
-}
-
-// dhcpDue reports whether a push of session gen should carry the DHCP
-// observation with fingerprint fp: first in the session, changed, or the
-// refresh is due.
-func (c *Client) dhcpDue(gen uint64, fp string) bool {
-	refresh := c.o.DHCPRefresh
-	if refresh <= 0 {
-		refresh = DefaultDHCPRefresh
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.dhcpGen != gen || c.dhcpFP != fp || time.Since(c.dhcpSentAt) >= refresh
-}
-
-func (c *Client) dhcpSent(gen uint64, fp string) {
-	c.mu.Lock()
-	c.dhcpGen, c.dhcpFP, c.dhcpSentAt = gen, fp, time.Now()
-	c.mu.Unlock()
 }
 
 type statusResult struct {
@@ -661,6 +658,9 @@ func (c *Client) helloAccepted(gen uint64, res helloResult) {
 	}
 	c.collectorID, c.name = res.CollectorID, res.Name
 	c.mu.Unlock()
+	if c.dialer != nil {
+		c.dialer.confirm()
+	}
 	c.setState(&gen, lifecycleState(res.Lifecycle), "")
 }
 
