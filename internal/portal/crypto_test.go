@@ -104,12 +104,21 @@ func TestVectorGroup(t *testing.T) {
 func TestVectorVoucher(t *testing.T) {
 	k := vecKeys(t)
 	c, err := k.CanonicalOfflineVoucher(vecVoucher())
-	want := "perch-portal-voucher-v1\n7\n1\n17\n0026473bc23eeae443961e14eb2db086f0870607cedb8ea0225eca9106112af6\n3\nv:17\nactive_time\nfirst_use\n7200\n\n5000\n1000\n2\n1791000000000\n\n0\n0\n1"
+	// firstUsedAt (null here) is the last line: the canonical form ends in "\n".
+	want := "perch-portal-voucher-v1\n7\n1\n17\n0026473bc23eeae443961e14eb2db086f0870607cedb8ea0225eca9106112af6\n3\nv:17\nactive_time\nfirst_use\n7200\n\n5000\n1000\n2\n1791000000000\n\n0\n0\n1\n"
 	if err != nil || c != want {
 		t.Fatalf("canonical %q %v", c, err)
 	}
-	if s, _ := k.SignOfflineVoucher(vecVoucher()); s != "8_FWs60NXD4EoTssIGvOlJPTWKhemRFJSiNjoYKjVz8" {
+	if s, _ := k.SignOfflineVoucher(vecVoucher()); s != "fF58SkU0g5C47axcdZN2dLM0sGtvRKWO0ksDlD1kaY8" {
 		t.Fatalf("sig %s", s)
+	}
+	used := vecVoucher()
+	used.FirstUsedAt = i64(1790000000000)
+	if c, _ := k.CanonicalOfflineVoucher(used); c != want+"1790000000000" {
+		t.Fatalf("canonical with firstUsedAt %q", c)
+	}
+	if s, _ := k.SignOfflineVoucher(used); s != "AMBsGy99v8xLEJ_uEq9C2LFi2cVgrIzUBYewJLuzLMo" {
+		t.Fatalf("sig with firstUsedAt %s", s)
 	}
 	// Portal lists are sorted.
 	v := vecVoucher()

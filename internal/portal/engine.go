@@ -210,11 +210,14 @@ type Engine struct {
 	groups            map[string]*Group
 	vouchers          map[int64]*Voucher
 	voucherByVerifier map[string]int64
-	events            []Event
-	lastSeq           int64
-	ended             []endedUsage
-	nonces            []string
-	newestServerNow   int64
+	// voucherSeries is the serverNow of the offline list part 1 last
+	// replaced the held list with; its later parts carry the same.
+	voucherSeries   int64
+	events          []Event
+	lastSeq         int64
+	ended           []endedUsage
+	nonces          []string
+	newestServerNow int64
 
 	// applied is what the kernel holds per portal (after the last
 	// successful apply); the tick compares the live sets with it.

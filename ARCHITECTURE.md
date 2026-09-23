@@ -312,7 +312,12 @@ time before data (a time voucher over a running data bucket swaps it into
 the queue; anything else queues), a first-use wall clock started at
 redemption, a `localRef` grant and an `offline_redeemed` journal entry.
 Offline-queued entitlements are promoted by the router only while the
-controller is away.
+controller is away. The held list arrives in parts (part 1 replaces, later
+parts of the same `serverNow` append); `firstUsedAt` decides whether
+`redeemBy` still applies. A guest sign-in goes offline only when the session
+is gone (no session, or it ended under the call): a live session that does
+not answer within 8 s is `controller_unreachable`, because the controller may
+still be answering (it refuses what it could not start within 5 s).
 
 The controller hook is `controller.Options.Portal`: the client registers the
 portal.* handlers, adds the hello details, and hands the session to the engine

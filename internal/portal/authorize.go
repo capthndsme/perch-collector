@@ -422,7 +422,9 @@ func (e *Engine) Deauthorize(ctx context.Context, p DeauthorizeParams) (Deauthor
 // portal.vouchers
 // ---------------------------------------------------------------------------
 
-// Vouchers replaces the offline voucher list.
+// Vouchers takes the offline voucher list: part 1 (append false) replaces
+// the held list, later parts of the same list (append true, same
+// serverNow) add to it.
 func (e *Engine) Vouchers(ctx context.Context, p VouchersParams) (VouchersResult, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -431,11 +433,28 @@ func (e *Engine) Vouchers(ctx context.Context, p VouchersParams) (VouchersResult
 		items[i] = v.Sig
 	}
 	env := Envelope{Kind: "vouchers", Full: p.Enabled, ServerNow: p.ServerNow, Nonce: p.Nonce, ItemSignatures: items}
+	if p.Append {
+		reason := "append"
+		env.Reason = &reason
+	}
 	if err := e.checkEnvelopeLocked(p.KeyEpoch, env, p.Sig); err != nil {
 		return VouchersResult{}, err
 	}
+	if p.Append && (e.voucherSeries == 0 || p.ServerNow != e.voucherSeries) {
+		// A part without the list it belongs to (its part 1 failed, or a
+		// replay of an older list's part): refused, the controller sends
+		// the whole list again.
+		return VouchersResult{}, errRPC(codeFailed, "vouchers_out_of_order",
+			"part %d of %d does not belong to the list held (serverNow %d)", p.Part, p.Parts, p.ServerNow)
+	}
 	res := VouchersResult{}
 	next := map[int64]*Voucher{}
+	if p.Append {
+		for id, v := range e.vouchers {
+			next[id] = v
+		}
+	}
+	added := map[int64]*Voucher{}
 	if p.Enabled && *e.settings.OfflineRedemption {
 		for _, sv := range p.Vouchers {
 			want, err := e.keys.SignOfflineVoucher(sv.WireOfflineVoucher)
@@ -452,17 +471,22 @@ func (e *Engine) Vouchers(ctx context.Context, p VouchersParams) (VouchersResult
 				v.FirstUsed = old.FirstUsed
 			}
 			next[sv.VoucherID] = v
+			added[sv.VoucherID] = v
 		}
 	}
+	if !p.Append {
+		e.voucherSeries = p.ServerNow
+	}
 	e.vouchers = next
-	e.voucherByVerifier = map[string]int64{}
 	err := e.store.Tx(ClassGrant, func(tx sqlTx) error {
-		if _, err := tx.Exec(`DELETE FROM vouchers`); err != nil {
-			return err
+		if !p.Append {
+			if _, err := tx.Exec(`DELETE FROM vouchers`); err != nil {
+				return err
+			}
 		}
-		for _, v := range next {
+		for _, v := range added {
 			b, _ := json.Marshal(v)
-			if _, err := tx.Exec(`INSERT INTO vouchers (voucher_id, data) VALUES (?, ?)`, v.VoucherID, string(b)); err != nil {
+			if _, err := tx.Exec(`INSERT OR REPLACE INTO vouchers (voucher_id, data) VALUES (?, ?)`, v.VoucherID, string(b)); err != nil {
 				return err
 			}
 		}
@@ -471,10 +495,14 @@ func (e *Engine) Vouchers(ctx context.Context, p VouchersParams) (VouchersResult
 	if err != nil {
 		e.log.Error("portal: storing vouchers", "err", err)
 	}
+	e.voucherByVerifier = make(map[string]int64, len(next))
 	for id, v := range next {
 		e.voucherByVerifier[v.Verifier] = id
 	}
-	res.Stored = len(next)
+	res.Stored = len(added)
+	if p.Parts > 1 {
+		e.log.Debug("portal: offline vouchers part", "part", p.Part, "parts", p.Parts, "stored", res.Stored, "held", len(next))
+	}
 	e.snapshotIfDue()
 	return res, nil
 }
@@ -485,6 +513,7 @@ func (e *Engine) dropVouchersLocked() {
 	}
 	e.vouchers = map[int64]*Voucher{}
 	e.voucherByVerifier = map[string]int64{}
+	e.voucherSeries = 0
 	_ = e.store.Exec(ClassGrant, `DELETE FROM vouchers`)
 }
 
