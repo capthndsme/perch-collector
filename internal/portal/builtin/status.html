@@ -5,16 +5,19 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{portal_name}}</title>
 <link rel="stylesheet" href="{{assets}}/style.css">
+<script src="{{assets}}/checkout.js" defer></script>
 </head>
 <body>
 <main class="card">
   <h1>You are online</h1>
   <p class="message" data-code="{{message_code}}">{{message}}</p>
+  {{receipt}}
   <dl class="status">
     <dt>Time left</dt><dd>{{remaining_time}}</dd>
     <dt>Data left</dt><dd>{{remaining_data}}</dd>
     <dt>Until</dt><dd>{{expires_at}}</dd>
   </dl>
+  {{checkout_form}}
   {{logout_form}}
   <p class="notice">{{privacy_notice}}</p>
   <p class="device">Device {{client_mac}}</p>

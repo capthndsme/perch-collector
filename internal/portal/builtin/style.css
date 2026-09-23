@@ -14,3 +14,14 @@ h1 { margin: 0 0 8px; font-size: 1.4rem; }
 .status { display: grid; grid-template-columns: auto 1fr; gap: 4px 16px; }
 .status dt { color: var(--muted); }
 .status dd { margin: 0; }
+.perch-form select { font: inherit; padding: 10px 12px; border: 1px solid var(--muted); border-radius: 8px; background: transparent; color: inherit; }
+.perch-form button.secondary { background: transparent; color: var(--fg); border: 1px solid var(--muted); }
+.perch-accept { display: flex; gap: 8px; align-items: flex-start; }
+.perch-terms { max-height: 12em; overflow: auto; white-space: pre-line; font-size: 0.9rem; color: var(--muted); margin: 0; }
+.perch-rates { margin: 0 0 16px; padding-left: 20px; color: var(--muted); font-size: 0.9rem; }
+.perch-checkout, .perch-receipt { margin: 16px 0; padding: 16px; border-radius: 8px; border: 1px solid var(--muted); }
+.perch-checkout h2, .perch-receipt h2 { margin: 0 0 8px; font-size: 1.1rem; }
+.perch-total { margin: 0; font-size: 2rem; font-weight: 600; }
+.perch-preview, .perch-idle, .perch-receipt-detail { color: var(--muted); margin: 4px 0; }
+.perch-terminal-state:empty { display: none; }
+.perch-code { margin: 8px 0; font: 600 1.6rem/1.2 ui-monospace, monospace; letter-spacing: 0.08em; user-select: all; }
