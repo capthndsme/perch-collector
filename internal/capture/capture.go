@@ -12,6 +12,29 @@ import (
 	"github.com/google/gopacket/pcap"
 )
 
+// FullPacketSnapLen is the capture length used whenever packets are
+// inspected beyond their headers (nDPI): the largest IPv4 packet plus its
+// link header, in practice every packet the capture sees whole.
+//
+// A frame-sized snap length is not enough. Offloads hand the capture
+// coalesced super-packets (GSO on the veth of a router in a container, GRO
+// on a physical NIC): a post-quantum ClientHello (X25519MLKEM768, 1.5 to
+// 2 KB, sent by current browsers and curl) arrives as ONE packet bigger than
+// the MTU. Even without offloads a full-size 1500-byte IP packet is a
+// 1514-byte Ethernet frame. Cut short, the ClientHello never reassembles in
+// nDPI and the flow loses its server name.
+const FullPacketSnapLen int32 = 65535
+
+// SnapLen is the capture length to open the interface with: the configured
+// snap_len for header-only (port) classification, at least
+// FullPacketSnapLen when payload is inspected.
+func SnapLen(configured int32, inspectsPayload bool) int32 {
+	if inspectsPayload && configured < FullPacketSnapLen {
+		return FullPacketSnapLen
+	}
+	return configured
+}
+
 // Engine captures packets from a network interface and feeds them to an Aggregator.
 type Engine struct {
 	handle     *pcap.Handle
@@ -122,19 +145,10 @@ func (e *Engine) processPacket(packet gopacket.Packet) {
 	}
 
 	// nDPI needs the full IP packet (header + everything below) to inspect.
-	// For port-based classification this is ignored. We assemble it as a
-	// contiguous []byte from the NetworkLayer; this allocates per packet
-	// but spares us the slicing fragility around VLAN/QinQ headers in
-	// `packet.Data()`.
+	// For port-based classification this is ignored.
 	var ipPacket []byte
 	if netLayer := packet.NetworkLayer(); netLayer != nil {
-		h := netLayer.LayerContents()
-		p := netLayer.LayerPayload()
-		if len(h) > 0 {
-			ipPacket = make([]byte, len(h)+len(p))
-			copy(ipPacket, h)
-			copy(ipPacket[len(h):], p)
-		}
+		ipPacket = networkBytes(netLayer.LayerContents(), netLayer.LayerPayload())
 	}
 
 	result := e.classifier.Classify(srcIP, dstIP, srcPort, dstPort, transportProto, ipPacket)
@@ -148,6 +162,31 @@ func (e *Engine) processPacket(packet gopacket.Packet) {
 			NameExpected: result.NameExpected,
 		})
 	}
+}
+
+// networkBytes returns the IP packet (header + payload) as one slice. The
+// decoder cuts both from the same capture buffer back to back, so this is
+// normally a re-slice of that buffer with no copy (with full-packet capture
+// a copy would be up to 64 KB per coalesced packet); if they are not
+// adjacent it falls back to a copy. The result is only valid until the next
+// packet is read, which suits Classify: it borrows the slice for the call.
+func networkBytes(header, payload []byte) []byte {
+	if len(header) == 0 {
+		return nil
+	}
+	if len(payload) == 0 {
+		return header
+	}
+	n := len(header) + len(payload)
+	if cap(header) >= n {
+		if whole := header[:n]; &whole[len(header)] == &payload[0] {
+			return whole
+		}
+	}
+	out := make([]byte, n)
+	copy(out, header)
+	copy(out[len(header):], payload)
+	return out
 }
 
 // Stop signals the capture loop to exit and closes the pcap handle.

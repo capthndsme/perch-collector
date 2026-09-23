@@ -10,12 +10,12 @@ interface: ""
 # Examples: "not port 22", "net 192.168.1.0/24", "tcp"
 bpf_filter: ""
 
-# Snapshot length — bytes per packet to capture.
-#   96   = headers only, sufficient for classification_mode "port"
-#   256  = TLS ClientHello (SNI) fits, enough for nDPI's app fingerprints
-#   1500 = full packets, best for nDPI; gives QUIC/BitTorrent the most
-#          accurate detection at a small CPU cost.
-snap_len: 1500
+# Snapshot length — bytes per packet to capture in classification_mode
+# "port" (96 = headers only is enough). In "ndpi" mode the collector always
+# captures whole packets (65535): a TLS ClientHello with a post-quantum key
+# share is 1.5-2 KB and often reaches the capture as one packet above the
+# MTU (GSO/GRO); cut short, it loses its server name.
+snap_len: 96
 
 # ---------- Protocol Classification ----------
 
@@ -26,9 +26,7 @@ snap_len: 1500
 #             host (apt install libndpi-dev / libndpi). On any failure
 #             the daemon logs a warning and degrades to "port".
 #
-# In "port" mode, snap_len can stay at 96 (headers only).
-# In "ndpi" mode, snap_len should be >= 256 (TLS SNI) or 1500 (full
-# packets). The daemon prints a startup warning if snap_len < 256.
+# snap_len only matters in "port" mode; "ndpi" captures whole packets.
 classification_mode: "ndpi"
 
 # When classification_mode is "ndpi":
