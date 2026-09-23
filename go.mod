@@ -6,6 +6,7 @@ require (
 	github.com/capthndsme/perch-agentkit v0.2.0
 	github.com/coder/websocket v1.8.13
 	github.com/google/gopacket v1.1.19
+	github.com/mattn/go-sqlite3 v1.14.52
 	github.com/mdlayher/netlink v1.7.2
 	github.com/ti-mo/conntrack v0.5.1
 	gopkg.in/yaml.v3 v3.0.1

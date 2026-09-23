@@ -1,0 +1,204 @@
+table inet perch_portal
+delete table inet perch_portal
+table inet perch_portal {
+	set p3_auth {
+		type ether_addr
+		elements = { 02:00:00:00:20:11, 02:00:00:00:20:12 }
+	}
+	set p3_wg4 {
+		type ipv4_addr
+		size 8192
+		flags timeout
+		timeout 1h
+		elements = { 203.0.113.80 }
+	}
+	set p3_wg6 {
+		type ipv6_addr
+		size 8192
+		flags timeout
+		timeout 1h
+	}
+	set p3_wgnet4 {
+		type ipv4_addr
+		flags interval
+		auto-merge
+		elements = { 203.0.113.0/24 }
+	}
+	set p3_wgnet6 {
+		type ipv6_addr
+		flags interval
+		auto-merge
+		elements = { 2001:db8:80::/48 }
+	}
+	set p3_dns {
+		type ether_addr
+		size 4096
+		flags dynamic,timeout
+		timeout 2m
+	}
+	set p4_auth {
+		type ether_addr
+		elements = { 02:00:00:00:99:11 }
+	}
+	set p4_bind4 {
+		type ether_addr . ipv4_addr
+		elements = { 02:00:00:00:99:11 . 192.168.110.100 }
+	}
+	set p4_wg4 {
+		type ipv4_addr
+		size 8192
+		flags timeout
+		timeout 1h
+	}
+	set p4_wg6 {
+		type ipv6_addr
+		size 8192
+		flags timeout
+		timeout 1h
+	}
+	set p4_wgnet4 {
+		type ipv4_addr
+		flags interval
+		auto-merge
+	}
+	set p4_wgnet6 {
+		type ipv6_addr
+		flags interval
+		auto-merge
+	}
+	set p4_dns {
+		type ether_addr
+		size 4096
+		flags dynamic,timeout
+		timeout 2m
+	}
+	set p5_auth {
+		type ether_addr
+	}
+	set p5_wg4 {
+		type ipv4_addr
+		size 8192
+		flags timeout
+		timeout 1h
+	}
+	set p5_wg6 {
+		type ipv6_addr
+		size 8192
+		flags timeout
+		timeout 1h
+	}
+	set p5_wgnet4 {
+		type ipv4_addr
+		flags interval
+		auto-merge
+	}
+	set p5_wgnet6 {
+		type ipv6_addr
+		flags interval
+		auto-merge
+	}
+	chain prerouting {
+		type nat hook prerouting priority dstnat - 5; policy accept;
+		iifname "guest" jump p3_dstnat
+		iifname "br-trunk.110" jump p4_dstnat
+		iifname "br-trunk.120" jump p5_dstnat
+	}
+	chain forward {
+		type filter hook forward priority filter - 5; policy accept;
+		iifname "guest" jump p3_forward
+		iifname "br-trunk.110" jump p4_forward
+		iifname "br-trunk.120" jump p5_forward
+	}
+	chain input {
+		type filter hook input priority filter - 5; policy accept;
+		iifname "guest" jump p3_input
+		iifname "br-trunk.110" jump p4_input
+		iifname "br-trunk.120" jump p5_input
+	}
+	chain reject_guest {
+		meta l4proto tcp reject with tcp reset
+		reject with icmpx admin-prohibited
+	}
+	chain p3_dstnat {
+		ether saddr @p3_auth return
+		tcp dport != 80 return
+		ip daddr @p3_wg4 return
+		ip daddr @p3_wgnet4 return
+		ip6 daddr @p3_wg6 return
+		ip6 daddr @p3_wgnet6 return
+		tcp dport 80 redirect to :2080
+	}
+	chain p3_forward {
+		ether saddr @p3_auth return
+		ip daddr @p3_wg4 return
+		ip daddr @p3_wgnet4 return
+		ip6 daddr @p3_wg6 return
+		ip6 daddr @p3_wgnet6 return
+		jump reject_guest
+	}
+	chain p3_input {
+		ct state related accept
+		meta l4proto { tcp, udp } th dport 53 ether saddr != @p3_auth update @p3_dns { ether saddr limit rate over 120/minute burst 60 packets } drop
+		meta l4proto { tcp, udp } th dport 53 accept
+		udp dport 67 accept
+		tcp dport 2080 accept
+		icmp type { echo-request, echo-reply } accept
+		icmpv6 type { echo-request, echo-reply, nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } accept
+		jump reject_guest
+	}
+	chain p4_dstnat {
+		ether saddr @p4_auth return
+		tcp dport != 80 return
+		ip daddr @p4_wg4 return
+		ip daddr @p4_wgnet4 return
+		ip6 daddr @p4_wg6 return
+		ip6 daddr @p4_wgnet6 return
+		tcp dport 80 redirect to :2080
+	}
+	chain p4_forward {
+		ether saddr . ip saddr @p4_bind4 return
+		meta nfproto ipv6 ether saddr @p4_auth return
+		ip daddr @p4_wg4 return
+		ip daddr @p4_wgnet4 return
+		ip6 daddr @p4_wg6 return
+		ip6 daddr @p4_wgnet6 return
+		jump reject_guest
+	}
+	chain p4_input {
+		ct state related accept
+		meta l4proto { tcp, udp } th dport 53 ether saddr != @p4_auth update @p4_dns { ether saddr limit rate over 120/minute burst 60 packets } drop
+		meta l4proto { tcp, udp } th dport 53 accept
+		udp dport 67 accept
+		udp dport 547 accept
+		tcp dport 2080 accept
+		icmp type { echo-request, echo-reply } accept
+		icmpv6 type { echo-request, echo-reply, nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } accept
+		jump reject_guest
+	}
+	chain p5_dstnat {
+		ether saddr @p5_auth return
+		tcp dport != 80 return
+		ip daddr @p5_wg4 return
+		ip daddr @p5_wgnet4 return
+		ip6 daddr @p5_wg6 return
+		ip6 daddr @p5_wgnet6 return
+		tcp dport 80 redirect to :2080
+	}
+	chain p5_forward {
+		ether saddr @p5_auth return
+		ip daddr @p5_wg4 return
+		ip daddr @p5_wgnet4 return
+		ip6 daddr @p5_wg6 return
+		ip6 daddr @p5_wgnet6 return
+		jump reject_guest
+	}
+	chain p5_input {
+		ct state related accept
+		meta l4proto { tcp, udp } th dport 53 accept
+		udp dport 67 accept
+		tcp dport 2080 accept
+		icmp type { echo-request, echo-reply } accept
+		icmpv6 type { echo-request, echo-reply, nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } accept
+		jump reject_guest
+	}
+}

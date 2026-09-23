@@ -1,0 +1,8 @@
+# Perch guest portal (perch-collector): the portal devices may reach DNS, DHCP,
+# the guest pages and ping on the router; table inet perch_portal drops the rest.
+iifname { "br-trunk.110", "guest" } meta l4proto { tcp, udp } th dport 53 accept comment "!perch-portal: DNS"
+iifname { "br-trunk.110", "guest" } udp dport 67 accept comment "!perch-portal: DHCP"
+iifname { "br-trunk.110", "guest" } udp dport 547 accept comment "!perch-portal: DHCPv6"
+iifname { "br-trunk.110", "guest" } tcp dport { 2080 } accept comment "!perch-portal: guest pages"
+iifname { "br-trunk.110", "guest" } icmp type echo-request accept comment "!perch-portal: ping"
+iifname { "br-trunk.110", "guest" } icmpv6 type { echo-request, nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } accept comment "!perch-portal: ICMPv6"
