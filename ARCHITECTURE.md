@@ -199,12 +199,13 @@ starts, so a subcommand typed after a flag cannot start a second collector.
 ## The config plane
 
 The router side of the managed gateway's config plane (plan 1 of the design,
-promoted into the controller's `docs/gateway/`). This version is read-only:
-capabilities, reads with secrets redacted, change notifications with an
-author. Everything is additive on `perch-collector.v1`: an older controller
-drops the unknown hello key, sends no `gatewayConfig` in `agent.configure`
-(the plane then stays off) and never calls the new methods; an older
-collector answers them with -32601.
+promoted into the controller's `docs/gateway/`): capabilities, reads with
+secrets redacted, change notifications with an author, and, with
+`config_access write`, applies with confirm and rollback, the sync ledger, the
+boot guard and package installs ("Writes" below). Everything is additive on
+`perch-collector.v1`: an older controller drops the unknown hello key, sends
+no `gatewayConfig` in `agent.configure` (the plane then stays off) and never
+calls the new methods; an older collector answers them with -32601.
 
 Built in `main_config.go` when the collector runs on OpenWrt with transport
 websocket; `internal/gwconfig` holds the logic, `internal/controller/gwconfig.go`
@@ -212,26 +213,32 @@ the wire. UCI parsing, hashing, redaction and the package database come from
 the kit (`perch-agentkit/openwrt/uci`, `openwrt/pkgdb`, `openwrt/ubus`).
 
 **Router opt-in.** `config_access` none (default) / read / write, and the
-`managed_config` allowlist; see CONFIG.md. Effective access = the configured
-one capped at `read` in this version. Readable = allowlist minus the denylist
-(`perch-collector perch-apd rpcd uhttpd dropbear luci`) plus the ledger
-`perch-managed`; nothing with access `none`.
+`managed_config` allowlist; see CONFIG.md. Readable = allowlist minus the
+denylist (`perch-collector perch-apd rpcd uhttpd dropbear luci`) plus the
+ledger `perch-managed`; nothing with access `none`. Writable = the allowlist
+minus the denylist (never the ledger, which only the agent writes).
 
 **Hello** (`collector.hello` params): the capability `gateway_config` joins
 `capabilities` whenever the plane exists, and
 
 ```json
-"gatewayConfig":{"protocol":1,"access":"read","accessConfigured":"write","transportOk":false,
+"gatewayConfig":{"protocol":1,"access":"write","transportOk":false,
   "hashes":{"network":"3f9a…","firewall":"77c0…","perch-managed":"…"},
-  "apply":{"state":"idle"},"results":[]}
+  "apply":{"state":"pending_confirm","applyId":"g3-a41","kind":"apply","deadline":"2026-09-23T10:01:30Z","protected":true},
+  "results":[{"applyId":"g3-a40","kind":"apply","outcome":"rolled_back","reason":"reboot","at":"…","hashes":{…}}],
+  "signing":{"required":true,"challenge":"<32 hex, new per session>","key":"api_key","windowSeconds":300},
+  "management":{"network":"lan","device":"br-lan","controllerAddress":"192.168.1.5","reportedAt":"…"}}
 ```
 
-`access` is effective, `accessConfigured` appears only when the router asks
-for more than this version does. `transportOk` = `server_url` is https with
+`access` is the configured access (`accessConfigured` appears only when an
+older build capped it). `transportOk` = `server_url` is https with
 verification on (`announce_tls_insecure` off). `hashes` = SHA-256 of each
 readable config file that exists (absent = no file; none at all with access
 `none`); they are also the baseline later notifications are judged against.
-`apply` and `results` are always idle/empty until applies exist.
+`apply` is `{"state":"idle"}` or the pending job (`applying` while it
+commits, `pending_confirm`, `rolling_back`); `results` are outcomes not yet
+acknowledged with `gateway.config.ack`. `signing` and `management` appear with
+access `write`.
 
 **`agent.configure`** may carry
 `"gatewayConfig":{"mode":"off"|"observe"|"managed","authoritative":bool,"watchSeconds":30,"debounceSeconds":5}`.
@@ -243,7 +250,7 @@ configure.
 
 | Method | Params | Result |
 |---|---|---|
-| `gateway.capabilities` | `{}` | `{protocol, access, accessConfigured, allowedConfigs[], transportOk, allowInsecure, confirmMaxSeconds, backend:"ubus"\|"uci-cli"\|null, openwrt:{release,revision,target,arch,board}\|null, firewall:"fw4"\|"fw3"\|null, packageManager:"opkg"\|"apk"\|null, packages:{name:version}, configs[], hashes{}, uncommitted[], luciPending, apply:{state:"idle"}, capture:{networks:[{network,device}]}, flash:{path,totalBytes,freeBytes}\|null, storage:{path,exists,mountPoint,fsType,device,medium,onRoot,readOnly,totalBytes,freeBytes}\|null}` |
+| `gateway.capabilities` | `{}` | `{protocol, access, accessConfigured, allowedConfigs[], transportOk, allowInsecure, confirmMaxSeconds, backend:"ubus"\|"uci-cli"\|null, openwrt:{release,revision,target,arch,board}\|null, firewall:"fw4"\|"fw3"\|null, packageManager:"opkg"\|"apk"\|null, packages:{name:version}, configs[], hashes{}, uncommitted[], luciPending, apply:{state,…}, capture:{networks:[{network,device}]}, flash:{path,totalBytes,freeBytes}\|null, storage:{path,exists,mountPoint,fsType,device,medium,onRoot,readOnly,totalBytes,freeBytes}\|null, signing?:{…}, management:{network,device,controllerAddress,reportedAt}\|null, installAllowlist[]}` |
 | `gateway.config.read` | `{configs?:[…]}` (default: every readable config) | `{readAt, configs:[{name, hash, missing?, sections:[{name, type, anonymous, index, options:{k: string\|string[]}, secrets?:{k:"hmac:…"}, hash}]}], ledger:[{perchId, config, section, domain}], uncommitted[], luciPending}` |
 
 - `packages` lists only the kit's watch list (`firewall4 firewall dnsmasq
@@ -258,8 +265,7 @@ configure.
   `config_not_allowed` (+ `data.configs`, the refused names; nothing is read),
   `read_too_large` (a file over 2 MiB, or the read over 2 MiB / 2000 sections);
   `read_failed` for a file that cannot be read or parsed. Bad params are
-  -32602. `gateway.config.apply`, `.confirm`, `.rollback` and `.ack` do not
-  exist yet (-32601).
+  -32602. The write methods are below.
 
 **Notification to the controller:** `gateway.config.changed`
 
@@ -301,6 +307,205 @@ commit` without `reload_config`, an editor or scp are caught by polling.
 
 `perch-collector gateway-config [config...]` runs capabilities and a read
 with the settings of `/etc/config/perch-collector` and prints them.
+
+### Writes: apply, confirm, rollback (config_access write)
+
+The apply engine (`internal/gwconfig/engine.go`, plan 1 section 3.4). One job
+at a time: a config apply or a package install.
+
+**Write gate** (every write method): access `write`, else `not_managed`; then
+either `transportOk` (verified TLS), or the router's `config_allow_insecure
+'1'` plus a signed request (below), else `insecure_transport` (no opt-in) or
+`signature_required` (opt-in, unsigned). Apply and package install also need
+the controller's `agent.configure` mode `managed` on the session
+(`not_managed`); confirm, rollback and ack do not. Secret values
+(`{"$secret"}`) are refused over anything but verified TLS, signed or not.
+
+**`gateway.config.apply`**
+
+```json
+{"applyId":"g3-a41","kind":"apply","protected":false,"confirmTimeoutSeconds":90,"dryRun":false,
+ "base":{"network":"3f9a…","dhcp":"77c0…"},
+ "ops":[
+  {"op":"adopt","config":"dhcp","section":"cfg03a1b2","perchId":"h9","renameTo":"perch_h9","domain":"dhcp_hosts"},
+  {"op":"put","config":"dhcp","section":"perch_h1","type":"host",
+   "options":{"name":"camera","mac":"02:00:00:00:00:20","ip":"192.168.1.20","tag":["x","y"],"leasetime":{"$keep":true}},
+   "position":{"after":"lan"}},
+  {"op":"put","config":"network","section":"wg0","type":"interface","options":{"private_key":{"$secret":"s7"}}},
+  {"op":"delete","config":"dhcp","section":"perch_h3"},
+  {"op":"order","config":"firewall","type":"rule","sections":["perch_r40","perch_r41"]}],
+ "ledger":{"set":[{"perchId":"h1","config":"dhcp","section":"perch_h1","domain":"dhcp_hosts"}],"remove":["h3"]},
+ "secrets":{"s7":"<value>"}}
+```
+
+- `applyId` `^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$`; `kind` `apply` | `revert` | `adopt`
+  (only reported back); at most 2000 ops and 256 secrets.
+- `base`: the file hash of **every config an op touches** (required; `""` =
+  the file does not exist) and optionally of `perch-managed`. Any mismatch is
+  `stale_base` with `data.configs` and `data.hashes` (all readable hashes now).
+- `put` creates the section or fully replaces an owned one: listed options are
+  set (a list replaces the whole list; `[]` = no option), unlisted ones are
+  deleted, `{"$keep":true}` leaves the router's value, `{"$secret":ref}`
+  resolves from `secrets`. A different `type` deletes and re-adds it in place.
+  `position` `{after|before: section}` places it. An existing section must be
+  owned (in the ledger, or adopted earlier in the job), else `not_owned`.
+- `adopt` registers an existing section under `perchId` (overwriting that perch
+  id's entry: a re-link); an anonymous section must be renamed (`renameTo`),
+  a taken name is `name_taken`, a section ledgered under another id is
+  `not_owned`.
+- `delete` removes an owned section (absent = nothing to do) and its ledger
+  entries. `order` puts owned sections of `type` into the slots they occupy
+  together, in the listed order; foreign sections do not move.
+- `ledger.set` may only name sections the job created or adopted, or re-link
+  an existing perch id; anonymous names are refused. `ledger.remove` drops
+  entries by perch id. Values: no control characters, at most 4096 bytes;
+  names `^[A-Za-z0-9_]{1,64}$`; perch ids at most 24 characters.
+
+Result:
+
+```json
+{"state":"pending_confirm","applyId":"g3-a41","deadline":"2026-09-23T10:01:30Z","confirmTimeoutSeconds":90,
+ "protected":false,"hashes":{"dhcp":"…","perch-managed":"…"}}
+```
+
+`state`: `pending_confirm` (committed, window open); `applied` (only the
+ledger changed: adopting named sections, ledger edits; no window, nothing
+reloaded); `noop` (nothing to change; `hashes` = all readable); `dry_run`
+(`changes:[{config,section,op,option?,value?}]`: rpcd's `uci changes`, secret
+values `<redacted>`; nothing kept). A retried apply with the pending job's id
+returns the pending reply again. The window is `confirmTimeoutSeconds`
+(default 90) clamped to 30..`config_confirm_max`; a job that touches the
+management path gets at least 300 s (`protected: true`, whether the controller
+flagged it or the agent found it).
+
+**Sequence** (the router's rpcd; a Go-rendered file when rpcd has no `uci`
+object, because the uci CLI would also commit deltas others staged in
+`/tmp/.uci`):
+
+```
+validate (gate, LuCI apply pending -> busy luci_pending, base, simulate ops,
+          foreign /tmp/.uci/network deltas -> foreign_staged)
+snapshot touched configs (+ ledger) -> /etc/perch-collector/rollback/<id>/before/, fsync
+pending.json {applyId, kind, deadline, configs, hashesBefore, committed:false}, fsync
+marker /var/run/perch-collector/apply-<id>  (tmpfs: gone after a reboot)
+private rpcd session (session create + grant uci read/write on those configs, tagged perch=<id>)
+stage ops -> commit per config in apply order (system network dhcp firewall sqm perch-qos opennds mwan3 pbr, rest a-z)
+            rpcd's commit sends config.change; procd reloads the services
+write ledger; read the files back and compare with the simulation
+snapshot after/, pending.json committed:true + hashesAfter; RecordOwn (echo suppression)
+reply pending_confirm
+0.5 s, then wait for netifd (2 s minimum, no interface pending, 20 s max)
+close the session (1000 "reconnecting after apply"); redial at once, then every 2 s
+confirm on a later session -> drop snapshot, record and marker
+deadline without confirm, gateway.config.rollback, or a failure after the first commit
+  -> note router edits of the window (discarded), restore the files atomically,
+     config.change per restored config in apply order, result -> results.json,
+     gateway.config.result if a session is up; redial fast for 2 minutes
+```
+
+A failure before the first commit leaves nothing (`apply_failed`, or `busy`
+with `reason` `uncommitted`/`luci_pending` when rpcd refuses). A failure after
+it rolls back (`apply_failed` with `data.rolledBack: true` and `data.result`).
+
+**`gateway.config.confirm`** `{applyId}` → `{"state":"confirmed","applyId":…,"hashes":{…}}`.
+Refused on the session the apply came on (`not_reconnected`): the proof is the
+fresh connection. Repeating it is fine. `deadline_passed` (+ `data.result` when
+known) once the window closed, `unknown_apply` otherwise.
+
+**`gateway.config.rollback`** `{applyId}` → `{"state":"rolling_back","applyId":…}`
+(the restore runs after the reply; its outcome comes as a result, reason
+`admin`). For a finished job it returns that job's outcome as `state`.
+
+**`gateway.config.ack`** `{applyIds:[…]}` → `{"acked":n}`: drops outcomes from
+`results` (32 are kept at most).
+
+**Notification `gateway.config.result`** (also the entries of the hello's `results`):
+
+```json
+{"applyId":"g3-a41","kind":"apply","outcome":"rolled_back","reason":"confirm_timeout",
+ "at":"2026-09-23T10:01:30Z","hashes":{…all readable…},
+ "discarded":{"dhcp":[{"name":"lan","type":"dhcp","anonymous":false,"index":1,"options":{…},"secrets":{…},"hash":"…","change":"changed"}]},
+ "packages":["kmod-wireguard","wireguard-tools"],"detail":"…"}
+```
+
+`outcome` `rolled_back` | `failed` (the restore itself failed; the snapshot is
+kept as `rollback/failed-<id>`). `reason` `confirm_timeout` | `admin` |
+`reboot` | `commit_failed` | `reload_failed` | `install_failed`. `discarded`
+= sections edited on the router during the window, which the rollback undid
+(`added` / `changed` / `removed` relative to what the job had committed;
+redacted like a read). `packages` = what a package job's rollback removed.
+
+**Restarts and reboots.** At start the daemon reads `pending.json`: no marker
+= the router rebooted → restore (`reboot`); not committed = interrupted mid
+commit → restore (`commit_failed`); past the deadline → restore
+(`confirm_timeout`); otherwise the timer is armed again and any session of the
+new process may confirm. The boot guard `perch-collector config-guard`
+(init script `perch-collector-guard`, START=15, before `network` at 20) does
+the reboot case before any service reads the configs, without reloading;
+the daemon then reports the outcome.
+
+**Management path.** `ip route get <server_url host>` gives the device;
+netifd's interface on it is the network. Protected sections: that interface,
+any interface on its device (or its parent bridge), the `device` section that
+is the device or its parent bridge, the `bridge-vlan`s on that bridge, the
+firewall zones listing the network, and firewall `defaults` (the controller's
+`apply_plan.ts` rules). Reported as `management` in the hello and capabilities.
+
+**Ledger** `/etc/config/perch-managed`: `config synced '<perchId>'` with
+`option config`, `option section`, `option domain`; written whole by the agent
+(tmp + fsync + rename), never staged through rpcd; the controller reads it and
+changes it only through the ops and `ledger` of an apply. Nothing is ever marked inside the foreign configs.
+
+**Signed requests** (plain HTTP with the opt-in). The params become an envelope:
+
+```json
+{"payload":"<the method's params as a JSON string>",
+ "sig":{"v":1,"ts":1790000000,"nonce":"<16-128 of [A-Za-z0-9_-]>","challenge":"<the session's hello challenge>","mac":"<64 hex>"}}
+```
+
+`mac` = hex HMAC-SHA256(key, `"perch-config-sig-v1\n" + method + "\n" +
+challenge + "\n" + ts + "\n" + nonce + "\n" + hex(SHA-256(payload bytes))`);
+key = `config_sign_key` when set, else the api_key (`signing.key` says which).
+Refusals: `bad_signature` (wrong key, method, session challenge, tampered
+payload, malformed), `stale_signature` (|ts − router clock| > 300 s;
+`data.agentTime`), `replayed` (nonce seen in the last 10 minutes). Test vector
+(key `k`, method `gateway.config.confirm`, challenge `c0ffee`, ts 1790000000,
+nonce `nonce-0000000001`, payload `{"applyId":"a1"}`): payload hash
+`275ffaf62583a907a897eaad357b77010508dbaed674bbbd8819b344ceba30e8`, mac
+`2ae21083603b5bf27157bf935395c42b2d4c607e8d6b93cf3abe9ba59d7b7e9e`. Over
+verified TLS a request may be signed or not. The api_key is the connection's
+Bearer token, so over plain HTTP a passive listener has it; `config_sign_key`
+never crosses the wire.
+
+**`gateway.package.install`** `{applyId, packages:[…1..16], confirmTimeoutSeconds?, dryRun?}` →
+
+```json
+{"state":"pending_confirm","applyId":"p1","deadline":"…","confirmTimeoutSeconds":90,"manager":"opkg",
+ "install":["kmod-wireguard","wireguard-tools"],"alreadyInstalled":[],"needBytes":237000,"freeBytes":5242880,"hashes":{…}}
+```
+
+Names must be on the install allowlist (the gateway features' packages; the
+router's `list package_allow` adds more; capabilities list them as
+`installAllowlist`), else `package_not_allowed`. Steps: `opkg update` / `apk
+update`; `opkg install --noaction` / `apk add --simulate` for the list with
+dependencies; free flash ≥ 3 × the package files' size + 512 KiB (opkg; apk:
+≥ 4 MiB), else `insufficient_flash` (`data.freeBytes`, `data.needBytes`);
+snapshot the allowlisted configs; install. A failed install removes what went
+in at once (`install_failed`, `data.rolledBack`, `data.result`); otherwise the
+job waits for its confirm like an apply, and a rollback removes the installed
+packages (requested first, then dependencies) and restores configs their
+scripts changed. `noop` when all are installed, `dry_run` stops before the
+install, `no_package_manager` without opkg or apk. The request takes as long
+as the package manager does (a minute or more with `update`).
+
+**Error codes** (-32000, `data.error`): `not_managed`, `config_not_allowed`
+(+`configs`), `insecure_transport`, `signature_required`, `bad_signature`,
+`stale_signature`, `replayed`, `stale_base`, `busy` (+`reason`
+`apply_pending`|`luci_pending`|`uncommitted`), `foreign_staged` (+`config`,
+`changes`), `not_owned`, `name_taken`, `no_section`, `unknown_apply`,
+`deadline_passed`, `not_reconnected`, `apply_failed`, `package_not_allowed`,
+`no_package_manager`, `insufficient_flash`, `install_failed`. Bad params:
+-32602 with `data.error` `bad_params`.
 
 ## Graceful Shutdown
 
