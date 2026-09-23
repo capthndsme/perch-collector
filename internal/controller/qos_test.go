@@ -79,26 +79,32 @@ func TestQoSOnTheSocket(t *testing.T) {
 		s.caps = string(hp["capabilities"])
 		answerHello(ctx, c, hello, "adopted")
 		send(ctx, c, `{"jsonrpc":"2.0","method":"agent.configure","params":{"metricsIntervalSeconds":0.1,"lifecycle":"adopted"}}`)
-		// The event queued before the session comes right after the hello.
-		for s.push == nil {
-			m, _ := next(t, frames, anyFrame, 2*time.Second)
-			switch m.Method {
-			case "qos.event":
-				var ev qos.Event
-				json.Unmarshal(m.Params, &ev)
-				s.events = append(s.events, ev.Type)
-			case "collector.push":
-				json.Unmarshal(m.Params, &s.push)
+		// Events may come between any two frames: record them on the way.
+		want := func(match func(rpc.Message) bool) rpc.Message {
+			for {
+				m, _ := next(t, frames, anyFrame, 2*time.Second)
+				if m.Method == "qos.event" {
+					var ev qos.Event
+					json.Unmarshal(m.Params, &ev)
+					s.events = append(s.events, ev.Type)
+					continue
+				}
+				if match(m) {
+					return m
+				}
 			}
 		}
+		isPush := func(m rpc.Message) bool { return m.Method == "collector.push" }
+		isResp := func(m rpc.Message) bool { return m.IsResponse() }
+		json.Unmarshal(want(isPush).Params, &s.push)
 		send(ctx, c, `{"jsonrpc":"2.0","id":1,"method":"qos.devices.set","params":{"revision":3,"devices":[{"mac":"02:00:00:00:00:01","bucket":null,"downKbit":2000,"upKbit":null,"quota":null,"expiresAt":null}]}}`)
-		s.set, _ = next(t, frames, responseFrame, 2*time.Second)
+		s.set = want(isResp)
 		send(ctx, c, `{"jsonrpc":"2.0","id":2,"method":"qos.probe","params":{}}`)
-		s.probe, _ = next(t, frames, responseFrame, 2*time.Second)
+		s.probe = want(isResp)
 		send(ctx, c, `{"jsonrpc":"2.0","id":3,"method":"qos.devices.set","params":{"revision":"x"}}`)
-		s.bad, _ = next(t, frames, responseFrame, 2*time.Second)
+		s.bad = want(isResp)
 		send(ctx, c, `{"jsonrpc":"2.0","id":4,"method":"qos.status"}`)
-		s.status, _ = next(t, frames, responseFrame, 2*time.Second)
+		s.status = want(isResp)
 		fq.raise(qos.Event{Type: qos.EventCapHit, MAC: "02:00:00:00:00:01", At: "2026-09-23T12:00:01Z"})
 		deadline := time.After(3 * time.Second)
 		for len(s.events) < 2 {

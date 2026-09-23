@@ -219,3 +219,18 @@ func TestParseSQM(t *testing.T) {
 		t.Error("sqm ifb name")
 	}
 }
+
+func TestCheckSQMFloor(t *testing.T) {
+	if err := CheckSQMFloor(true, 50000, 0, 1000); err != nil {
+		t.Error(err)
+	}
+	if err := CheckSQMFloor(true, 50000, 128, 1000); err == nil || !strings.Contains(err.Error(), "upload 128") {
+		t.Errorf("err %v", err)
+	}
+	if err := CheckSQMFloor(false, 1, 1, 1000); err != nil {
+		t.Error(err)
+	}
+	if MinWanKbit(nil) != 1000 || MinWanKbit([]byte("config globals 'globals'\n\toption min_wan_kbit '2000'\n")) != 2000 {
+		t.Error("MinWanKbit")
+	}
+}

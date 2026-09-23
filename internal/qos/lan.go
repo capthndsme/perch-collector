@@ -2,6 +2,7 @@ package qos
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/netip"
 	"sort"
 	"strconv"
@@ -187,4 +188,34 @@ func validName(s string) bool {
 		return false
 	}
 	return !strings.ContainsAny(s, " \t\n/'\"\\")
+}
+
+// CheckSQMFloor is the agent's floor on sqm rates (plan 3 section 8): an
+// enabled queue's shaped direction (rate > 0) must not go below
+// perch-qos globals.min_wan_kbit. The config plane's pre-apply validator
+// for the sqm domain calls it and refuses the edit (the agent never
+// rewrites sqm itself); a queue already below it is reported in the push
+// (sqm_below_floor).
+func CheckSQMFloor(enabled bool, downloadKbit, uploadKbit, minWanKbit int64) error {
+	if !enabled {
+		return nil
+	}
+	for _, v := range []struct {
+		name string
+		kbit int64
+	}{{"download", downloadKbit}, {"upload", uploadKbit}} {
+		if v.kbit > 0 && v.kbit < minWanKbit {
+			return fmt.Errorf("sqm %s %d kbit/s is below min_wan_kbit %d", v.name, v.kbit, minWanKbit)
+		}
+	}
+	return nil
+}
+
+// MinWanKbit is globals.min_wan_kbit of a perch-qos file (the default
+// without one).
+func MinWanKbit(perchQoS []byte) int64 {
+	if perchQoS == nil {
+		return defaultMinWanKbit
+	}
+	return ParseConfig(perchQoS).MinWanKbit
 }

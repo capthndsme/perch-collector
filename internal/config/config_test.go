@@ -615,3 +615,28 @@ func TestDHCPLeasesSetting(t *testing.T) {
 		t.Errorf("from the environment: %q %d %v", cfg.DHCPLeases, cfg.DHCPLeasesRefresh, err)
 	}
 }
+
+func TestQoSSetting(t *testing.T) {
+	cfg := Defaults()
+	if err := cfg.Validate(); err != nil || cfg.QoS != "auto" {
+		t.Fatalf("defaults: %q %v", cfg.QoS, err)
+	}
+	cfg.QoS = "sometimes"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "qos") {
+		t.Errorf("qos sometimes: %v", err)
+	}
+	t.Setenv("PERCH_COLLECTOR_QOS", "off")
+	loaded, err := Load()
+	if err != nil || loaded.QoS != "off" {
+		t.Errorf("env: %q %v", loaded.QoS, err)
+	}
+	for _, tc := range []struct {
+		setting   string
+		installed bool
+		want      bool
+	}{{"auto", true, true}, {"auto", false, false}, {"on", false, true}, {"off", true, false}} {
+		if got := (Config{QoS: tc.setting}).QoSEnabled(tc.installed); got != tc.want {
+			t.Errorf("%s installed=%v: %v", tc.setting, tc.installed, got)
+		}
+	}
+}
