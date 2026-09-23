@@ -301,8 +301,9 @@ managed_config: [network, dhcp, firewall]
 config_allow_insecure: false
 config_confirm_max: 600
 
-# The HMAC key of signed writes (16+ characters). Empty = the api_key, which
-# also travels as the connection's credential.
+# A fixed HMAC key of signed writes (16+ characters) that you also enter in
+# the controller. Empty = the key of a pairing with the controller
+# (perch-collector pair). The api_key never signs.
 # Default: ""
 config_sign_key: ""
 
@@ -1008,13 +1009,24 @@ fresh connection or restored on its own. The protocol is in ARCHITECTURE.md
 - **Transport.** Writes need an `https` `server_url` with a verified
   certificate. `config_allow_insecure '1'` also accepts them over plain
   `http://` (or an unverified certificate) when the controller signs each
-  request (HMAC with the api_key, or `config_sign_key`; a timestamp within 5
-  minutes of the router's clock, a nonce used once, bound to the connection):
-  nobody on the path can change the router's config, but they can read it.
-  Secret values (Wi-Fi keys, WireGuard keys) are never accepted that way. The
-  api_key is also the connection's credential, so over plain `http://` it is
-  visible to anyone who can read the traffic; set `config_sign_key` (16+
-  characters, entered in the controller too) when that matters.
+  request with a key only the router and the controller hold (a timestamp
+  within 5 minutes of the router's clock, a nonce used once, bound to the
+  connection): nobody on the path can change the router's config, but they
+  can read it. Secret values (Wi-Fi keys, WireGuard keys) are never accepted
+  that way. The key comes from **pairing**: the controller starts it (the
+  gateway's page), the router's log shows a 6-digit code (`logread | grep
+  PAIRING`), you type that code into the controller and confirm on the router
+  with `perch-collector pair confirm <code>` when both codes match. The
+  api_key never signs (it is the connection's credential, visible over plain
+  `http://`). Instead of pairing, `config_sign_key` (16+ characters, entered
+  in the controller too) sets a fixed key; pairing is then refused.
+- **Pairing commands** (root, on the router): `perch-collector pair status`
+  (the code of a pairing in progress, the paired key's id; `-json`), `pair
+  confirm <code>`, `pair reject` (refuse a pairing you did not start), `pair
+  forget` (drop the key: signed writes stop until the next pairing; works
+  without the daemon). The key lives in `/etc/perch-collector/pairing.json`
+  (0600): kept over sysupgrade, lost by a factory reset, removed with the
+  package. A pairing waits 10 minutes for each step, then expires.
 - **Packages.** The controller may install the packages its features use
   (sqm-scripts, opennds, wireguard-tools, mwan3, pbr, their LuCI apps, ...;
   `list package_allow` adds more) with opkg or apk, after checking the free
@@ -1036,7 +1048,7 @@ list   managed_config 'network'      # the allowlist (package default network dh
 list   managed_config 'dhcp'
 list   managed_config 'firewall'
 option config_allow_insecure '0'     # '1' = signed writes over plain http
-# option config_sign_key ''          # HMAC key of those signatures (default: api_key)
+# option config_sign_key ''          # fixed HMAC key of those signatures (default: pair instead)
 option config_confirm_max '600'      # longest confirm window, seconds (30-3600)
 # list package_allow 'tcpdump-mini'  # more packages the controller may install
 option storage_path '/etc/perch-collector'

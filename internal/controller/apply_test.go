@@ -1,8 +1,12 @@
 package controller
 
 import (
+	"bytes"
 	"context"
+	"crypto/ecdh"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http/httptest"
@@ -122,13 +126,16 @@ func TestApplyReconnectConfirmOnTheSocket(t *testing.T) {
 			})
 			defer stop()
 			nonce := 0
+			// Over plain HTTP the controller signs with the key of a pairing
+			// (owner decision 29), run on the first session below.
+			var signKey []byte
 			call := func(s *sess, id int, method string, params any) rpc.Message {
 				t.Helper()
 				var raw json.RawMessage
 				if signedMode {
 					nonce++
 					var err error
-					raw, err = gwconfig.Sign([]byte("0123456789abcdef0123456789abcdef"), method, s.hello.Signing.Challenge, time.Now().Unix(), fmt.Sprintf("nonce-%010d", nonce), params)
+					raw, err = gwconfig.Sign(signKey, method, s.hello.Signing.Challenge, time.Now().Unix(), fmt.Sprintf("nonce-%010d", nonce), params)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -158,6 +165,18 @@ func TestApplyReconnectConfirmOnTheSocket(t *testing.T) {
 			}
 			// Let agent.configure land before the apply.
 			time.Sleep(100 * time.Millisecond)
+			if signedMode {
+				if s1.hello.Signing.Key != "none" {
+					t.Fatalf("%+v", s1.hello.Signing)
+				}
+				// The api_key (the Bearer token) never signs.
+				signKey = []byte("0123456789abcdef0123456789abcdef")
+				m := call(s1, 8, "gateway.config.apply", map[string]any{"applyId": "g1-x"})
+				if errorCode(m.Error) != "not_paired" {
+					t.Fatalf("%+v", m.Error)
+				}
+				signKey = pairOnTheSocket(t, s1.ctx, s1.c, s1.fr, pl)
+			}
 			apply := map[string]any{"applyId": "g1-a1", "kind": "apply", "confirmTimeoutSeconds": 90,
 				"base":   map[string]string{"dhcp": hashOf("dhcp")},
 				"ops":    []any{map[string]any{"op": "put", "config": "dhcp", "section": "perch_h1", "type": "host", "options": map[string]any{"name": "cam", "mac": "02:00:00:00:00:20", "ip": "192.168.1.20"}}},
@@ -226,6 +245,57 @@ func TestApplyReconnectConfirmOnTheSocket(t *testing.T) {
 }
 
 func sha(b []byte) [32]byte { return sha256.Sum256(b) }
+
+// pairOnTheSocket is the controller's half of a pairing (pairing.ts) over
+// the session, with the router's admin confirming locally; it returns the
+// key both ends derived.
+func pairOnTheSocket(t *testing.T, ctx context.Context, c *websocket.Conn, frames <-chan []byte, pl *gwconfig.Plane) []byte {
+	t.Helper()
+	priv, _ := ecdh.X25519().GenerateKey(rand.Reader)
+	cpub := priv.PublicKey().Bytes()
+	m := request(t, ctx, c, frames, 6, "gateway.pair.begin", fmt.Sprintf(`{"pairingId":"0011223344556677","gatewayId":3,"controllerPub":"%x"}`, cpub))
+	var begin gwconfig.PairBeginResult
+	if m.Error != nil || json.Unmarshal(m.Result, &begin) != nil {
+		t.Fatalf("%s %+v", m.Result, m.Error)
+	}
+	cnonce := make([]byte, 32)
+	rand.Read(cnonce)
+	m = request(t, ctx, c, frames, 7, "gateway.pair.reveal", fmt.Sprintf(`{"pairingId":"0011223344556677","controllerNonce":"%x"}`, cnonce))
+	var rev gwconfig.PairRevealResult
+	if m.Error != nil || json.Unmarshal(m.Result, &rev) != nil {
+		t.Fatalf("%s %+v", m.Result, m.Error)
+	}
+	rpub, _ := hex.DecodeString(begin.RouterPub)
+	rnonce, _ := hex.DecodeString(rev.RouterNonce)
+	commit, _ := hex.DecodeString(begin.Commitment)
+	if !bytes.Equal(commit, gwconfig.PairCommitment(rnonce, rpub, cpub)) {
+		t.Fatal("commitment")
+	}
+	shared, err := gwconfig.X25519Shared(priv, rpub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := gwconfig.PairTranscript{GatewayID: 3, ControllerPub: cpub, RouterPub: rpub, ControllerNonce: cnonce, RouterNonce: rnonce}
+	key, sas := gwconfig.PairKey(shared, tr), gwconfig.PairSAS(tr)
+	// The router's admin reads the same code and confirms.
+	if st := pl.PairLocalStatus(); st.Pending == nil || st.Pending.Code != sas {
+		t.Fatalf("router %+v, controller %s", st.Pending, sas)
+	}
+	if _, err := pl.PairConfirmLocal(sas); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		msg, _ := next(t, frames, anyFrame, 3*time.Second)
+		if msg.Method != gwconfig.NotifyPairState {
+			continue
+		}
+		want := fmt.Sprintf(`{"pairingId":"0011223344556677","state":"paired","keyId":"%s"}`, gwconfig.PairKeyID(key))
+		if string(msg.Params) != want {
+			t.Fatalf("%s", msg.Params)
+		}
+		return key
+	}
+}
 
 func TestRedialWaitsAroundAnApply(t *testing.T) {
 	root := configRoot(t)

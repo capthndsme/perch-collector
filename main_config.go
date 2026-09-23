@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -43,12 +45,22 @@ func configPlane(cfg config.Config) *gwconfig.Plane {
 	case p.Access() == gwconfig.AccessWrite && !cfg.ConfigTransportOK() && !cfg.ConfigAllowInsecure:
 		log.Printf("config plane: config_access write: %s; writes need https with a verified certificate (or config_allow_insecure '1' and signed requests), until then read only", strings.Join(p.Allowed(), " "))
 	case p.Access() == gwconfig.AccessWrite && !cfg.ConfigTransportOK():
-		log.Printf("config plane: config_access write over an unverified transport: %s; writes must be signed (%s)", strings.Join(p.Allowed(), " "), map[bool]string{true: "config_sign_key", false: "api_key"}[cfg.ConfigSignKey != ""])
+		how := "config_sign_key"
+		if cfg.ConfigSignKey == "" {
+			how = "the key of a pairing with the controller (perch-collector pair status)"
+		}
+		log.Printf("config plane: config_access write over an unverified transport: %s; writes must be signed with %s", strings.Join(p.Allowed(), " "), how)
 	default:
 		log.Printf("config plane: config_access %s: %s", p.Access(), strings.Join(p.Allowed(), " "))
 	}
 	// A pending apply from before this start: resume its window, or restore.
 	p.Start()
+	// `perch-collector pair` talks to the daemon over a root-only socket.
+	go func() {
+		if err := p.ServePairSocket(context.Background()); err != nil {
+			log.Printf("config plane: pairing socket: %v (perch-collector pair confirm will not work)", err)
+		}
+	}()
 	planeMu.Lock()
 	activePlane = p
 	planeMu.Unlock()
@@ -246,4 +258,182 @@ func routerConfig() (config.Config, error) {
 		return cfg, err
 	}
 	return cfg, nil
+}
+
+const pairUsage = `usage: perch-collector pair <command>
+
+Pairing gives a router that takes config writes over plain HTTP
+(config_allow_insecure '1') a signing key shared with the controller only;
+the api_key never signs. The controller starts it (Gateway → Pair); both
+ends then show the same 6-digit code, which is also written to the system
+log (logread | grep PAIRING).
+
+  status          what is pending (with its code) and the paired key
+  confirm <code>  accept the pairing whose code this is: the controller's
+                  signed writes are verified with the new key from now on
+  reject          refuse the pairing in progress
+  forget          drop the paired key (signed writes are refused until
+                  the next pairing); works without the daemon too
+
+Root only. status takes -json.
+`
+
+// pairCommand is ` + "`perch-collector pair`" + `.
+func pairCommand(args []string, stdout, stderr io.Writer, root string) int {
+	if len(args) == 0 {
+		fmt.Fprint(stderr, pairUsage)
+		return 2
+	}
+	sock := filepath.Join(root, gwconfig.PairSocket)
+	if root == "" {
+		sock = gwconfig.PairSocket
+	}
+	call := func(req gwconfig.PairRequest) (*gwconfig.PairResponse, int) {
+		res, err := gwconfig.PairCall(sock, req)
+		if err != nil {
+			fmt.Fprintf(stderr, "perch-collector pair %s: %v\n", req.Cmd, err)
+			return nil, 1
+		}
+		return res, 0
+	}
+	switch cmd := args[0]; cmd {
+	case "-h", "-help", "--help", "help":
+		fmt.Fprint(stdout, pairUsage)
+		return 0
+	case "status":
+		asJSON := false
+		for _, a := range args[1:] {
+			if a != "-json" && a != "--json" {
+				fmt.Fprintf(stderr, "unexpected argument %q\n\n%s", a, pairUsage)
+				return 2
+			}
+			asJSON = true
+		}
+		res, err := gwconfig.PairCall(sock, gwconfig.PairRequest{Cmd: "status"})
+		var st *gwconfig.PairLocal
+		daemon := true
+		switch {
+		case err == nil && res.OK:
+			st = res.Status
+		case errors.Is(err, gwconfig.ErrNoDaemon):
+			daemon = false
+			info, ferr := gwconfig.ReadPairingFile(root)
+			if ferr != nil {
+				fmt.Fprintf(stderr, "perch-collector pair status: %v\n", ferr)
+				return 1
+			}
+			st = &gwconfig.PairLocal{Paired: info}
+		case err != nil:
+			fmt.Fprintf(stderr, "perch-collector pair status: %v\n", err)
+			return 1
+		default:
+			fmt.Fprintf(stderr, "perch-collector pair status: %s\n", res.Error)
+			return 1
+		}
+		if asJSON {
+			enc := json.NewEncoder(stdout)
+			enc.SetIndent("", "  ")
+			enc.Encode(st)
+			return 0
+		}
+		printPairStatus(stdout, st, daemon, time.Now())
+		return 0
+	case "confirm":
+		if len(args) < 2 {
+			fmt.Fprintf(stderr, "perch-collector pair confirm: the 6-digit code is missing\n\n%s", pairUsage)
+			return 2
+		}
+		res, rc := call(gwconfig.PairRequest{Cmd: "confirm", Code: strings.Join(args[1:], "")})
+		if res == nil {
+			return rc
+		}
+		if !res.OK {
+			fmt.Fprintf(stderr, "perch-collector pair confirm: %s\n", res.Error)
+			return 1
+		}
+		fmt.Fprintf(stdout, "paired: key %s (gateway %d). Signed config writes from this controller are accepted from now on.\n", res.Paired.KeyID, res.Paired.GatewayID)
+		fmt.Fprintln(stdout, "If the dashboard still waits, type this router's code there.")
+		return 0
+	case "reject":
+		res, rc := call(gwconfig.PairRequest{Cmd: "reject"})
+		if res == nil {
+			return rc
+		}
+		if !res.OK {
+			fmt.Fprintf(stderr, "perch-collector pair reject: %s\n", res.Error)
+			return 1
+		}
+		fmt.Fprintln(stdout, "pairing rejected")
+		return 0
+	case "forget":
+		res, err := gwconfig.PairCall(sock, gwconfig.PairRequest{Cmd: "forget"})
+		if errors.Is(err, gwconfig.ErrNoDaemon) {
+			info, ferr := gwconfig.ForgetPairingFile(root)
+			if ferr != nil {
+				fmt.Fprintf(stderr, "perch-collector pair forget: %v\n", ferr)
+				return 1
+			}
+			if info == nil {
+				fmt.Fprintln(stdout, "not paired: nothing to forget")
+				return 0
+			}
+			fmt.Fprintf(stdout, "forgot key %s (the daemon is not running)\n", info.KeyID)
+			return 0
+		}
+		if err != nil {
+			fmt.Fprintf(stderr, "perch-collector pair forget: %v\n", err)
+			return 1
+		}
+		if !res.OK {
+			if res.Error == gwconfig.ErrNothingToForget.Error() {
+				fmt.Fprintln(stdout, "not paired: nothing to forget")
+				return 0
+			}
+			fmt.Fprintf(stderr, "perch-collector pair forget: %s\n", res.Error)
+			return 1
+		}
+		fmt.Fprintf(stdout, "forgot key %s; the controller sees the router unpaired at its next connection (now)\n", res.Paired.KeyID)
+		return 0
+	default:
+		fmt.Fprintf(stderr, "unknown command %q\n\n%s", cmd, pairUsage)
+		return 2
+	}
+}
+
+func printPairStatus(w io.Writer, st *gwconfig.PairLocal, daemon bool, now time.Time) {
+	if !daemon {
+		fmt.Fprintln(w, "(the daemon is not running: only the stored key is shown)")
+	}
+	if st.SignKey {
+		fmt.Fprintln(w, "config_sign_key is set: it signs config writes, pairing is off")
+	}
+	if p := st.Pending; p != nil {
+		left := p.Expires.Sub(now).Round(time.Second)
+		switch p.State {
+		case gwconfig.PairWaitingLocal:
+			fmt.Fprintf(w, "pairing %s waits for your confirmation\n", p.PairingID)
+			fmt.Fprintf(w, "  code:        %s\n", p.Code)
+			fmt.Fprintf(w, "  controller:  %s (gateway %d)\n", p.Server, p.GatewayID)
+			fmt.Fprintf(w, "  expires in:  %s (%d attempt(s) left)\n", left, p.Attempts)
+			fmt.Fprintf(w, "If the Perch dashboard shows the same code: perch-collector pair confirm %s\n", p.Code)
+			fmt.Fprintln(w, "If you did not start a pairing: perch-collector pair reject")
+		default:
+			fmt.Fprintf(w, "pairing %s begun by %s, waiting for the controller (expires in %s)\n", p.PairingID, p.Server, left)
+		}
+	}
+	if k := st.Paired; k != nil {
+		fmt.Fprintf(w, "paired: key %s, gateway %d", k.KeyID, k.GatewayID)
+		if k.Server != "" {
+			fmt.Fprintf(w, ", controller %s", k.Server)
+		}
+		if !k.PairedAt.IsZero() {
+			fmt.Fprintf(w, ", since %s", k.PairedAt.UTC().Format(time.RFC3339))
+		}
+		fmt.Fprintln(w)
+	} else if st.Pending == nil {
+		fmt.Fprintln(w, "not paired")
+	}
+	if l := st.Last; l != nil && st.Pending == nil && (st.Paired == nil || st.Paired.PairingID != l.PairingID) {
+		fmt.Fprintf(w, "last pairing %s: %s\n", l.PairingID, l.State)
+	}
 }

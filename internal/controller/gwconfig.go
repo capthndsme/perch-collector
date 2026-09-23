@@ -4,8 +4,9 @@ package controller
 // gateway; ARCHITECTURE.md "Config plane"): the gateway_config capability,
 // the hello's gatewayConfig block, agent.configure's gatewayConfig, the
 // requests gateway.capabilities, gateway.config.read and the write methods
-// (apply, confirm, rollback, ack, package install), and the notifications
-// gateway.config.changed and gateway.config.result. Everything is additive:
+// (apply, confirm, rollback, ack, package install), the pairing methods
+// (gateway.pair.*, pair.go), and the notifications gateway.config.changed,
+// gateway.config.result and gateway.pair.state. Everything is additive:
 // an older controller drops the unknown hello key, sends no gatewayConfig,
 // and never calls the methods.
 //
@@ -67,7 +68,17 @@ func (c *Client) registerConfigPlane() {
 			return res, nil
 		})
 	}
-	c.o.Config.SetHooks(gwconfig.Hooks{Reconnect: c.reconnectAfterApply, Result: c.notifyResult})
+	for _, m := range gwconfig.PairMethods {
+		method := m
+		c.dispatcher.Register(method, func(ctx context.Context, params json.RawMessage) (any, error) {
+			res, err := c.o.Config.ServePair(ctx, method, params, c.sessionRef(ctx))
+			if err != nil {
+				return nil, configRPCError(err)
+			}
+			return res, nil
+		})
+	}
+	c.o.Config.SetHooks(gwconfig.Hooks{Reconnect: c.reconnectAfterApply, Result: c.notifyResult, PairState: c.notifyPairState})
 }
 
 // configCapabilities are the hello capabilities of the config plane.
@@ -206,6 +217,21 @@ func (c *Client) notifyResult(r gwconfig.Result) bool {
 	}
 	if err := s.Notify(gwconfig.NotifyResult, r); err != nil {
 		c.log.Debug("gateway.config.result not sent", "err", err)
+		return false
+	}
+	return true
+}
+
+// notifyPairState is the plane's PairState hook: gateway.pair.state.
+func (c *Client) notifyPairState(n gwconfig.PairStateNote) bool {
+	c.mu.Lock()
+	s := c.configSession
+	c.mu.Unlock()
+	if s == nil {
+		return false
+	}
+	if err := s.Notify(gwconfig.NotifyPairState, n); err != nil {
+		c.log.Debug("gateway.pair.state not sent", "err", err)
 		return false
 	}
 	return true

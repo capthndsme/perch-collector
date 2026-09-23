@@ -2,7 +2,11 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"crypto/ecdh"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,8 +14,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/capthndsme/perch-collector/internal/config"
+	"github.com/capthndsme/perch-collector/internal/gwconfig"
 )
 
 func TestGatewayConfigCommand(t *testing.T) {
@@ -71,5 +77,89 @@ func TestConfigGuardCommand(t *testing.T) {
 	}
 	if code := configGuardCommand([]string{"--now"}, &out, &errb, root, func() string { return "" }); code != 2 {
 		t.Fatal(code)
+	}
+}
+
+func TestPairCommand(t *testing.T) {
+	root := t.TempDir()
+	run := func(args ...string) (int, string, string) {
+		var stdout, stderr bytes.Buffer
+		code := pairCommand(args, &stdout, &stderr, root)
+		return code, stdout.String(), stderr.String()
+	}
+	// No daemon: status and forget read the stored key; confirm needs it.
+	if code, out, _ := run("status"); code != 0 || !strings.Contains(out, "not paired") || !strings.Contains(out, "daemon is not running") {
+		t.Fatalf("%d %q", code, out)
+	}
+	if code, _, errOut := run("confirm", "123456"); code != 1 || !strings.Contains(errOut, "not running") {
+		t.Fatalf("%d %q", code, errOut)
+	}
+	if code, _, _ := run(); code != 2 {
+		t.Fatal(code)
+	}
+	if code, _, _ := run("confirm"); code != 2 {
+		t.Fatal(code)
+	}
+	if code, _, _ := run("frobnicate"); code != 2 {
+		t.Fatal(code)
+	}
+
+	p := gwconfig.New(gwconfig.Options{Access: gwconfig.AccessWrite, AllowInsecure: true, Root: root, ServerURL: "http://perch.example.com:8080"})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.ServePairSocket(ctx)
+	priv, _ := ecdh.X25519().GenerateKey(rand.Reader)
+	var begin *gwconfig.PairBeginResult
+	var err error
+	for i := 0; i < 100; i++ {
+		if code, _, _ := run("status"); code == 0 {
+			if _, err := os.Stat(filepath.Join(root, gwconfig.PairSocket)); err == nil {
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if begin, err = p.PairBegin(&gwconfig.PairBeginParams{PairingID: "0123456789abcdef", GatewayID: 2, ControllerPub: fmt.Sprintf("%x", priv.PublicKey().Bytes())}); err != nil {
+		t.Fatal(err)
+	}
+	if code, out, _ := run("status"); code != 0 || !strings.Contains(out, "waiting for the controller") {
+		t.Fatalf("%d %q", code, out)
+	}
+	cnonce := bytes.Repeat([]byte{7}, 32)
+	rev, err := p.PairReveal(&gwconfig.PairRevealParams{PairingID: begin.PairingID, ControllerNonce: fmt.Sprintf("%x", cnonce)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rpub, _ := hex.DecodeString(begin.RouterPub)
+	rnonce, _ := hex.DecodeString(rev.RouterNonce)
+	tr := gwconfig.PairTranscript{GatewayID: 2, ControllerPub: priv.PublicKey().Bytes(), RouterPub: rpub, ControllerNonce: cnonce, RouterNonce: rnonce}
+	sas := gwconfig.PairSAS(tr)
+	code, out, _ := run("status")
+	if code != 0 || !strings.Contains(out, "code:        "+sas) || !strings.Contains(out, "pair confirm "+sas) || !strings.Contains(out, "http://perch.example.com:8080 (gateway 2)") {
+		t.Fatalf("%d %q", code, out)
+	}
+	wrong := "000000"
+	if sas == wrong {
+		wrong = "111111"
+	}
+	if code, _, errOut := run("confirm", wrong); code != 1 || !strings.Contains(errOut, "does not match") {
+		t.Fatalf("%d %q", code, errOut)
+	}
+	if code, out, _ := run("confirm", sas[:3], sas[3:]); code != 0 || !strings.Contains(out, "paired: key") {
+		t.Fatalf("%d %q", code, out)
+	}
+	code, out, _ = run("status", "-json")
+	var st gwconfig.PairLocal
+	if code != 0 || json.Unmarshal([]byte(out), &st) != nil || st.Paired == nil || st.Paired.GatewayID != 2 || strings.Contains(out, `"key"`) {
+		t.Fatalf("%d %q", code, out)
+	}
+	if code, out, _ := run("forget"); code != 0 || !strings.Contains(out, "forgot key "+st.Paired.KeyID) {
+		t.Fatalf("%d %q", code, out)
+	}
+	if code, out, _ := run("forget"); code != 0 || !strings.Contains(out, "nothing to forget") {
+		t.Fatalf("%d %q", code, out)
+	}
+	if code, _, errOut := run("reject"); code != 1 || !strings.Contains(errOut, "no pairing") {
+		t.Fatalf("%d %q", code, errOut)
 	}
 }

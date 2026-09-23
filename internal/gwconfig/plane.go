@@ -78,12 +78,13 @@ type Options struct {
 	ConfirmMax int
 	// TransportOK: server_url is https with certificate verification on.
 	TransportOK bool
-	// APIKey keys the secret fingerprints (the controller has it too) and,
-	// without SignKey, the signatures of config writes.
+	// APIKey keys the secret fingerprints (the controller has it too). It
+	// never signs config writes (owner decision 29: it is the Bearer token
+	// a plain-HTTP listener sees); SignKey or the pairing's key does.
 	APIKey string
-	// SignKey is config_sign_key: a separate HMAC key for signed writes
-	// that never crosses the wire (the api_key does, as the Bearer token of
-	// every connection).
+	// SignKey is config_sign_key: an HMAC key for signed writes that the
+	// admin enters on both ends (it never crosses the wire). When set it
+	// signs instead of a pairing (pair.go), and pairing is refused.
 	SignKey string
 	// ServerURL is the controller; its address gives the management path.
 	ServerURL string
@@ -132,6 +133,7 @@ type Plane struct {
 	backend     Backend
 	backendOnce sync.Once
 	nonces      nonceCache
+	pair        pairState
 	ap          applier
 	hooks       Hooks
 }

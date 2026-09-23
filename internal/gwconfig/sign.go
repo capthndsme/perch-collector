@@ -25,9 +25,12 @@ import (
 //
 // mac = HMAC-SHA256(key, "perch-config-sig-v1\n" + method + "\n" + challenge
 // + "\n" + ts + "\n" + nonce + "\n" + hex(SHA-256(payload))), key = the
-// router's config_sign_key when set, else the collector's api_key (the
-// hello says which). The payload is carried as a string so both ends MAC
-// the same bytes without a canonical JSON form.
+// router's config_sign_key when set, else the key of the router's pairing
+// with the controller (pair.go; owner decision 29). The hello says which.
+// The api_key never signs: it is the Bearer token of every connection, so
+// a plain-HTTP listener has it. An unpaired router without config_sign_key
+// refuses every signed write (not_paired). The payload is carried as a
+// string so both ends MAC the same bytes without a canonical JSON form.
 //
 // This gives integrity and replay protection, not confidentiality: the
 // method is bound (a signed confirm cannot be replayed as a rollback), the
@@ -52,8 +55,10 @@ type Signing struct {
 	// verified TLS).
 	Required  bool   `json:"required"`
 	Challenge string `json:"challenge,omitempty"`
-	// Key is "api_key" or "config_sign_key".
+	// Key is "config_sign_key", "paired" (with KeyID) or "none" (no key:
+	// signed writes are refused until a pairing).
 	Key           string `json:"key"`
+	KeyID         string `json:"keyId,omitempty"`
 	WindowSeconds int    `json:"windowSeconds"`
 }
 
@@ -150,23 +155,42 @@ func (n *nonceCache) use(nonce string, now time.Time) bool {
 	return true
 }
 
-// signKey is the HMAC key and its name.
-func (p *Plane) signKey() ([]byte, string) {
+// Signing key names in the hello.
+const (
+	SignKeyConfig = "config_sign_key"
+	SignKeyPaired = "paired"
+	SignKeyNone   = "none"
+)
+
+// signKey is the HMAC key of signed writes, its name and the paired key's
+// id; nil key = none.
+func (p *Plane) signKey() ([]byte, string, string) {
 	if p.o.SignKey != "" {
-		return []byte(p.o.SignKey), "config_sign_key"
+		return []byte(p.o.SignKey), SignKeyConfig, ""
 	}
-	return []byte(p.o.APIKey), "api_key"
+	if k := p.pairedKeyNow(); k != nil {
+		return k.raw, SignKeyPaired, k.KeyID
+	}
+	return nil, SignKeyNone, ""
 }
 
 // SigningFor is the signing block of a session with this challenge.
 func (p *Plane) SigningFor(challenge string) *Signing {
-	_, name := p.signKey()
-	return &Signing{Required: !p.o.TransportOK, Challenge: challenge, Key: name, WindowSeconds: int(SignatureWindow / time.Second)}
+	_, name, id := p.signKey()
+	return &Signing{Required: !p.o.TransportOK, Challenge: challenge, Key: name, KeyID: id, WindowSeconds: int(SignatureWindow / time.Second)}
 }
 
-// Unwrap returns a request's params: the payload of a verified envelope
-// (signed true), or the params as they are.
+// Unwrap returns a write request's params: the payload of an envelope
+// verified with the signing key (signed true), or the params as they are.
 func (p *Plane) Unwrap(method string, raw json.RawMessage, sess SessionRef) (json.RawMessage, bool, error) {
+	key, _, _ := p.signKey()
+	return p.verify(method, raw, sess, key)
+}
+
+// verify checks a signed envelope against key (nil = the router has no
+// key: not_paired) and returns its payload; unsigned params pass as they
+// are (signed false).
+func (p *Plane) verify(method string, raw json.RawMessage, sess SessionRef, key []byte) (json.RawMessage, bool, error) {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || trimmed[0] != '{' {
 		return raw, false, nil
@@ -205,7 +229,9 @@ func (p *Plane) Unwrap(method string, raw json.RawMessage, sess SessionRef) (jso
 	if err != nil || len(mac) != sha256.Size {
 		return nil, false, perr(CodeBadSignature, "mac is 64 hex digits")
 	}
-	key, _ := p.signKey()
+	if len(key) == 0 {
+		return nil, false, perr(CodeNotPaired, "this router has no signing key: pair it with the controller (perch-collector pair confirm <code>) or set config_sign_key")
+	}
 	m := hmac.New(sha256.New, key)
 	payload := []byte(*env.Payload)
 	m.Write(SignatureMessage(method, s.Challenge, s.TS, s.Nonce, payload))
