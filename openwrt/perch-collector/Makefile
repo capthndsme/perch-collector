@@ -15,9 +15,9 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=perch-collector
-PERCH_VERSION:=1.0.0-rc.2
+PERCH_VERSION:=1.0.0-rc.3
 PKG_RELEASE:=1
-# PERCH_VERSION is the upstream version: it names the git tag (v1.0.0-rc.2)
+# PERCH_VERSION is the upstream version: it names the git tag (v1.0.0-rc.3)
 # and is what --version prints. PKG_VERSION is the same version in the form
 # the package manager sorts correctly: opkg (OpenWrt 24.10, .ipk) wants
 # 1.0.0~rc2, which sorts below 1.0.0; apk-tools (25.12, .apk) wants 1.0.0_rc2

@@ -58,7 +58,7 @@ docker run -d --name perch-collector --restart unless-stopped \
 ```
 
 Image tags: `latest` and `1.0` follow final releases, a version tag (`1.0.0`,
-`1.0.0-rc.2`) stays put, `rc` is the newest release candidate and `edge` is
+`1.0.0-rc.3`) stays put, `rc` is the newest release candidate and `edge` is
 `main`.
 
 It then shows up in the controller under Settings → Collectors → Pending
@@ -275,7 +275,7 @@ Example response:
   "meta": {
     "capture_interface": "br-lan",
     "query_time": "2026-05-25T02:15:01Z",
-    "version": "1.0.0-rc.2",
+    "version": "1.0.0-rc.3",
     "transport": "websocket",
     "announce_status": "adopted"
   }
