@@ -20,6 +20,16 @@ type ConfigPlane struct {
 	// dropbear and luci are never allowed, whatever is listed.
 	ManagedConfigs []string `yaml:"managed_config"`
 
+	// ManagedConfigAuto (default true, gateway README 7.7): an installed
+	// sibling package's config joins the allowlist by itself (sqm-scripts →
+	// sqm, perch-qos → perch-qos). false keeps the allowlist to
+	// managed_config.
+	ManagedConfigAuto bool `yaml:"managed_config_auto"`
+
+	// ManagedConfigExclude keeps single sibling configs off the allowlist
+	// although their package is installed.
+	ManagedConfigExclude []string `yaml:"managed_config_exclude"`
+
 	// ConfigAllowInsecure accepts config writes over plain http:// or an
 	// unverified certificate (with the controller's matching opt-in).
 	ConfigAllowInsecure bool `yaml:"config_allow_insecure"`
@@ -75,10 +85,11 @@ var configPlaneNeverAllowed = map[string]bool{
 
 func defaultConfigPlane() ConfigPlane {
 	return ConfigPlane{
-		ConfigAccess:     ConfigAccessNone,
-		ManagedConfigs:   append([]string(nil), DefaultManagedConfigs...),
-		ConfigConfirmMax: ConfigConfirmMaxDefault,
-		StoragePath:      DefaultStoragePath,
+		ConfigAccess:      ConfigAccessNone,
+		ManagedConfigs:    append([]string(nil), DefaultManagedConfigs...),
+		ManagedConfigAuto: true,
+		ConfigConfirmMax:  ConfigConfirmMaxDefault,
+		StoragePath:       DefaultStoragePath,
 	}
 }
 
@@ -86,6 +97,10 @@ func (c *ConfigPlane) readEnv(env *envReader) {
 	env.str("CONFIG_ACCESS", &c.ConfigAccess)
 	if list, ok := env.list("MANAGED_CONFIGS"); ok {
 		c.ManagedConfigs = list
+	}
+	env.boolean("MANAGED_CONFIG_AUTO", &c.ManagedConfigAuto)
+	if list, ok := env.list("MANAGED_CONFIG_EXCLUDE"); ok {
+		c.ManagedConfigExclude = list
 	}
 	env.boolean("CONFIG_ALLOW_INSECURE", &c.ConfigAllowInsecure)
 	env.integer("CONFIG_CONFIRM_MAX", func(n int) { c.ConfigConfirmMax = n })
@@ -118,6 +133,12 @@ func (c *ConfigPlane) validate() error {
 		list = append(list, name)
 	}
 	c.ManagedConfigs = list
+	c.ManagedConfigExclude = cleanList(c.ManagedConfigExclude)
+	for _, name := range c.ManagedConfigExclude {
+		if strings.ContainsAny(name, "/ \t") || strings.HasPrefix(name, ".") {
+			return fmt.Errorf("managed_config_exclude %q is not a UCI config name", name)
+		}
+	}
 	if c.ConfigConfirmMax == 0 {
 		c.ConfigConfirmMax = ConfigConfirmMaxDefault
 	}

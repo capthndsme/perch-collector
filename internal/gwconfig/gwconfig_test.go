@@ -99,7 +99,8 @@ func plane(t *testing.T, root string, o Options) (*Plane, *fakeUbus) {
 
 func TestAccessAndAllowlist(t *testing.T) {
 	root := newRoot(t)
-	p, _ := plane(t, root, Options{Access: "bogus", Allowlist: []string{"network", "rpcd", "perch-collector", "network", "", "dhcp", "../x", LedgerConfig}})
+	// (Installed sibling packages would join: siblings_test.go.)
+	p, _ := plane(t, root, Options{Access: "bogus", SiblingsOff: true, Allowlist: []string{"network", "rpcd", "perch-collector", "network", "", "dhcp", "../x", LedgerConfig}})
 	if p.Access() != AccessNone || p.Readable() != nil {
 		t.Fatalf("unknown access must be none: %s %v", p.Access(), p.Readable())
 	}
@@ -112,7 +113,8 @@ func TestAccessAndAllowlist(t *testing.T) {
 	}
 
 	p, _ = plane(t, root, Options{Access: AccessRead, Allowlist: DefaultAllowlist})
-	if p.RequireAccess(AccessRead) != nil || !reflect.DeepEqual(p.Readable(), []string{"dhcp", "firewall", "network", LedgerConfig}) {
+	// This root has sqm-scripts installed: its config joins (README 7.7).
+	if p.RequireAccess(AccessRead) != nil || !reflect.DeepEqual(p.Readable(), []string{"dhcp", "firewall", "network", "sqm", LedgerConfig}) {
 		t.Fatalf("%v", p.Readable())
 	}
 	if err := p.RequireAccess(AccessWrite); !errors.Is(err, ErrNotManaged) {
@@ -179,7 +181,7 @@ func TestRead(t *testing.T) {
 	put(t, root, "tmp/.uci/network", "network.lan.ipaddr='192.168.9.1'\n")
 	put(t, root, "tmp/.uci/rpcd", "rpcd.x.y='1'\n") // not readable: not reported
 	put(t, root, "var/run/rpcd/snapshot-files/network", "x")
-	p, _ := plane(t, root, Options{Access: AccessRead, Allowlist: []string{"network", "wireless", "dhcp"},
+	p, _ := plane(t, root, Options{Access: AccessRead, Allowlist: []string{"network", "wireless", "dhcp"}, SiblingsOff: true,
 		Now: func() time.Time { return time.Date(2026, 9, 23, 10, 0, 0, 0, time.UTC) }})
 	res, err := p.Read(nil)
 	if err != nil {

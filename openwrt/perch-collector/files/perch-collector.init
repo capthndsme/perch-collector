@@ -101,7 +101,7 @@ start_service() {
 	local observe observe_parts observe_refresh conntrack_flush gateway_backup address_cache
 	local portal portal_port portal_path portal_flush portal_mount
 	local capture_network config_access managed_configs config_allow_insecure config_confirm_max storage_path
-	local config_sign_key package_allow
+	local config_sign_key package_allow managed_config_auto managed_config_exclude
 	local capture_networks capture_exclude capture_rescan routed_lan ndpi_module
 	local qos
 	local uci_dirty=0
@@ -208,6 +208,10 @@ start_service() {
 	[ -n "$capture_networks" ] && capture_network=""
 	config_get config_access main config_access 'none'
 	config_list_foreach main managed_config append_list managed_configs
+	# Installed sibling packages (sqm-scripts, perch-qos) bring their config
+	# onto the allowlist; managed_config_auto '0' / managed_config_exclude opt out.
+	config_get_bool managed_config_auto main managed_config_auto 1
+	config_list_foreach main managed_config_exclude append_list managed_config_exclude
 	config_get_bool config_allow_insecure main config_allow_insecure 0
 	config_get config_confirm_max main config_confirm_max '600'
 	config_get storage_path main storage_path '/etc/perch-collector'
@@ -266,6 +270,8 @@ start_service() {
 		PERCH_COLLECTOR_CAPTURE_NETWORK="$capture_network" \
 		PERCH_COLLECTOR_CONFIG_ACCESS="$config_access" \
 		PERCH_COLLECTOR_MANAGED_CONFIGS="${managed_configs:-network,dhcp,firewall}" \
+		PERCH_COLLECTOR_MANAGED_CONFIG_AUTO="$managed_config_auto" \
+		PERCH_COLLECTOR_MANAGED_CONFIG_EXCLUDE="$managed_config_exclude" \
 		PERCH_COLLECTOR_CONFIG_ALLOW_INSECURE="$config_allow_insecure" \
 		PERCH_COLLECTOR_CONFIG_CONFIRM_MAX="$config_confirm_max" \
 		PERCH_COLLECTOR_STORAGE_PATH="$storage_path" \
@@ -288,7 +294,7 @@ reload_service() {
 }
 
 service_triggers() {
-	local capture listen access managed c
+	local capture listen access managed c auto exclude
 	config_load "$CONF"
 	config_get capture main capture_network 'lan'
 	config_get access main config_access 'none'
@@ -296,6 +302,16 @@ service_triggers() {
 	procd_add_reload_trigger "$CONF"
 	if [ "$access" != "none" ]; then
 		config_list_foreach main managed_config append_list managed
+		# Sibling configs: watched when present (their package is installed)
+		# unless opted out; the daemon decides what is allowed.
+		config_get_bool auto main managed_config_auto 1
+		config_list_foreach main managed_config_exclude append_list exclude
+		if [ "$auto" -eq 1 ]; then
+			for c in sqm perch-qos; do
+				case ",$exclude," in *",$c,"*) continue ;; esac
+				[ -f "/etc/config/$c" ] && managed="${managed:-network,dhcp,firewall},$c"
+			done
+		fi
 		for c in $(echo "${managed:-network,dhcp,firewall}" | tr ',' ' '); do
 			case "$c" in
 				perch-collector|perch-apd|rpcd|uhttpd|dropbear|luci) ;;

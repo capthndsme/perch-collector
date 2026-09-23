@@ -404,6 +404,8 @@ Configuration values can also be set via environment variables. They take the hi
 | `PERCH_COLLECTOR_PORTAL_STORAGE_MOUNT` | `portal_storage_mount` |
 | `PERCH_COLLECTOR_CONFIG_ACCESS` | `config_access` (`none`, `read`, `write`) |
 | `PERCH_COLLECTOR_MANAGED_CONFIGS` | `managed_config` (comma-separated config names) |
+| `PERCH_COLLECTOR_MANAGED_CONFIG_AUTO` | `managed_config_auto` (bool, default true) |
+| `PERCH_COLLECTOR_MANAGED_CONFIG_EXCLUDE` | `managed_config_exclude` (comma-separated config names) |
 | `PERCH_COLLECTOR_CONFIG_ALLOW_INSECURE` | `config_allow_insecure` (`true`/`false`, `1`/`0`) |
 | `PERCH_COLLECTOR_CONFIG_CONFIRM_MAX` | `config_confirm_max` (seconds) |
 | `PERCH_COLLECTOR_CONFIG_SIGN_KEY` | `config_sign_key` |
@@ -741,7 +743,14 @@ networks come and go:
   must not make its frames show up on the trunk instead.
 - **Names or devices.** An entry that is not a netifd network is taken as a
   device name (a host without netifd), and its network is its own name.
-  `capture_exclude` removes networks by network or device name.
+  `capture_exclude` removes networks by network or device name. The
+  controller adds its own exclusions (a network whose capture an admin
+  turned off: `agent.configure` `capture.exclude`); they join
+  `capture_exclude` live, never replace it, and are dropped again when the
+  controller's list no longer names them. They are not kept across a
+  restart (the controller sends them with every configure). A
+  single-interface collector keeps its one capture; the controller drops
+  the excluded network's rows itself.
 - **Following the router.** netifd is re-read every `capture_rescan` seconds
   and on `SIGHUP` (the OpenWrt package sends one on every interface event:
   `/etc/init.d/perch-collector rescan`). A new network gets an engine, a
@@ -1292,7 +1301,14 @@ fresh connection or restored on its own. The protocol is in ARCHITECTURE.md
   `managed_config` (default `network dhcp firewall`) plus the sync ledger
   `perch-managed`. The agent's own config (so the controller can never flip
   this switch or re-point `server_url`), `perch-apd`, `rpcd`, `uhttpd`,
-  `dropbear` and `luci` are never readable. The controller has its own
+  `dropbear` and `luci` are never readable. **Sibling packages** (gateway
+  README 7.7): an installed `sqm-scripts` brings `sqm` onto the allowlist by
+  itself, an installed `perch-qos` brings `perch-qos` (the package database
+  is looked at every 30 s and right after an install job). Opt out with
+  `option managed_config_auto '0'` (only `managed_config` then), or keep one
+  off with `list managed_config_exclude 'sqm'`. The denylist always wins.
+  `gateway.capabilities` reports the effective list (`allowedConfigs`) and
+  each sibling's state (`siblingConfigs`). The controller has its own
   switch per gateway (mode `off`/`observe`/`managed`); the effective access
   is the lower of the two.
 - **Where.** On OpenWrt (`/etc/openwrt_release`) with `transport websocket`.
@@ -1376,6 +1392,8 @@ option config_access 'none'          # none | read | write
 list   managed_config 'network'      # the allowlist (package default network dhcp firewall)
 list   managed_config 'dhcp'
 list   managed_config 'firewall'
+option managed_config_auto '1'       # installed sqm-scripts / perch-qos join by themselves
+# list managed_config_exclude 'sqm'  # ...except these
 option config_allow_insecure '0'     # '1' = signed writes over plain http
 # option config_sign_key ''          # fixed HMAC key of those signatures (default: pair instead)
 option config_confirm_max '600'      # longest confirm window, seconds (30-3600)

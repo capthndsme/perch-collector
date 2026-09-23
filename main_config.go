@@ -88,6 +88,8 @@ func planeOptions(cfg config.Config) gwconfig.Options {
 		SignKey:        cfg.ConfigSignKey,
 		ServerURL:      cfg.ServerURL,
 		PackageAllow:   cfg.PackageAllow,
+		SiblingsOff:    !cfg.ManagedConfigAuto,
+		SiblingExclude: cfg.ManagedConfigExclude,
 		StoragePath:    cfg.StoragePath,
 		CaptureNetwork: cfg.CaptureNetwork,
 		CaptureDevice:  cfg.Interface,
@@ -251,6 +253,16 @@ func routerConfig() (config.Config, error) {
 	if os.Getenv(config.EnvPrefix+"MANAGED_CONFIGS") == "" {
 		if v, ok := s.Get("managed_config"); ok {
 			cfg.ManagedConfigs = v.Items
+		}
+	}
+	if os.Getenv(config.EnvPrefix+"MANAGED_CONFIG_AUTO") == "" {
+		if v, ok := s.Get("managed_config_auto"); ok {
+			cfg.ManagedConfigAuto = v.Str() != "0"
+		}
+	}
+	if os.Getenv(config.EnvPrefix+"MANAGED_CONFIG_EXCLUDE") == "" {
+		if v, ok := s.Get("managed_config_exclude"); ok {
+			cfg.ManagedConfigExclude = v.Items
 		}
 	}
 	if os.Getenv(config.EnvPrefix+"CONFIG_ALLOW_INSECURE") == "" {
