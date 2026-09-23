@@ -2,6 +2,7 @@ package portal
 
 import (
 	"context"
+	"fmt"
 	"testing"
 )
 
@@ -40,5 +41,34 @@ func TestBypassMACs(t *testing.T) {
 	}
 	if sys.has("inet", "p3_auth", macG2) {
 		t.Fatal("dropped bypass MAC still authorised")
+	}
+}
+
+// Decision 31: a portal user's sign-in that moved the device into its
+// device group's own network carries no grant; the guest page says the
+// device is moving, and nothing is authorised here.
+func TestLoginBoundToGroupNetwork(t *testing.T) {
+	e, sys, c, _ := configured(t)
+	ctx := context.Background()
+	p := guestPortal(3)
+	p.Methods.Password = true
+	cfg := c.configure(p)
+	cfg.Revision = 2
+	if _, err := e.Configure(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
+	e.SetAgent(&fakeAgent{handler: func(method string, params, result any) error {
+		if method != "portal.login" {
+			return fmt.Errorf("unexpected %s", method)
+		}
+		*(result.(*RedeemResult)) = RedeemResult{Bound: &BoundGroup{GroupID: 5, GroupName: "Unit 101", Moved: true}}
+		return nil
+	}})
+	out := e.Login(ctx, Client{PortalID: 3, MAC: macG1, IP: "192.168.20.111"}, "tenant", "secret-pass", false)
+	if !out.OK || out.Code != "moving" {
+		t.Fatalf("outcome %+v", out)
+	}
+	if sys.has("inet", "p3_auth", macG1) {
+		t.Fatal("a moved device was authorised on the onboarding portal")
 	}
 }

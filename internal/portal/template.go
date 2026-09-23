@@ -102,6 +102,7 @@ var PortalMessages = map[string]string{
 	"bad_request":            "Something was missing. Try again.",
 	"logged_out":             "You are disconnected.",
 	"connected":              "You are online.",
+	"moving":                 "Signed in. Your device now joins your own network: it disconnects and reconnects in a moment.",
 	"time_up":                "Your time is up.",
 	"data_used_up":           "Your data is used up.",
 	"checkout_started":       "Insert your coins at the terminal now.",

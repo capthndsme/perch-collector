@@ -232,6 +232,9 @@ func (e *Engine) callController(ctx context.Context, method string, params any) 
 		e.log.Warn("portal: no answer from the controller", "method", method, "err", err)
 		return Outcome{}, &rpcCodeError{"controller_unreachable"}
 	}
+	if res.Bound != nil && res.Bound.Moved && res.Grant == nil {
+		return Outcome{OK: true, Code: "moving", Status: http.StatusOK}, nil
+	}
 	if res.Queued || res.Grant == nil {
 		return Outcome{OK: true, Code: "connected", Status: http.StatusOK}, nil
 	}

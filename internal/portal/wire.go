@@ -359,6 +359,17 @@ type RedeemResult struct {
 	Grant  *SignedGrant `json:"grant"`
 	Group  *SignedGroup `json:"group"`
 	Queued bool         `json:"queued,omitempty"`
+	// Bound: a portal user's sign-in put the device in the user's device
+	// group (decision 31). Moved: the group has its own network, so there is
+	// no grant here; the access points move the device into its VLAN.
+	Bound *BoundGroup `json:"bound,omitempty"`
+}
+
+// BoundGroup is the device group a sign-in bound the device to.
+type BoundGroup struct {
+	GroupID   int64  `json:"groupId"`
+	GroupName string `json:"groupName"`
+	Moved     bool   `json:"moved"`
 }
 
 // RelayParams are portal.relay's params (collector → controller): an

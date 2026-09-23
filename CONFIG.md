@@ -1245,7 +1245,7 @@ usage journaled later is added on the router until a newer set covers it.
 | Method | Params → result |
 |---|---|
 | `portal.redeem` | `{portalId, mac, ip, hostname?, code, replace?}` (code normalized) → `{grant:{WireGrant+sig}, group:{WireGroup+sig}}` or `{queued:true}`; errors -32000 `data.error` ∈ `invalid_code, invalid_credentials, expired, exhausted, revoked, disabled, device_limit, already_authorized, wrong_portal, rate_limited` |
-| `portal.login` | `{portalId, mac, ip, hostname?, username, password, replace?}` → as `portal.redeem` |
+| `portal.login` | `{portalId, mac, ip, hostname?, username, password, replace?}` → as `portal.redeem`, plus `bound?:{groupId, groupName, moved}` (decision 31: the user's device group took the device; `moved` without a grant = its own network, the guest page says `moving`) |
 | `portal.relay` | `{portalId, op:'authorize'\|'status'\|'deauthorize', mac?, token, body?, clientIp}` → `{status, body}` |
 
 The redeem/login answer's grant and group must be signed like
