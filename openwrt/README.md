@@ -27,7 +27,7 @@ architecture (the last line of `opkg print-architecture` on 24.10 too; on 25.12
 `apk --print-arch` prints only the base one, e.g. `mipsel`).
 
 ```sh
-V=1.0.0-rc.3                        # the release; tag and file names both use it
+V=1.0.0                             # the release; tag and file names both use it
 . /etc/openwrt_release; ARCH=$DISTRIB_ARCH
 BASE=https://github.com/capthndsme/perch-collector/releases/download/v$V
 # OpenWrt 24.10
@@ -59,8 +59,8 @@ in each package manager's pre-release form, so the final release is always an
 upgrade: `1.0.0~rc3` in the `.ipk` (opkg sorts `~` below the release) and
 `1.0.0_rc3` in the `.apk` (apk-tools rejects `~`). **From rc.1 on OpenWrt
 24.10:** rc.1's `.ipk` carried `1.0.0_rc1`, which opkg sorts above every later
-release, so moving off it takes `opkg install --force-downgrade <rc.3 .ipk>`
-once; from rc.2 on, later rcs and `1.0.0` install as plain upgrades.
+release, so moving off it takes `opkg install --force-downgrade <1.0.0 .ipk>`
+once; from rc.2 on, 1.0.0 installs as a plain upgrade.
 
 ## Build
 
