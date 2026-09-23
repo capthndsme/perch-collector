@@ -1,0 +1,12 @@
+#!/bin/sh
+# busybox ntpd reports here (ACTION stratum / step / unsync / periodic).
+# Schedules run on the router's clock and wait for this marker (or the
+# kernel's synchronised flag) before they switch anything.
+case "$ACTION" in
+	stratum|step|periodic)
+		[ "${stratum:-16}" -lt 16 ] || [ "$ACTION" = step ] || exit 0
+		mkdir -p /tmp/perch-qos && touch /tmp/perch-qos/ntp-synced ;;
+	unsync)
+		rm -f /tmp/perch-qos/ntp-synced ;;
+esac
+exit 0

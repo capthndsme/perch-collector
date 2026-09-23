@@ -1,0 +1,27 @@
+#!/bin/sh /etc/rc.common
+# Perch traffic shaping. The perch-collector daemon keeps the shaper
+# applied (dynamic devices, schedules, quotas); this script applies on
+# start and on changes of perch-qos, sqm or the firewall, and `stop`
+# removes every Perch tc object until the next start (a local pause).
+
+START=96
+STOP=09
+USE_PROCD=1
+PROG=/usr/bin/perch-collector
+
+start_service() {
+	"$PROG" qos apply >/dev/null 2>&1 || logger -t perch-qos "apply failed: see perch-collector qos status"
+}
+
+stop_service() {
+	"$PROG" qos stop >/dev/null 2>&1
+}
+
+reload_service() {
+	[ -e /tmp/perch-qos/stopped ] && return 0
+	"$PROG" qos sync >/dev/null 2>&1 || logger -t perch-qos "apply failed: see perch-collector qos status"
+}
+
+service_triggers() {
+	procd_add_reload_trigger perch-qos sqm firewall
+}

@@ -1,0 +1,84 @@
+{
+  "revision": 7,
+  "devices": [
+    {
+      "mac": "02:00:00:00:10:11",
+      "bucket": null,
+      "downKbit": 2000,
+      "upKbit": 1000,
+      "quota": null,
+      "expiresAt": null,
+      "schedules": [
+        "s8",
+        "s9"
+      ]
+    },
+    {
+      "mac": "02:00:00:00:10:13",
+      "bucket": null,
+      "downKbit": 1000,
+      "upKbit": 1000,
+      "quota": null,
+      "expiresAt": null,
+      "includeLan": true
+    },
+    {
+      "mac": "02:00:00:00:10:14",
+      "bucket": null,
+      "downKbit": 3000,
+      "upKbit": 1000,
+      "quota": {
+        "limitBytes": 52428800,
+        "usedBytes": 0,
+        "onExhausted": "throttle",
+        "throttleDownKbit": 256,
+        "throttleUpKbit": 128
+      },
+      "expiresAt": "2026-12-31T00:00:00.000Z"
+    },
+    {
+      "mac": "02:00:00:00:10:15",
+      "bucket": null,
+      "downKbit": 3000,
+      "upKbit": 1000,
+      "quota": {
+        "limitBytes": 1000,
+        "usedBytes": 5000,
+        "onExhausted": "block",
+        "throttleDownKbit": null,
+        "throttleUpKbit": null
+      },
+      "expiresAt": null
+    },
+    {
+      "mac": "02:00:00:00:20:11",
+      "bucket": "b13",
+      "downKbit": 4000,
+      "upKbit": 4000,
+      "quota": null,
+      "expiresAt": null,
+      "schedules": [
+        "s7"
+      ]
+    },
+    {
+      "mac": "02:00:00:00:20:12",
+      "bucket": "b13",
+      "downKbit": 4000,
+      "upKbit": 4000,
+      "quota": null,
+      "expiresAt": null,
+      "schedules": [
+        "s7"
+      ]
+    },
+    {
+      "mac": "02:00:00:00:30:11",
+      "bucket": "b12",
+      "downKbit": null,
+      "upKbit": null,
+      "quota": null,
+      "expiresAt": null
+    }
+  ]
+}

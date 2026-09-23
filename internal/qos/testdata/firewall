@@ -1,0 +1,19 @@
+config defaults
+	option input 'REJECT'
+	option output 'ACCEPT'
+	option forward 'REJECT'
+	option flow_offloading '1'
+
+config zone
+	option name 'wan'
+	list network 'wan'
+	list network 'wan2'
+	option masq '1'
+
+config zone
+	option name 'lan'
+	list network 'lan'
+
+config zone
+	option name 'guest'
+	option network 'guest iot'

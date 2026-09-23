@@ -1,0 +1,214 @@
+{
+ "interface": [
+  {
+   "interface": "guest",
+   "up": true,
+   "pending": false,
+   "available": true,
+   "l3_device": "guest",
+   "device": "guest",
+   "proto": "static",
+   "metric": 0,
+   "ipv4-address": [
+    {
+     "address": "192.168.20.1",
+     "mask": 24
+    }
+   ],
+   "ipv6-address": [],
+   "ipv6-prefix": [],
+   "ipv6-prefix-assignment": [],
+   "route": [],
+   "dns-server": [],
+   "dns-search": [],
+   "neighbors": [],
+   "data": {}
+  },
+  {
+   "interface": "iot",
+   "up": true,
+   "pending": false,
+   "available": true,
+   "l3_device": "iot",
+   "device": "iot",
+   "proto": "static",
+   "metric": 0,
+   "ipv4-address": [
+    {
+     "address": "192.168.30.1",
+     "mask": 24
+    }
+   ],
+   "ipv6-address": [],
+   "ipv6-prefix": [],
+   "ipv6-prefix-assignment": [],
+   "route": [],
+   "dns-server": [],
+   "dns-search": [],
+   "neighbors": [],
+   "data": {}
+  },
+  {
+   "interface": "lan",
+   "up": true,
+   "pending": false,
+   "available": true,
+   "l3_device": "lan",
+   "device": "lan",
+   "proto": "static",
+   "metric": 0,
+   "ipv4-address": [
+    {
+     "address": "192.168.10.1",
+     "mask": 24
+    }
+   ],
+   "ipv6-address": [],
+   "ipv6-prefix": [],
+   "ipv6-prefix-assignment": [
+    {
+     "address": "fd00:10::",
+     "mask": 64,
+     "local-address": {
+      "address": "fd00:10::1",
+      "mask": 64
+     }
+    }
+   ],
+   "route": [],
+   "dns-server": [],
+   "dns-search": [],
+   "neighbors": [],
+   "data": {}
+  },
+  {
+   "interface": "loopback",
+   "up": true,
+   "pending": false,
+   "available": true,
+   "l3_device": "lo",
+   "device": "lo",
+   "proto": "static",
+   "metric": 0,
+   "ipv4-address": [
+    {
+     "address": "127.0.0.1",
+     "mask": 8
+    }
+   ],
+   "ipv6-address": [],
+   "ipv6-prefix": [],
+   "ipv6-prefix-assignment": [],
+   "route": [],
+   "dns-server": [],
+   "dns-search": [],
+   "neighbors": [],
+   "data": {}
+  },
+  {
+   "interface": "mgmt",
+   "up": true,
+   "pending": false,
+   "available": true,
+   "l3_device": "mgmt",
+   "device": "mgmt",
+   "proto": "static",
+   "metric": 0,
+   "ipv4-address": [
+    {
+     "address": "192.168.5.1",
+     "mask": 24
+    }
+   ],
+   "ipv6-address": [],
+   "ipv6-prefix": [],
+   "ipv6-prefix-assignment": [],
+   "route": [],
+   "dns-server": [],
+   "dns-search": [],
+   "neighbors": [],
+   "data": {}
+  },
+  {
+   "interface": "wan",
+   "up": true,
+   "pending": false,
+   "available": true,
+   "l3_device": "wan",
+   "device": "wan",
+   "proto": "dhcp",
+   "metric": 0,
+   "ipv4-address": [
+    {
+     "address": "192.0.2.2",
+     "mask": 24
+    }
+   ],
+   "ipv6-address": [],
+   "ipv6-prefix": [],
+   "ipv6-prefix-assignment": [],
+   "route": [
+    {
+     "target": "0.0.0.0",
+     "mask": 0,
+     "nexthop": "192.0.2.1",
+     "source": "0.0.0.0/0"
+    }
+   ],
+   "dns-server": [],
+   "dns-search": [],
+   "neighbors": [],
+   "data": {}
+  },
+  {
+   "interface": "wan2",
+   "up": true,
+   "pending": false,
+   "available": true,
+   "l3_device": "wan2",
+   "device": "wan2",
+   "proto": "static",
+   "metric": 0,
+   "ipv4-address": [
+    {
+     "address": "203.0.113.2",
+     "mask": 24
+    }
+   ],
+   "ipv6-address": [],
+   "ipv6-prefix": [],
+   "ipv6-prefix-assignment": [],
+   "route": [
+    {
+     "target": "0.0.0.0",
+     "mask": 0,
+     "nexthop": "203.0.113.1",
+     "source": "0.0.0.0/0"
+    }
+   ],
+   "dns-server": [],
+   "dns-search": [],
+   "neighbors": [],
+   "data": {}
+  },
+  {
+   "interface": "vpn",
+   "up": false,
+   "pending": false,
+   "available": true,
+   "l3_device": "vpn0",
+   "device": "vpn0",
+   "proto": "static",
+   "metric": 0,
+   "ipv4-address": [],
+   "ipv6-address": [],
+   "ipv6-prefix": [],
+   "ipv6-prefix-assignment": [],
+   "route": [],
+   "dns-server": [],
+   "dns-search": [],
+   "neighbors": [],
+   "data": {}
+  }
+ ]
+}

@@ -220,6 +220,29 @@ Coming from the earlier `metricslite-collector` package: copy `api_key`,
 instance id keeps the controller's row and its history), then stop and
 disable the old service before starting the new one.
 
+## Traffic shaping: `perch-qos`
+
+The same Makefile builds `perch-qos` (architecture `all`, scripts only):
+per-device and bucket speed caps that the Perch controller configures and
+perch-collector applies (CONFIG.md "Traffic shaping"). It depends on
+`perch-collector`, `tc-tiny`, `kmod-sched-core`, `kmod-sched-flower`,
+`kmod-sched-cake` and `kmod-ifb` (in a container the kernel modules are the
+host's and the kmod packages change nothing). It installs:
+
+- `/etc/config/perch-qos` (written by the controller; `option enabled '0'` in
+  `globals` is a local pause the controller shows and never reverts);
+- `/etc/init.d/perch-qos` (start = `perch-collector qos apply`, stop =
+  `qos stop`, reload on changes of perch-qos, sqm and the firewall);
+- `/etc/hotplug.d/iface/40-perch-qos` (re-sync when a network comes, goes or
+  changes prefixes) and `/etc/hotplug.d/ntp/40-perch-qos` (schedules wait
+  for the clock);
+- `/etc/uci-defaults/95-perch-qos`, `/lib/upgrade/keep.d/perch-qos` (the
+  device cache `/etc/perch-qos/devices.json` survives sysupgrade).
+
+Removing the package takes every Perch tc object down first. sqm-scripts on
+the WAN is independent: Perch shapes on the LAN side only. Without the SDK,
+copy the six `files/perch-qos.*` to those paths.
+
 ## On a router, three things to know
 
 - **Hardware flow offloading** (MediaTek/Qualcomm PPE) forwards established
@@ -247,4 +270,5 @@ scripts/openwrt-package.sh                       one package for one architectur
 openwrt/perch-collector/files/*.init             procd init: UCI → environment, key generation, interface triggers
 openwrt/perch-collector/files/*.config           default /etc/config/perch-collector
 openwrt/perch-collector/files/*.defaults         uci-defaults: generate the API key and the instance id on first boot
+openwrt/perch-collector/files/perch-qos.*        the perch-qos package: init, config, iface and ntp hotplug, uci-defaults, keep.d
 ```

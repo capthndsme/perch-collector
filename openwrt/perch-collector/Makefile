@@ -177,5 +177,45 @@ done
 exit 0
 endef
 
+define Package/perch-qos
+  SECTION:=net
+  CATEGORY:=Network
+  SUBMENU:=Network Monitoring
+  TITLE:=Perch traffic shaping (per-device and bucket caps)
+  URL:=https://github.com/capthndsme/perch-collector
+  DEPENDS:=+perch-collector +tc-tiny +kmod-sched-core +kmod-sched-flower +kmod-sched-cake +kmod-ifb
+  PKGARCH:=all
+endef
+
+define Package/perch-qos/description
+  Per-device and shared (bucket) speed caps for Perch, applied by
+  perch-collector: an HTB tree on two ifbs fed from the LAN side (MAC
+  filters, fq_codel per device, CAKE per bucket), nested buckets, weekly
+  schedules on the router's clock, data quotas. Works next to sqm-scripts
+  on the WAN and never touches it. Configured by the Perch controller
+  (/etc/config/perch-qos); `perch-collector qos stop` pauses it. The
+  kernel modules matter only on bare metal (a container uses the host's).
+endef
+
+define Package/perch-qos/conffiles
+/etc/config/perch-qos
+endef
+
+define Package/perch-qos/install
+	$(INSTALL_DIR) $(1)/etc/init.d $(1)/etc/config $(1)/etc/uci-defaults
+	$(INSTALL_DIR) $(1)/etc/hotplug.d/iface $(1)/etc/hotplug.d/ntp $(1)/lib/upgrade/keep.d
+	$(INSTALL_BIN) ./files/perch-qos.init $(1)/etc/init.d/perch-qos
+	$(INSTALL_CONF) ./files/perch-qos.config $(1)/etc/config/perch-qos
+	$(INSTALL_BIN) ./files/perch-qos.defaults $(1)/etc/uci-defaults/95-perch-qos
+	$(INSTALL_DATA) ./files/perch-qos.hotplug $(1)/etc/hotplug.d/iface/40-perch-qos
+	$(INSTALL_DATA) ./files/perch-qos.ntp-hotplug $(1)/etc/hotplug.d/ntp/40-perch-qos
+	$(INSTALL_DATA) ./files/perch-qos.keep $(1)/lib/upgrade/keep.d/perch-qos
+endef
+
+# Removal needs no prerm of its own: OpenWrt's default_prerm runs
+# /etc/init.d/perch-qos stop (= perch-collector qos stop), which takes every
+# Perch tc object down; sqm stays.
+
 $(eval $(call GoBinPackage,perch-collector))
 $(eval $(call BuildPackage,perch-collector))
+$(eval $(call BuildPackage,perch-qos))

@@ -103,6 +103,7 @@ start_service() {
 	local capture_network config_access managed_configs config_allow_insecure config_confirm_max storage_path
 	local config_sign_key package_allow
 	local capture_networks capture_exclude capture_rescan routed_lan ndpi_module
+	local qos
 	local uci_dirty=0
 
 	config_load "$CONF"
@@ -193,6 +194,7 @@ start_service() {
 	config_get observe_refresh main observe_refresh '600'
 	config_get conntrack_flush main conntrack_flush 'auto'
 	config_get gateway_backup main gateway_backup 'redacted'
+	config_get qos main qos 'auto'
 	config_get address_cache main controller_address_cache '/etc/perch-collector/controller-address'
 	config_get portal main portal_enabled 'auto'
 	config_get portal_port main portal_port '2080'
@@ -268,7 +270,8 @@ start_service() {
 		PERCH_COLLECTOR_CONFIG_CONFIRM_MAX="$config_confirm_max" \
 		PERCH_COLLECTOR_STORAGE_PATH="$storage_path" \
 		PERCH_COLLECTOR_CONFIG_SIGN_KEY="$config_sign_key" \
-		PERCH_COLLECTOR_PACKAGE_ALLOW="$package_allow"
+		PERCH_COLLECTOR_PACKAGE_ALLOW="$package_allow" \
+		PERCH_COLLECTOR_QOS="$qos"
 	procd_set_param respawn 3600 5 0
 	procd_set_param stdout 1
 	procd_set_param stderr 1
