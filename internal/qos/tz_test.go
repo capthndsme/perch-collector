@@ -1,6 +1,7 @@
 package qos
 
 import (
+	"os"
 	"testing"
 	"time"
 )
@@ -83,5 +84,49 @@ func TestZoneWallAndInstant(t *testing.T) {
 	st := ScheduleStates(c, time.Date(2026, 7, 1, 16, 30, 0, 0, time.UTC), z, true)
 	if !st[0].Active || st[0].Since.Format(time.RFC3339) != "2026-07-01T16:00:00Z" || st[0].Until.Format(time.RFC3339) != "2026-07-01T21:00:00Z" {
 		t.Errorf("state %+v %s %s", st[0], st[0].Since, st[0].Until)
+	}
+}
+
+func TestTZifFooter(t *testing.T) {
+	for name, want := range map[string]string{"Asia/Manila": "PST-8", "Europe/Berlin": "CET-1CEST,M3.5.0,M10.5.0/3"} {
+		data, err := os.ReadFile("/usr/share/zoneinfo/" + name)
+		if err != nil {
+			t.Skipf("no zoneinfo: %v", err)
+		}
+		if got := TZifFooter(data); got != want {
+			t.Errorf("%s: %q, want %q", name, got, want)
+		}
+	}
+	for _, bad := range []string{"", "PST-8\n", "TZif\x00data\nPST-8\n", "TZif2data\nPST-8"} {
+		if got := TZifFooter([]byte(bad)); got != "" {
+			t.Errorf("%q: %q", bad, got)
+		}
+	}
+}
+
+// TestEngineZoneFromLocaltime: with system.zonename set and zoneinfo
+// installed, OpenWrt removes /tmp/TZ and links /tmp/localtime (the target
+// of /etc/localtime) to the zone file; schedules must still run on the
+// router's clock, not UTC.
+func TestEngineZoneFromLocaltime(t *testing.T) {
+	f := newFakeSys(t)
+	delete(f.files, TZPath)
+	f.put(LocaltimePath, []byte("TZif2\x00\x00data\nPST-8\n"))
+	e := NewEngine(f, true)
+	e.Reconcile("start", true)
+	e.mu.Lock()
+	zone := e.zone.String()
+	e.mu.Unlock()
+	if zone != "PST-8" {
+		t.Errorf("zone %q", zone)
+	}
+	// /tmp/TZ, when present, wins (what the C library reads first).
+	f.put(TZPath, []byte("UTC0\n"))
+	e.Reconcile("tick", false)
+	e.mu.Lock()
+	zone = e.zone.String()
+	e.mu.Unlock()
+	if zone != "UTC0" {
+		t.Errorf("zone %q with /tmp/TZ", zone)
 	}
 }

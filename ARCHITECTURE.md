@@ -939,7 +939,8 @@ ifb-pdn (down) and ifb-pup (up), the same tree with each direction's rates:
   backlog added), sqm's root qdiscs, and, for quotas, the per-MAC filters'
   action byte counters, which count a MAC on every LAN device and both hooks
   whatever class it is in. Quota deltas survive filter replacement.
-- **Schedules**: POSIX TZ from `/tmp/TZ` (`tz.go`, tested against zoneinfo);
+- **Schedules**: POSIX TZ from `/tmp/TZ`, else the footer of the TZif file at
+  `/etc/localtime` (`tz.go`, tested against zoneinfo);
   inactive until the clock is known to be synced.
 - **Safety**: kernel state outlives the daemon (a crash or restart leaves the
   tree enforcing); a broken perch-qos never tears shaping down; `qos stop`

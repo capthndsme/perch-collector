@@ -1,6 +1,7 @@
 package qos
 
 import (
+	"bytes"
 	"fmt"
 	"strconv"
 	"strings"
@@ -30,6 +31,20 @@ type tzRule struct {
 
 // UTCZone is the zone of a router without a timezone.
 var UTCZone = &Zone{spec: "UTC0", stdName: "UTC"}
+
+// TZifFooter is the POSIX TZ string at the end of a TZif file (version 2
+// and later: "\n<TZ>\n" after the data), or "" when data is not one.
+func TZifFooter(data []byte) string {
+	if len(data) < 5 || string(data[:4]) != "TZif" || data[4] < '2' || data[len(data)-1] != '\n' {
+		return ""
+	}
+	body := data[:len(data)-1]
+	i := bytes.LastIndexByte(body, '\n')
+	if i < 0 {
+		return ""
+	}
+	return strings.TrimSpace(string(body[i+1:]))
+}
 
 // ParseTZ reads a POSIX TZ string.
 func ParseTZ(s string) (*Zone, error) {

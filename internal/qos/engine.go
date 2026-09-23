@@ -24,6 +24,10 @@ const (
 	FirewallPath = "/etc/config/firewall"
 	SystemPath   = "/etc/config/system"
 	TZPath       = "/tmp/TZ"
+	// LocaltimePath is the zone when system.zonename names an installed
+	// zoneinfo file: /etc/init.d/system then links /tmp/localtime to it and
+	// removes /tmp/TZ.
+	LocaltimePath = "/etc/localtime"
 	// FlashDevicesPath is the on-flash cache of the last qos.devices.set.
 	FlashDevicesPath = "/etc/perch-qos/devices.json"
 	// RuntimeDir holds the state that lives as long as the kernel objects.
@@ -329,8 +333,7 @@ func (e *Engine) refreshConfigLocked() {
 			}
 		}
 	}
-	tz, _ := e.sys.ReadFile(TZPath)
-	if key := strings.TrimSpace(string(tz)); key != e.zoneKey || e.zone == nil {
+	if key := e.readZoneLocked(); key != e.zoneKey || e.zone == nil {
 		e.zoneKey = key
 		z, err := ParseTZ(key)
 		if err != nil {
@@ -339,6 +342,16 @@ func (e *Engine) refreshConfigLocked() {
 		}
 		e.zone = z
 	}
+}
+
+// readZoneLocked is the router's POSIX TZ string: /tmp/TZ, else the
+// footer of the zoneinfo file /etc/localtime points at, else "" (UTC).
+func (e *Engine) readZoneLocked() string {
+	if tz, _ := e.sys.ReadFile(TZPath); strings.TrimSpace(string(tz)) != "" {
+		return strings.TrimSpace(string(tz))
+	}
+	data, _ := e.sys.ReadFile(LocaltimePath)
+	return TZifFooter(data)
 }
 
 func (e *Engine) refreshLANsLocked(force bool) {

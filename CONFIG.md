@@ -1075,7 +1075,9 @@ the first active schedule of `schedules` wins; an exhausted quota overrides
 schedules (`throttle` → the throttle rates, `block` → drop).
 
 **Schedules** use the router's clock and zone (`/tmp/TZ`, the POSIX TZ string
-OpenWrt writes from `system.timezone`). Until the clock is known to be synced
+OpenWrt writes from `system.timezone`; with a zoneinfo package installed and
+`system.zonename` set, OpenWrt removes it and links `/etc/localtime` to the zone
+file instead, whose POSIX footer is read). Until the clock is known to be synced
 (busybox ntpd's hotplug marker `/tmp/perch-qos/ntp-synced`, or the kernel's
 clock discipline) no schedule is in force and the push reports
 `schedule_clock_unsynced`. Window edges are applied within the 2 s tick, in
