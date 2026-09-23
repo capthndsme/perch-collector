@@ -163,10 +163,17 @@ func (r *Reconciler) Close() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.closed = true
+	// In parallel: each stop waits out one read timeout.
+	var wg sync.WaitGroup
 	for dev, run := range r.running {
-		run.engine.Stop()
+		wg.Add(1)
+		go func(e Engine) {
+			defer wg.Done()
+			e.Stop()
+		}(run.engine)
 		delete(r.running, dev)
 	}
+	wg.Wait()
 }
 
 // Captured maps each captured device to its network.
