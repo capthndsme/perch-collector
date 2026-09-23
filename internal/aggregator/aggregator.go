@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/capthndsme/perch-collector/internal/netutil"
@@ -71,6 +72,11 @@ type FlowInfo struct {
 	// NameExpected: the protocol family carries a server name, so an
 	// unnamed flow is accounted by peer address (see DestinationStats).
 	NameExpected bool
+	// Network is the capture network the frame was seen on (the UCI
+	// network name, "lan"), or "" when the capture does not know it. It
+	// attributes the frame's local devices (DeviceStats.Network) and feeds
+	// the per-network capture counters.
+	Network string
 }
 
 // ProtocolStats holds per-protocol byte/packet counters for JSON serialization.
@@ -128,6 +134,42 @@ type DeviceStats struct {
 	Protocols     []ProtocolStats    `json:"protocols"`
 	Services      []ServiceStats     `json:"services"`
 	Destinations  []DestinationStats `json:"destinations"`
+	// Network is the capture network where this MAC was last an endpoint
+	// of a frame ("lan", "guest"); absent when the capture does not know
+	// its network. Networks is every network it was seen on, in first-seen
+	// order, at most MaxDeviceNetworks. Both are absent on a single-
+	// interface collector whose device maps to no network.
+	Network  string   `json:"network,omitempty"`
+	Networks []string `json:"networks,omitempty"`
+}
+
+// MaxDeviceNetworks caps DeviceStats.Networks.
+const MaxDeviceNetworks = 8
+
+// NetworkCounters are one capture network's byte and packet counters, from
+// the capture (not the interface counters): the sums of what the network's
+// local devices sent (Out) and received (In), split by scope like the
+// device counters. A frame between two devices of the same network counts
+// once In and once Out; a frame routed between two captured networks
+// counts Out on the sender's network and In on the receiver's. Cumulative
+// since the collector started (or the last Reset).
+type NetworkCounters struct {
+	BytesInWAN    uint64 `json:"bytesInWan"`
+	BytesOutWAN   uint64 `json:"bytesOutWan"`
+	BytesInLAN    uint64 `json:"bytesInLan"`
+	BytesOutLAN   uint64 `json:"bytesOutLan"`
+	PacketsInWAN  uint64 `json:"packetsInWan"`
+	PacketsOutWAN uint64 `json:"packetsOutWan"`
+	PacketsInLAN  uint64 `json:"packetsInLan"`
+	PacketsOutLAN uint64 `json:"packetsOutLan"`
+}
+
+// NetworkDevices counts the devices attributed to one network (their
+// DeviceStats.Network): all of them, and those seen within the window
+// passed to NetworkDeviceCounts.
+type NetworkDevices struct {
+	Devices       int
+	ActiveDevices int
 }
 
 // Summary is the JSON-serializable aggregate view across all devices.
@@ -261,15 +303,31 @@ type device struct {
 	// unnamedDestinations counts the peer-address-keyed rows so they get
 	// their own cap and cannot starve named rows.
 	unnamedDestinations int
+	// network is the capture network of the last frame this device was an
+	// endpoint of; networks every one it was seen on (cap MaxDeviceNetworks).
+	network  string
+	networks []string
 }
 
 // Aggregator maintains thread-safe per-device traffic counters indexed by MAC.
 type Aggregator struct {
-	mu               sync.RWMutex
-	devices          map[string]*device
-	started          time.Time
-	gatewayMACs      map[string]struct{} // canonical lowercase form; empty disables WAN pivot.
-	localSubnets     []*net.IPNet
+	mu      sync.RWMutex
+	devices map[string]*device
+	started time.Time
+	// gatewayMACs is the set of pivot MACs (canonical lowercase form; empty
+	// disables the WAN pivot). Read on every packet before the lock is
+	// taken, and replaced whole by SetGatewayMACs, so it is an immutable
+	// map behind an atomic pointer.
+	gatewayMACs  atomic.Pointer[map[string]struct{}]
+	localSubnets []*net.IPNet
+	// routedLAN turns on the routed-LAN scope rule (gateway plan 1 section
+	// 8.3, owner decision 8): a frame through a gateway MAC whose far
+	// address is local (lanPrefixes, or link-local) counts as LAN scope.
+	// Off = the original rule: every frame through a gateway MAC is WAN.
+	routedLAN   bool
+	lanPrefixes []*net.IPNet
+	// networks holds the per-capture-network counters.
+	networks         map[string]*NetworkCounters
 	topPeersCount    int
 	topLANPeersCount int
 	// topServicesCount caps distinct (name, protocol) pairs per device;
@@ -312,17 +370,89 @@ func New(gatewayMACs []net.HardwareAddr, localSubnets []*net.IPNet, topPeersCoun
 		}
 		gws[m.String()] = struct{}{}
 	}
-	return &Aggregator{
+	a := &Aggregator{
 		devices:                     make(map[string]*device),
 		started:                     time.Now(),
-		gatewayMACs:                 gws,
 		localSubnets:                localSubnets,
+		networks:                    make(map[string]*NetworkCounters),
 		topPeersCount:               normalizePeerCount(topPeersCount),
 		topLANPeersCount:            normalizePeerCount(topLANPeersCount),
 		topServicesCount:            defaultTopServicesCount,
 		topDestinationsCount:        defaultTopDestinationsCount,
 		topUnnamedDestinationsCount: defaultTopUnnamedDestinationsCount,
 	}
+	a.gatewayMACs.Store(&gws)
+	return a
+}
+
+// SetGatewayMACs replaces the pivot MACs (the router's own MACs on every
+// captured network, when captures come and go). Frames already recorded
+// keep their scope.
+func (a *Aggregator) SetGatewayMACs(macs []net.HardwareAddr) {
+	gws := make(map[string]struct{}, len(macs))
+	for _, m := range macs {
+		if len(m) == 0 {
+			continue
+		}
+		gws[m.String()] = struct{}{}
+	}
+	a.gatewayMACs.Store(&gws)
+}
+
+// GatewayMACs lists the pivot MACs, sorted.
+func (a *Aggregator) GatewayMACs() []string {
+	gws := *a.gatewayMACs.Load()
+	out := make([]string, 0, len(gws))
+	for m := range gws {
+		out = append(out, m)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// SetLocalSubnets replaces the CIDRs a device's IP set accepts and that
+// decide whether a far address is a WAN peer.
+func (a *Aggregator) SetLocalSubnets(subnets []*net.IPNet) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.localSubnets = subnets
+}
+
+// SetRoutedLAN sets the scope rule: on, a frame through a gateway MAC whose
+// far address is in lanPrefixes (the router's own LAN-side networks) or
+// link-local counts as LAN scope and a LAN peer, not WAN. That covers
+// traffic routed between two local networks and traffic to the router's
+// own LAN addresses (DNS, the web UI). Off (the default) keeps the original
+// rule. An empty lanPrefixes still catches link-local addresses only.
+func (a *Aggregator) SetRoutedLAN(on bool, lanPrefixes []*net.IPNet) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.routedLAN = on
+	a.lanPrefixes = lanPrefixes
+}
+
+// RoutedLAN reports whether the routed-LAN scope rule is on.
+func (a *Aggregator) RoutedLAN() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.routedLAN
+}
+
+// isRoutedLocal reports whether ip, the far end of a frame through a
+// gateway MAC, is local under the routed-LAN rule. Caller holds the lock.
+func (a *Aggregator) isRoutedLocal(ip net.IP) bool {
+	if !a.routedLAN || ip == nil {
+		return false
+	}
+	if ip.IsLinkLocalUnicast() {
+		return true
+	}
+	for _, n := range a.lanPrefixes {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // normalizePeerCount applies the shared clamp policy used for both WAN and
@@ -342,10 +472,11 @@ func normalizePeerCount(n int) int {
 // isGateway returns true when mac is one of the configured upstream-gateway
 // pivots. Hot path: O(1) map lookup, called twice per packet.
 func (a *Aggregator) isGateway(mac string) bool {
-	if len(a.gatewayMACs) == 0 {
+	gws := *a.gatewayMACs.Load()
+	if len(gws) == 0 {
 		return false
 	}
-	_, ok := a.gatewayMACs[mac]
+	_, ok := gws[mac]
 	return ok
 }
 
@@ -455,9 +586,51 @@ func (a *Aggregator) RecordPacket(srcMAC, dstMAC net.HardwareAddr, srcIP, dstIP 
 	defer a.mu.Unlock()
 
 	bytes := uint64(packetLen)
+	var nc *NetworkCounters
+	if info.Network != "" && !(srcIsGW && dstIsGW) {
+		nc = a.networkCounters(info.Network)
+	}
 	switch {
 	case srcIsGW && dstIsGW:
 		return
+	case srcIsGW && !dstIsGW && a.isRoutedLocal(srcIP):
+		// Routed from another local network, or sent by the router itself
+		// from a LAN address: LAN scope, the far end a LAN peer.
+		dev := a.getOrCreate(dstKey, now)
+		dev.bytesIn += bytes
+		dev.packetsIn++
+		dev.bytesInLAN += bytes
+		dev.packetsInLAN++
+		dev.lastSeen = now
+		a.attribute(dev, info.Network)
+		a.addIP(dev, dstIP)
+		a.recordLANPeer(dev, srcIP.String(), bytes, 0)
+		a.recordProtocol(dev, protocol, bytes, 0)
+		if toServer {
+			a.recordService(dev, serverName, protocol, 0, bytes)
+		}
+		if nc != nil {
+			nc.BytesInLAN += bytes
+			nc.PacketsInLAN++
+		}
+	case !srcIsGW && dstIsGW && a.isRoutedLocal(dstIP):
+		dev := a.getOrCreate(srcKey, now)
+		dev.bytesOut += bytes
+		dev.packetsOut++
+		dev.bytesOutLAN += bytes
+		dev.packetsOutLAN++
+		dev.lastSeen = now
+		a.attribute(dev, info.Network)
+		a.addIP(dev, srcIP)
+		a.recordLANPeer(dev, dstIP.String(), 0, bytes)
+		a.recordProtocol(dev, protocol, 0, bytes)
+		if !toServer {
+			a.recordService(dev, serverName, protocol, bytes, 0)
+		}
+		if nc != nil {
+			nc.BytesOutLAN += bytes
+			nc.PacketsOutLAN++
+		}
 	case srcIsGW && !dstIsGW:
 		dev := a.getOrCreate(dstKey, now)
 		dev.bytesIn += bytes
@@ -465,6 +638,11 @@ func (a *Aggregator) RecordPacket(srcMAC, dstMAC net.HardwareAddr, srcIP, dstIP 
 		dev.bytesInWAN += bytes
 		dev.packetsInWAN++
 		dev.lastSeen = now
+		a.attribute(dev, info.Network)
+		if nc != nil {
+			nc.BytesInWAN += bytes
+			nc.PacketsInWAN++
+		}
 		a.addIP(dev, dstIP)
 		if srcIP != nil && !netutil.IsLocal(srcIP, a.localSubnets) {
 			a.recordPeer(dev, srcIP.String(), bytes, 0)
@@ -485,6 +663,11 @@ func (a *Aggregator) RecordPacket(srcMAC, dstMAC net.HardwareAddr, srcIP, dstIP 
 		dev.bytesOutWAN += bytes
 		dev.packetsOutWAN++
 		dev.lastSeen = now
+		a.attribute(dev, info.Network)
+		if nc != nil {
+			nc.BytesOutWAN += bytes
+			nc.PacketsOutWAN++
+		}
 		a.addIP(dev, srcIP)
 		if dstIP != nil && !netutil.IsLocal(dstIP, a.localSubnets) {
 			a.recordPeer(dev, dstIP.String(), 0, bytes)
@@ -509,6 +692,7 @@ func (a *Aggregator) RecordPacket(srcMAC, dstMAC net.HardwareAddr, srcIP, dstIP 
 		src.bytesOutLAN += bytes
 		src.packetsOutLAN++
 		src.lastSeen = now
+		a.attribute(src, info.Network)
 		a.addIP(src, srcIP)
 		if dstIP != nil {
 			a.recordLANPeer(src, dstIP.String(), 0, bytes)
@@ -521,6 +705,7 @@ func (a *Aggregator) RecordPacket(srcMAC, dstMAC net.HardwareAddr, srcIP, dstIP 
 		dst.bytesInLAN += bytes
 		dst.packetsInLAN++
 		dst.lastSeen = now
+		a.attribute(dst, info.Network)
 		a.addIP(dst, dstIP)
 		if srcIP != nil {
 			a.recordLANPeer(dst, srcIP.String(), bytes, 0)
@@ -532,7 +717,74 @@ func (a *Aggregator) RecordPacket(srcMAC, dstMAC net.HardwareAddr, srcIP, dstIP 
 		} else {
 			a.recordService(src, serverName, protocol, bytes, 0)
 		}
+		if nc != nil {
+			nc.BytesOutLAN += bytes
+			nc.PacketsOutLAN++
+			nc.BytesInLAN += bytes
+			nc.PacketsInLAN++
+		}
 	}
+}
+
+// networkCounters returns the counters of a capture network, creating
+// them. Caller holds the write lock.
+func (a *Aggregator) networkCounters(name string) *NetworkCounters {
+	c := a.networks[name]
+	if c == nil {
+		c = &NetworkCounters{}
+		a.networks[name] = c
+	}
+	return c
+}
+
+// attribute records that dev was an endpoint on the capture network name.
+// Caller holds the write lock.
+func (a *Aggregator) attribute(dev *device, name string) {
+	if name == "" {
+		return
+	}
+	dev.network = name
+	for _, n := range dev.networks {
+		if n == name {
+			return
+		}
+	}
+	if len(dev.networks) < MaxDeviceNetworks {
+		dev.networks = append(dev.networks, name)
+	}
+}
+
+// NetworkTraffic returns a copy of the per-capture-network counters, keyed
+// by network name.
+func (a *Aggregator) NetworkTraffic() map[string]NetworkCounters {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	out := make(map[string]NetworkCounters, len(a.networks))
+	for k, v := range a.networks {
+		out[k] = *v
+	}
+	return out
+}
+
+// NetworkDeviceCounts counts the devices per network (DeviceStats.Network),
+// with those whose last frame is at most window old as active.
+func (a *Aggregator) NetworkDeviceCounts(window time.Duration) map[string]NetworkDevices {
+	now := time.Now()
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	out := map[string]NetworkDevices{}
+	for _, d := range a.devices {
+		if d.network == "" {
+			continue
+		}
+		c := out[d.network]
+		c.Devices++
+		if now.Sub(d.lastSeen) <= window {
+			c.ActiveDevices++
+		}
+		out[d.network] = c
+	}
+	return out
 }
 
 // getOrCreate returns the device record for mac, creating it if needed.
@@ -673,6 +925,7 @@ func (a *Aggregator) Reset() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.devices = make(map[string]*device)
+	a.networks = make(map[string]*NetworkCounters)
 	a.started = time.Now()
 }
 
@@ -774,6 +1027,8 @@ func (d *device) toStats() DeviceStats {
 		Protocols:     protocols,
 		Services:      services,
 		Destinations:  destinations,
+		Network:       d.network,
+		Networks:      append([]string(nil), d.networks...),
 	}
 }
 

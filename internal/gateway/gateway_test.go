@@ -327,3 +327,30 @@ func roles(ports []hoststat.Port) string {
 	}
 	return strings.Join(out, ",")
 }
+
+// networks follows the ports rule: absent = not reported, [] = none.
+func TestNetworksInReport(t *testing.T) {
+	fs := fixture(t, containerGateway())
+	absent, _ := json.Marshal(Reader{FS: fs, Now: fixed}.Read())
+	unknown, _ := json.Marshal(Reader{FS: fs, Now: fixed, Networks: func() *[]Network { return nil }}.Read())
+	for _, b := range [][]byte{absent, unknown} {
+		if strings.Contains(string(b), `"networks"`) {
+			t.Fatalf("networks not reported, yet present: %s", b)
+		}
+	}
+	empty, _ := json.Marshal(Reader{FS: fs, Now: fixed, Networks: func() *[]Network { return &[]Network{} }}.Read())
+	if !strings.HasSuffix(string(empty), `"networks":[]}`) {
+		t.Fatalf("no networks: %s", empty)
+	}
+	rx, rate := uint64(10), 2.5
+	one := []Network{{Name: "lan", Device: "br-lan", Proto: "static", Up: true, IPv4: []string{"192.168.1.1/24"}, IPv6: []string{},
+		RxBytes: &rx, TxBytes: &rx, RxRate: &rate, TxRate: &rate, Captured: true, Devices: 3, ActiveDevices: 1,
+		Capture: &NetworkCapture{BytesInWAN: 1, Scope: "routed"}}}
+	b, _ := json.Marshal(Reader{FS: fs, Now: fixed, Networks: func() *[]Network { return &one }}.Read())
+	want := `"networks":[{"name":"lan","device":"br-lan","proto":"static","up":true,"ipv4":["192.168.1.1/24"],"ipv6":[],` +
+		`"rxBytes":10,"txBytes":10,"rxRate":2.5,"txRate":2.5,"captured":true,"devices":3,"activeDevices":1,` +
+		`"capture":{"bytesInWan":1,"bytesOutWan":0,"bytesInLan":0,"bytesOutLan":0,"packetsInWan":0,"packetsOutWan":0,"packetsInLan":0,"packetsOutLan":0,"scope":"routed"}}]}`
+	if !strings.HasSuffix(string(b), want) {
+		t.Fatalf("networks:\n%s\nwant suffix\n%s", b, want)
+	}
+}

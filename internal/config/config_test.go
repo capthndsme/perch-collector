@@ -615,3 +615,59 @@ func TestDHCPLeasesSetting(t *testing.T) {
 		t.Errorf("from the environment: %q %d %v", cfg.DHCPLeases, cfg.DHCPLeasesRefresh, err)
 	}
 }
+
+func TestCaptureNetworksSettings(t *testing.T) {
+	// Default: single interface, legacy scope rule.
+	cfg, err := load(filepath.Join(t.TempDir(), "none.yaml"), cliOverrides{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MultiCapture() || cfg.RoutedLANEnabled() || cfg.CaptureRescan != CaptureRescanDefault {
+		t.Errorf("defaults: multi %v routed %v rescan %d", cfg.MultiCapture(), cfg.RoutedLANEnabled(), cfg.CaptureRescan)
+	}
+
+	path := writeYAML(t, "capture_networks: [AUTO, lan, lan]\ncapture_exclude: [guest]\ncapture_rescan: 1\n")
+	cfg, err = load(path, cliOverrides{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(cfg.CaptureNetworks, ",") != "auto,lan" || strings.Join(cfg.CaptureExclude, ",") != "guest" {
+		t.Errorf("lists %v %v", cfg.CaptureNetworks, cfg.CaptureExclude)
+	}
+	if cfg.CaptureRescan != CaptureRescanMin {
+		t.Errorf("rescan %d, want the minimum", cfg.CaptureRescan)
+	}
+	if !cfg.MultiCapture() || !cfg.RoutedLANEnabled() {
+		t.Errorf("multi-capture turns the routed rule on under auto")
+	}
+
+	t.Setenv("PERCH_COLLECTOR_CAPTURE_NETWORKS", "lan, iot")
+	t.Setenv("PERCH_COLLECTOR_CAPTURE_EXCLUDE", "br-iot")
+	t.Setenv("PERCH_COLLECTOR_CAPTURE_RESCAN", "99999")
+	t.Setenv("PERCH_COLLECTOR_ROUTED_LAN", "0")
+	cfg, err = load(path, cliOverrides{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(cfg.CaptureNetworks, ",") != "lan,iot" || strings.Join(cfg.CaptureExclude, ",") != "br-iot" {
+		t.Errorf("env lists %v %v", cfg.CaptureNetworks, cfg.CaptureExclude)
+	}
+	if cfg.CaptureRescan != CaptureRescanMax || cfg.RoutedLANEnabled() {
+		t.Errorf("env rescan %d routed %v", cfg.CaptureRescan, cfg.RoutedLANEnabled())
+	}
+
+	// routed_lan on with the single interface.
+	t.Setenv("PERCH_COLLECTOR_CAPTURE_NETWORKS", "")
+	t.Setenv("PERCH_COLLECTOR_ROUTED_LAN", "on")
+	cfg, err = load(filepath.Join(t.TempDir(), "none.yaml"), cliOverrides{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MultiCapture() || !cfg.RoutedLANEnabled() {
+		t.Errorf("explicit routed_lan on a single interface")
+	}
+	t.Setenv("PERCH_COLLECTOR_ROUTED_LAN", "sometimes")
+	if _, err := load(filepath.Join(t.TempDir(), "none.yaml"), cliOverrides{}); err == nil {
+		t.Errorf("bad routed_lan accepted")
+	}
+}

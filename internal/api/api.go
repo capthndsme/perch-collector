@@ -18,12 +18,14 @@ import (
 
 // Server is the HTTP JSON API server.
 type Server struct {
-	agg     *aggregator.Aggregator
-	apiKey  string
-	iface   string
-	version string
-	mux     *http.ServeMux
-	srv     *http.Server
+	agg    *aggregator.Aggregator
+	apiKey string
+	iface  string
+	// ifaceFunc, when set, is the live capture interface (multi-capture).
+	ifaceFunc func() string
+	version   string
+	mux       *http.ServeMux
+	srv       *http.Server
 	// protocolCategories is the classifier's default category per protocol
 	// label, exported once at startup for GET /api/v1/protocols. Never nil
 	// after New so the JSON shows [] rather than null.
@@ -277,7 +279,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) makeMeta() meta {
 	m := meta{
-		CaptureInterface: s.iface, Version: s.version,
+		CaptureInterface: s.captureInterface(), Version: s.version,
 		QueryTime: time.Now().UTC().Format(time.RFC3339),
 		Transport: s.transport,
 	}
@@ -310,4 +312,15 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	if err := enc.Encode(v); err != nil {
 		log.Printf("api: error encoding JSON response: %v", err)
 	}
+}
+
+// SetCaptureInterface makes meta.capture_interface live (multi-interface
+// capture). Call before ListenAndServe.
+func (s *Server) SetCaptureInterface(fn func() string) { s.ifaceFunc = fn }
+
+func (s *Server) captureInterface() string {
+	if s.ifaceFunc != nil {
+		return s.ifaceFunc()
+	}
+	return s.iface
 }

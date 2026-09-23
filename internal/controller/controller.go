@@ -128,6 +128,9 @@ type Options struct {
 	Hostname         string
 	Version          string
 	CaptureInterface string
+	// CaptureInterfaceFunc, when set, replaces CaptureInterface with a live
+	// value (multi-interface capture: the captured devices change).
+	CaptureInterfaceFunc func() string
 	// Listen is the local API's address. Its port (and base URL) are in the
 	// hello only when it answers on something other than loopback.
 	Listen string
@@ -343,7 +346,7 @@ func (c *Client) hello() helloParams {
 		InstanceID:        c.o.InstanceID,
 		Hostname:          c.o.Hostname,
 		Version:           c.o.Version,
-		CaptureInterface:  c.o.CaptureInterface,
+		CaptureInterface:  c.captureInterface(),
 		APIKeyFingerprint: announce.Fingerprint(c.o.APIKey),
 		Capabilities:      []string{},
 		System:            c.o.System,
@@ -501,7 +504,7 @@ func (c *Client) push(s *link.Session, seq uint64, gen uint64) {
 		Seq:         seq,
 		CollectedAt: time.Now().UTC().Format(time.RFC3339),
 		Summary:     c.o.Source.Summary(),
-		Meta:        pushMeta{CaptureInterface: c.o.CaptureInterface, Version: c.o.Version},
+		Meta:        pushMeta{CaptureInterface: c.captureInterface(), Version: c.o.Version},
 		Devices:     c.o.Source.Devices(),
 	}
 	if p.Devices == nil {
@@ -542,7 +545,7 @@ func (c *Client) handleStatus(context.Context, json.RawMessage) (any, error) {
 	return statusResult{
 		StartedAt:        s.StartedAt,
 		TotalDevices:     s.TotalDevices,
-		CaptureInterface: c.o.CaptureInterface,
+		CaptureInterface: c.captureInterface(),
 		Version:          c.o.Version,
 		UptimeSeconds:    int64(s.UptimeSecs),
 	}, nil
@@ -749,4 +752,12 @@ func (c *Client) setState(gen *uint64, state, errText string) {
 	default:
 		log.Printf("controller: %s -> %s", from, state)
 	}
+}
+
+// captureInterface is what the collector says it captures on.
+func (c *Client) captureInterface() string {
+	if c.o.CaptureInterfaceFunc != nil {
+		return c.o.CaptureInterfaceFunc()
+	}
+	return c.o.CaptureInterface
 }
