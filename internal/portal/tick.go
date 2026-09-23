@@ -26,17 +26,27 @@ import (
 //  4. neighbours: a pending grant whose device shows up becomes active;
 //     addresses are learned (conntrack flush, IP binding);
 //  5. exhausted groups (time, active time, data) end every device, with a
-//     conntrack flush;
+//     conntrack flush; a data quota the kernel cut (quota.go) counts as
+//     used up, and a kernel quota that drifted is re-seeded;
 //  6. offline-queued entitlements are promoted while the controller is away;
 //  7. portal.sessions every usageIntervalSeconds; snapshots when due.
 
-// readCountersLocked reads the counting table's sets.
-func (e *Engine) readCountersLocked() (map[string]SetContents, error) {
+// readCountersLocked reads the counting table's sets and quota objects
+// (one dump).
+func (e *Engine) readCountersLocked() (map[string]SetContents, map[string]QuotaUse, error) {
 	data, err := e.sys.ListJSON("table", "netdev", TableNetdev)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return ParseTableJSON(data)
+	sets, err := ParseTableJSON(data)
+	if err != nil {
+		return nil, nil, err
+	}
+	quotas, err := ParseQuotasJSON(data)
+	if err != nil {
+		return nil, nil, err
+	}
+	return sets, quotas, nil
 }
 
 // currentGrants maps portal|mac to the device's current live grant (first
@@ -166,7 +176,7 @@ func (e *Engine) Tick(ctx context.Context) {
 	if len(portals) > 0 && e.enf.Nft {
 		// Devices come and go (a VLAN brought up late).
 		e.refreshDevicesLocked(ctx)
-		sets, cerr := e.readCountersLocked()
+		sets, quotas, cerr := e.readCountersLocked()
 		auth, aerr := e.readAuthLocked()
 		if isMissing(cerr) || isMissing(aerr) || e.structural {
 			if isMissing(cerr) || isMissing(aerr) {
@@ -180,6 +190,7 @@ func (e *Engine) Tick(ctx context.Context) {
 			e.reconcileSetsLocked(auth, now, ops)
 			moved := e.foldCountersLocked(sets, now, elapsed)
 			e.chargeTimeLocked(moved, elapsed)
+			e.checkKernelQuotasLocked(quotas)
 		}
 	}
 	e.observeNeighborsLocked(now, ops)
@@ -188,6 +199,7 @@ func (e *Engine) Tick(ctx context.Context) {
 		e.promoteQueuedLocked(now, ops)
 	}
 	e.applyOpsLocked(ops)
+	e.syncListenLocked()
 	e.resolveWalledGardenLocked(ctx, wall)
 	e.sendSessionsLocked(wall, now)
 	e.snapshotIfDue()

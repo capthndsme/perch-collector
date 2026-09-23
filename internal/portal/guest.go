@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/capthndsme/perch-agentkit/link"
 	"github.com/capthndsme/perch-agentkit/rpc"
 )
 
@@ -50,8 +51,10 @@ func ErrorStatus(code string) int {
 
 func fail(code string) Outcome { return Outcome{Code: code, Status: ErrorStatus(code)} }
 
-// redeemTimeout bounds the controller round trip of a guest action.
-const redeemTimeout = 8 * time.Second
+// redeemTimeout bounds the controller round trip of a guest action (the
+// controller refuses a sign-in it could not start within 5 s; a variable
+// for the tests).
+var redeemTimeout = 8 * time.Second
 
 // limited checks the failure limiters (only failures count).
 func (e *Engine) limited(c Client, wall time.Time) (bool, time.Duration) {
@@ -139,6 +142,18 @@ func (e *Engine) Login(ctx context.Context, c Client, username, password string,
 	return fail("controller_unreachable")
 }
 
+// sessionGone reports whether the controller session behind a has ended
+// (so no answer to a call can arrive any more).
+func sessionGone(a Agent, err error) bool {
+	if err != nil && errors.Is(err, link.ErrClosed) {
+		return true
+	}
+	if s, ok := a.(interface{ Context() context.Context }); ok {
+		return s.Context().Err() != nil
+	}
+	return false
+}
+
 func (e *Engine) methodAllowed(portalID int64, voucher bool) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -163,13 +178,23 @@ var guestCodes = map[string]bool{
 }
 
 // callController runs portal.redeem / portal.login and applies the answer.
-// ErrOffline: no session or no answer (the offline path may run).
+//
+// ErrOffline (the offline path may run) only when no answer can come any
+// more: no session, or the session ended. A live session that does not
+// answer within redeemTimeout (8 s) is controller_unreachable, never an
+// offline redemption: the controller answers a sign-in it started however
+// late, and refuses one it could not start within 5 s, so the same code is
+// never spent online and offline at once (an answer after the 8 s is
+// dropped here; the grant it carried arrives with the next sync). The call
+// does not follow the guest's request either: a guest who closes the page
+// neither turns a sign-in in flight into an offline one nor loses an
+// answer that arrives within the 8 s.
 func (e *Engine) callController(ctx context.Context, method string, params any) (Outcome, error) {
 	a := e.currentAgent()
-	if a == nil {
+	if a == nil || sessionGone(a, nil) {
 		return Outcome{}, ErrOffline
 	}
-	cctx, cancel := context.WithTimeout(ctx, redeemTimeout)
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), redeemTimeout)
 	defer cancel()
 	var res RedeemResult
 	err := a.Call(cctx, method, params, &res)
@@ -183,7 +208,11 @@ func (e *Engine) callController(ctx context.Context, method string, params any) 
 			}
 			return Outcome{}, &rpcCodeError{"controller_unreachable"}
 		}
-		return Outcome{}, ErrOffline
+		if sessionGone(a, err) {
+			return Outcome{}, ErrOffline
+		}
+		e.log.Warn("portal: no answer from the controller", "method", method, "err", err)
+		return Outcome{}, &rpcCodeError{"controller_unreachable"}
 	}
 	if res.Queued || res.Grant == nil {
 		return Outcome{OK: true, Code: "connected", Status: http.StatusOK}, nil
@@ -299,9 +328,12 @@ func (e *Engine) offlineRedeemLocked(c Client, code string) Outcome {
 	} else {
 		usage = Usage{TimeUsedSeconds: v.TimeUsedSeconds, BytesUsed: v.BytesUsed}
 	}
-	// The wire voucher has no first-use time: a clock, usage, a group held
-	// here or a local redemption mark it used.
-	used := v.FirstUsed || eff.ExpiresAt != nil || usage.TimeUsedSeconds > 0 || usage.BytesUsed > 0 || grp != nil
+	// Used: the controller says so (firstUsedAt), or this router redeemed
+	// it offline, started its clock or holds its group (an online
+	// redemption the list does not show yet). A deadline alone does not
+	// make it used: a creation-start voucher has one from the start, and
+	// redeemBy still applies to it until its first redemption.
+	used := v.FirstUsedAt != nil || v.FirstUsed || v.LocalStartsAt != nil || grp != nil
 	switch VoucherStatus(eff, usage, used, now) {
 	case "expired":
 		return fail("expired")

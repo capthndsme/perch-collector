@@ -2,10 +2,7 @@ package main
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"log"
-	"net/http"
 	"time"
 
 	"github.com/capthndsme/perch-collector/internal/config"
@@ -62,18 +59,16 @@ func buildPortal(cfg config.Config, onOpenWrt bool, transport string) *guestPort
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	engine.Probe(ctx)
+	gp := &guestPortal{engine: engine, cancel: cancel, done: make(chan struct{})}
+	// The guest pages listen only on the portal networks' router
+	// addresses, and only while a portal runs there.
+	gp.fas = portal.NewFAS(engine, cfg.PortalPort, nil)
+	engine.SetListener(gp.fas.Sync)
 	engine.Start(ctx)
 	h := engine.Hello()
-	log.Printf("portal: offered (guest pages on :%d; nft %v, egress counters %v, fw4 drop-in %s, dnsmasq nftset %v; state %s on %s, counters every %ds)",
-		cfg.PortalPort, h.Enforcement.Nft, h.Enforcement.Egress, h.Enforcement.Fw4Include, h.Enforcement.Nftset,
+	log.Printf("portal: offered (guest pages on port %d of the portal networks' addresses; nft %v, egress counters %v, kernel quota cut %v, fw4 drop-in %s, dnsmasq nftset %v; state %s on %s, counters every %ds)",
+		cfg.PortalPort, h.Enforcement.Nft, h.Enforcement.Egress, h.Enforcement.Quota, h.Enforcement.Fw4Include, h.Enforcement.Nftset,
 		info.Path, info.Kind, info.FlushSeconds)
-	gp := &guestPortal{engine: engine, cancel: cancel, done: make(chan struct{})}
-	gp.fas = portal.NewFAS(engine, fmt.Sprintf(":%d", cfg.PortalPort), nil)
-	go func() {
-		if err := gp.fas.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("portal: guest pages: %v", err)
-		}
-	}()
 	go func() {
 		engine.Run(ctx)
 		close(gp.done)

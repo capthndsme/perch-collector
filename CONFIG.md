@@ -288,8 +288,9 @@ controller_address_cache: /var/lib/perch-collector/controller-address
 # enforcement a previous run left (tables, fw4 drop-in, dnsmasq file).
 # Default: "auto"
 portal: auto
-# The guest pages' TCP port (plain HTTP, all addresses; only the portal
-# devices may reach it). Not 53, 67 or 80.
+# The guest pages' TCP port (plain HTTP). Listened on only on the router's
+# addresses on the portal networks, and only while a portal runs there;
+# nothing listens without a portal. Not 53, 67 or 80.
 # Default: 2080
 portal_port: 2080
 # Where grants, offline vouchers, keys and the journal are snapshotted.
@@ -1168,7 +1169,7 @@ own nftables (no openNDS): see ARCHITECTURE.md, "Guest portal".
 
 ```json
 "portal": {"version":1, "keyEpoch":1, "configRevision":4, "port":2080, "maxPortals":16,
-  "enforcement": {"nft":true, "egress":true, "fw4Include":"ok", "nftset":false, "conntrack":true},
+  "enforcement": {"nft":true, "egress":true, "fw4Include":"ok", "nftset":false, "conntrack":true, "quota":true},
   "storage": {"path":"/etc/perch-collector/portal/state.db", "kind":"flash", "fsType":"jffs2",
     "device":"/dev/mtdblock6", "mountPoint":"/overlay", "persistent":true,
     "flushIntervalSeconds":300, "writeThrough":false, "fallback":false, "warning":""}}
@@ -1179,6 +1180,10 @@ own nftables (no openNDS): see ARCHITECTURE.md, "Guest portal".
 = dnsmasq lacks nftset (not dnsmasq-full), the walled garden's names are
 resolved by the collector every 5 minutes instead; `fw4Include`: `ok`,
 `missing` (fw4 did not include the drop-in, `auto_includes 0`), `none` (no fw4).
+`quota:false` = the kernel lacks named nft quotas or object maps (`nft_quota`,
+`nft_objref`): data quotas are then enforced by the tick alone and can overshoot
+by what a device moves in one tick; with it the kernel cuts a device at the
+exact byte (ARCHITECTURE.md, "Guest portal").
 `storage.kind`: `flash`, `emmc`, `disk`, `ram`, `unknown`.
 
 **Controller → collector** (requests):
@@ -1189,8 +1194,21 @@ resolved by the collector every 5 minutes instead; `fw4Include`: `ok`,
 | `portal.template` | `{sha256, files:[{name, contentType, dataBase64}]}` → `{stored:true}` |
 | `portal.authorize` | docs §6.4 (`full, serverNow, ackedEventSeq, nonce, keyEpoch, groups[+sig], grants[+sig], revertExternals, sig`) → `{results:[{grantId, localRef?, revision, state:'active'\|'pending_device'\|'rejected', error?}], ended:[{grantId, localRef?}]}` |
 | `portal.deauthorize` | `{grantIds, reason, serverNow, nonce, keyEpoch, sig}` → `{ended:[grantId]}` |
-| `portal.vouchers` | `{enabled, serverNow, nonce, keyEpoch, vouchers[+sig], sig}` → `{stored, rejected}` |
+| `portal.vouchers` | `{enabled, serverNow, nonce, keyEpoch, vouchers[+sig], append, part, parts, sig}` → `{stored, rejected}` (`stored` = vouchers taken from this part) |
 | `portal.sync` | `{ackedEventSeq}` → `{lastEventSeq, truncated, events[], grants[], externals[]}` (RouterPortalReport, docs §7) |
+
+**Offline voucher list.** `WireOfflineVoucher` = `{voucherId, verifier,
+portalIds, groupKey, durationMode, startMode, durationSeconds, quotaBytes,
+downKbps, upKbps, maxDevices, redeemBy, expiresAt, timeUsedSeconds, bytesUsed,
+revision, firstUsedAt}`, signed in that order (`firstUsedAt`, epoch ms or null,
+is the last canonical line). A list longer than 4000 comes in parts, in order,
+all with the same `serverNow`: part 1 (`append:false`) replaces the held list,
+parts 2… (`append:true`, envelope `reason` = `"append"`) add to it. An append
+part whose `serverNow` is not the one of the part 1 last taken is refused
+(-32000 `vouchers_out_of_order`, the list is unchanged; the controller sends
+the whole list again). `firstUsedAt` tells a used voucher from an unused one:
+`redeemBy` only applies while it is null and the router has not redeemed or
+started the voucher itself.
 
 `portal.configure` is the whole desired portal set of the gateway (a portal
 not listed is removed); `keys` is sent when the hello's `keyEpoch` differs,
@@ -1223,9 +1241,15 @@ usage journaled later is added on the router until a newer set covers it.
 
 The redeem/login answer's grant and group must be signed like
 `portal.authorize` items; the router verifies them and applies the grant at
-once (an existing group keeps its `base*` until the next full set). No answer
-within 8 s, or no session: the router redeems offline from its held list
-(decision 20) and journals `offline_redeemed`; logins need the controller.
+once (an existing group keeps its `base*` until the next full set). The router
+redeems offline from its held list (decision 20, journal `offline_redeemed`)
+only when no answer can come any more: no session, or the session ended
+before the answer. A live session that does not answer within 8 s gives the
+guest `controller_unreachable` (503) and never an offline redemption: the
+controller refuses a sign-in it could not start within 5 s and answers one
+it started, so a code is never spent online and offline at once. The call is
+not tied to the guest's HTTP request (a guest closing the page does not turn
+it into an offline one). Logins need the controller.
 
 Notifications: `portal.event` = one journal entry as it happens (RouterEvent:
 `grant_active`, `grant_ended` with `reason` `expired|quota|router_deauth|logout|moved|removed`

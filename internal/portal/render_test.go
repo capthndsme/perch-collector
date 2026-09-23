@@ -46,6 +46,30 @@ func goldenSpec() RulesetSpec {
 	}
 }
 
+// goldenQuotaSpec is goldenSpec with the kernel data cut: a group shared by
+// two devices on portal 3, and one on portal 4.
+func goldenQuotaSpec() RulesetSpec {
+	spec := goldenSpec()
+	spec.Quota = true
+	spec.Quotas = []QuotaSpec{{Name: "qv17_1", Bytes: 31457280}, {Name: "qg4_2", Bytes: 1000}}
+	spec.Portals[1].Quota = map[string]string{"02:00:00:00:20:11": "qv17_1", "02:00:00:00:20:12": "qv17_1"}
+	spec.Portals[0].Quota = map[string]string{"02:00:00:00:99:11": "qg4_2"}
+	return spec
+}
+
+func TestRenderQuotaGolden(t *testing.T) {
+	spec := goldenQuotaSpec()
+	golden(t, "netdev-quota.nft", RenderNetdev(spec))
+	spec.Egress = false
+	golden(t, "netdev-quota-no-egress.nft", RenderNetdev(spec))
+	var ops ElementOps
+	ops.AddQuota("qv17_2", 1000)
+	ops.UnmapQuota(3, "02:00:00:00:20:11")
+	ops.MapQuota(3, "02:00:00:00:20:11", "qv17_2")
+	ops.DeleteQuota("qv17_1")
+	golden(t, "ops-quota.nft", ops.Script())
+}
+
 func TestRenderGolden(t *testing.T) {
 	spec := goldenSpec()
 	golden(t, "inet.nft", RenderInet(spec))

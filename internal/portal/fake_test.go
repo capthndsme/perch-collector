@@ -35,11 +35,19 @@ type fakeSystem struct {
 	commands  []string
 	dnsmasq   string
 	fw4       bool
+	// Named quotas and object maps (the kernel data cut); noQuota = a
+	// kernel without them (every script mentioning a quota fails).
+	quotas  map[string]*fakeQuota        // "netdev perch_portal_acct qv17_1"
+	maps    map[string]map[string]string // "netdev perch_portal_acct p3_quota" → mac → quota name
+	noQuota bool
 }
+
+type fakeQuota struct{ over, used int64 }
 
 func newFakeSystem() *fakeSystem {
 	return &fakeSystem{
 		tables: map[string]bool{}, sets: map[string]map[string]bool{}, counters: map[string]map[string]Counter{},
+		quotas: map[string]*fakeQuota{}, maps: map[string]map[string]string{},
 		devices: map[string][]netip.Prefix{"guest": {netip.MustParsePrefix("192.168.20.1/24")}},
 		files:   map[string]string{}, dnsmasq: "Dnsmasq version 2.90\nCompile time options: IPv6 GNU-getopt no-DBus nftset\n", fw4: true,
 	}
@@ -51,6 +59,12 @@ var (
 	reSet       = regexp.MustCompile(`^set (\S+) \{$`)
 	reElements  = regexp.MustCompile(`^elements = \{ (.*) \}$`)
 	reElementOp = regexp.MustCompile(`^(add|delete) element (inet|netdev) (\S+) (\S+) \{ (.*) \}$`)
+	reQuota     = regexp.MustCompile(`^quota (\S+) \{$`)
+	reOver      = regexp.MustCompile(`^over (\d+) bytes$`)
+	reMap       = regexp.MustCompile(`^map (\S+) \{$`)
+	reAddQuota  = regexp.MustCompile(`^add quota (netdev) (\S+) (\S+) \{ over (\d+) bytes \}$`)
+	reDelQuota  = regexp.MustCompile(`^delete quota (netdev) (\S+) (\S+)$`)
+	reMapElem   = regexp.MustCompile(`^(\S+) : "(\S+)"$`)
 )
 
 func (f *fakeSystem) Apply(script string) error {
@@ -60,6 +74,9 @@ func (f *fakeSystem) Apply(script string) error {
 	if f.failNext {
 		f.failNext = false
 		return fmt.Errorf("nft: injected failure")
+	}
+	if f.noQuota && strings.Contains(script, "quota") {
+		return fmt.Errorf("nft: Could not process rule: No such file or directory (quota)")
 	}
 	// Transaction semantics: work on copies, commit at the end.
 	tables := map[string]bool{}
@@ -74,7 +91,31 @@ func (f *fakeSystem) Apply(script string) error {
 		}
 		sets[k] = c
 	}
-	var table, set string
+	quotas := map[string]*fakeQuota{}
+	for k, v := range f.quotas {
+		c := *v
+		quotas[k] = &c
+	}
+	maps := map[string]map[string]string{}
+	for k, v := range f.maps {
+		c := map[string]string{}
+		for m, n := range v {
+			c[m] = n
+		}
+		maps[k] = c
+	}
+	referenced := func(q string) bool {
+		for mk, m := range maps {
+			for _, n := range m {
+				if mk[:strings.LastIndex(mk, " ")]+" "+n == q {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	var table, set, quota, mapName string
+	var dropped []string // tables deleted: their counters start again at zero
 	for _, raw := range strings.Split(script, "\n") {
 		line := strings.TrimSpace(raw)
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -91,10 +132,82 @@ func (f *fakeSystem) Apply(script string) error {
 				return fmt.Errorf("no such table %s", t)
 			}
 			delete(tables, t)
+			dropped = append(dropped, t)
 			for k := range sets {
 				if strings.HasPrefix(k, t+" ") {
 					delete(sets, k)
 				}
+			}
+			for k := range quotas {
+				if strings.HasPrefix(k, t+" ") {
+					delete(quotas, k)
+				}
+			}
+			for k := range maps {
+				if strings.HasPrefix(k, t+" ") {
+					delete(maps, k)
+				}
+			}
+			continue
+		}
+		if m := reQuota.FindStringSubmatch(line); m != nil && table != "" {
+			quota = table + " " + m[1]
+			quotas[quota] = &fakeQuota{}
+			continue
+		}
+		if m := reOver.FindStringSubmatch(line); m != nil && quota != "" {
+			fmt.Sscan(m[1], &quotas[quota].over)
+			continue
+		}
+		if m := reMap.FindStringSubmatch(line); m != nil && table != "" {
+			mapName = table + " " + m[1]
+			maps[mapName] = map[string]string{}
+			continue
+		}
+		if m := reElements.FindStringSubmatch(line); m != nil && mapName != "" {
+			for _, e := range strings.Split(m[1], ", ") {
+				me := reMapElem.FindStringSubmatch(e)
+				if me == nil || quotas[table+" "+me[2]] == nil {
+					return fmt.Errorf("bad map element %q", e)
+				}
+				maps[mapName][me[1]] = me[2]
+			}
+			continue
+		}
+		if m := reAddQuota.FindStringSubmatch(line); m != nil {
+			k := m[1] + " " + m[2] + " " + m[3]
+			if !tables[m[1]+" "+m[2]] || quotas[k] != nil {
+				return fmt.Errorf("cannot add quota %s", k)
+			}
+			q := &fakeQuota{}
+			fmt.Sscan(m[4], &q.over)
+			quotas[k] = q
+			continue
+		}
+		if m := reDelQuota.FindStringSubmatch(line); m != nil {
+			k := m[1] + " " + m[2] + " " + m[3]
+			if quotas[k] == nil || referenced(k) {
+				return fmt.Errorf("cannot delete quota %s", k)
+			}
+			delete(quotas, k)
+			continue
+		}
+		if m := reElementOp.FindStringSubmatch(line); m != nil && maps[m[2]+" "+m[3]+" "+m[4]] != nil {
+			k := m[2] + " " + m[3] + " " + m[4]
+			if m[1] == "add" {
+				me := reMapElem.FindStringSubmatch(m[5])
+				if me == nil || quotas[m[2]+" "+m[3]+" "+me[2]] == nil {
+					return fmt.Errorf("bad map element %q", m[5])
+				}
+				if cur, ok := maps[k][me[1]]; ok && cur != me[2] {
+					return fmt.Errorf("element %s exists with another value", me[1])
+				}
+				maps[k][me[1]] = me[2]
+			} else {
+				if _, ok := maps[k][m[5]]; !ok {
+					return fmt.Errorf("no such element %s in %s", m[5], k)
+				}
+				delete(maps[k], m[5])
 			}
 			continue
 		}
@@ -110,7 +223,7 @@ func (f *fakeSystem) Apply(script string) error {
 			continue
 		}
 		if line == "}" {
-			set = ""
+			set, quota, mapName = "", "", ""
 			continue
 		}
 		if m := reElementOp.FindStringSubmatch(line); m != nil {
@@ -129,7 +242,14 @@ func (f *fakeSystem) Apply(script string) error {
 			}
 		}
 	}
-	// Counters vanish with their elements.
+	// Counters vanish with their elements and their tables.
+	for _, t := range dropped {
+		for k := range f.counters {
+			if strings.HasPrefix(k, t+" ") {
+				delete(f.counters, k)
+			}
+		}
+	}
 	for k, byMAC := range f.counters {
 		for mac := range byMAC {
 			if !sets[k][mac] {
@@ -137,7 +257,7 @@ func (f *fakeSystem) Apply(script string) error {
 			}
 		}
 	}
-	f.tables, f.sets = tables, sets
+	f.tables, f.sets, f.quotas, f.maps = tables, sets, quotas, maps
 	return nil
 }
 
@@ -187,6 +307,22 @@ func (f *fakeSystem) ListJSON(args ...string) ([]byte, error) {
 		}
 		items = append(items, map[string]any{"set": map[string]any{"name": strings.TrimPrefix(k, t+" "), "elem": elems}})
 	}
+	for _, k := range sortedKeys(f.maps) {
+		if !strings.HasPrefix(k, t+" ") {
+			continue
+		}
+		var elems []any
+		for _, mac := range sortedKeys(f.maps[k]) {
+			elems = append(elems, []any{mac, f.maps[k][mac]})
+		}
+		items = append(items, map[string]any{"map": map[string]any{"name": strings.TrimPrefix(k, t+" "), "map": "quota", "elem": elems}})
+	}
+	for _, k := range sortedKeys(f.quotas) {
+		if strings.HasPrefix(k, t+" ") {
+			q := f.quotas[k]
+			items = append(items, map[string]any{"quota": map[string]any{"name": strings.TrimPrefix(k, t+" "), "bytes": q.over, "used": q.used, "inv": true}})
+		}
+	}
 	return json.Marshal(map[string]any{"nftables": items})
 }
 
@@ -198,6 +334,15 @@ func (f *fakeSystem) count(set, mac string, bytes int64) {
 	if !f.sets[k][mac] {
 		return
 	}
+	// The data cut runs before the counter: consumed, then dropped once over.
+	portal := set[:strings.Index(set, "_")]
+	if name, ok := f.maps["netdev "+TableNetdev+" "+portal+"_quota"][mac]; ok {
+		q := f.quotas["netdev "+TableNetdev+" "+name]
+		q.used += bytes
+		if q.used >= q.over {
+			return
+		}
+	}
 	if f.counters[k] == nil {
 		f.counters[k] = map[string]Counter{}
 	}
@@ -205,6 +350,18 @@ func (f *fakeSystem) count(set, mac string, bytes int64) {
 	c.Bytes += bytes
 	c.Packets++
 	f.counters[k][mac] = c
+}
+
+// quotaOf is the kernel quota a MAC is cut at on a portal (nil: none).
+func (f *fakeSystem) quotaOf(portal int64, mac string) (string, *fakeQuota) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	name, ok := f.maps["netdev "+TableNetdev+" "+setName(portal, "quota")][mac]
+	if !ok {
+		return "", nil
+	}
+	q := *f.quotas["netdev "+TableNetdev+" "+name]
+	return name, &q
 }
 
 func (f *fakeSystem) has(family, set, elem string) bool {

@@ -125,6 +125,9 @@ type Enforcement struct {
 	// collector resolves the names itself every few minutes.
 	Nftset    bool `json:"nftset"`
 	Conntrack bool `json:"conntrack"`
+	// Quota: data quotas are cut by the kernel (named nft quotas and
+	// object maps); without it the tick alone enforces them.
+	Quota bool `json:"quota"`
 }
 
 // ConfigureResult is portal.configure's result.
@@ -210,11 +213,14 @@ type Engine struct {
 	groups            map[string]*Group
 	vouchers          map[int64]*Voucher
 	voucherByVerifier map[string]int64
-	events            []Event
-	lastSeq           int64
-	ended             []endedUsage
-	nonces            []string
-	newestServerNow   int64
+	// voucherSeries is the serverNow of the offline list part 1 last
+	// replaced the held list with; its later parts carry the same.
+	voucherSeries   int64
+	events          []Event
+	lastSeq         int64
+	ended           []endedUsage
+	nonces          []string
+	newestServerNow int64
 
 	// applied is what the kernel holds per portal (after the last
 	// successful apply); the tick compares the live sets with it.
@@ -225,8 +231,19 @@ type Engine struct {
 
 	externals map[string]*External // portal|mac → still present
 
+	// The kernel's data cut (quota.go): group key → quota object, portal →
+	// MAC → object name, the generation counter, and groups whose object is
+	// re-seeded with the next apply.
+	kq       map[string]*kernelQuota
+	kqMap    map[int64]map[string]string
+	kqGen    int64
+	kqReseed map[string]bool
+
 	agentMu sync.Mutex
 	agent   Agent
+
+	// listener opens and closes the guest pages' listeners (FAS.Sync).
+	listener func([]netip.Addr)
 
 	lastTick     time.Time
 	lastSessions time.Time
@@ -263,6 +280,7 @@ func New(o Options) (*Engine, error) {
 		portals: map[int64]*portalRuntime{}, grants: map[int64]*Grant{}, groups: map[string]*Group{},
 		vouchers: map[int64]*Voucher{}, voucherByVerifier: map[string]int64{},
 		applied: map[int64]map[string]bool{}, externals: map[string]*External{},
+		kq: map[string]*kernelQuota{}, kqMap: map[int64]map[string]string{},
 		tickNow: time.Now, leases: o.Leases,
 		failMin: NewWindow(5, time.Minute), failHour: NewWindow(20, time.Hour), failPortal: NewWindow(60, time.Minute),
 		relayLimit: NewWindow(60, time.Minute), relayPortal: NewWindow(600, time.Minute),
@@ -299,6 +317,7 @@ func (e *Engine) Probe(ctx context.Context) {
 	defer e.mu.Unlock()
 	e.enf.Nft = e.sys.Apply("table inet perch_portal_probe\ndelete table inet perch_portal_probe\n") == nil
 	e.enf.Egress = e.enf.Nft && ProbeEgress(e.sys, "lo")
+	e.enf.Quota = e.enf.Nft && ProbeQuota(e.sys)
 	if out, err := e.sys.Command(ctx, "dnsmasq", "--version"); err == nil {
 		e.enf.Nftset = DnsmasqHasNftset(string(out))
 	}
@@ -335,6 +354,49 @@ func (e *Engine) SetAgent(a Agent) {
 	e.agentMu.Unlock()
 }
 
+// SetListener sets the function that makes the guest pages listen on the
+// enforcing portals' router addresses (FAS.Sync); it is called at once and
+// whenever the portals or their addresses may have changed (configure,
+// start, every tick).
+func (e *Engine) SetListener(f func([]netip.Addr)) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.listener = f
+	e.syncListenLocked()
+}
+
+// ListenAddrs are the addresses the guest pages listen on: the router's
+// addresses on each enforcing portal's device (IPv6 link-local left out:
+// the port-80 redirect never lands on one). None without a portal.
+func (e *Engine) ListenAddrs() []netip.Addr {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.listenAddrsLocked()
+}
+
+func (e *Engine) listenAddrsLocked() []netip.Addr {
+	seen := map[netip.Addr]bool{}
+	var out []netip.Addr
+	for _, p := range e.enforcing() {
+		for _, pfx := range p.addrs {
+			a := pfx.Addr().Unmap()
+			if a.IsLinkLocalUnicast() || a.IsUnspecified() || seen[a] {
+				continue
+			}
+			seen[a] = true
+			out = append(out, a)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Less(out[j]) })
+	return out
+}
+
+func (e *Engine) syncListenLocked() {
+	if e.listener != nil {
+		e.listener(e.listenAddrsLocked())
+	}
+}
+
 func (e *Engine) currentAgent() Agent {
 	e.agentMu.Lock()
 	defer e.agentMu.Unlock()
@@ -350,6 +412,7 @@ func (e *Engine) Start(ctx context.Context) {
 	e.syncSystemLocked(ctx)
 	e.structural = true
 	e.applyStructuralLocked()
+	e.syncListenLocked()
 	n := 0
 	for _, g := range e.grants {
 		if g.Live() {
@@ -365,7 +428,7 @@ func (e *Engine) Start(ctx context.Context) {
 func (e *Engine) Run(ctx context.Context) {
 	for {
 		e.mu.Lock()
-		every := time.Duration(e.settings.EnforceIntervalSeconds) * time.Second
+		every := e.nextTickLocked()
 		e.mu.Unlock()
 		t := time.NewTimer(every)
 		select {
@@ -487,6 +550,7 @@ func (e *Engine) Configure(ctx context.Context, c Config) (ConfigureResult, erro
 	}
 	// A new walled garden is resolved on the next tick (without nftset).
 	e.lastResolve = time.Time{}
+	e.syncListenLocked()
 	return e.configureResultLocked(issues), nil
 }
 
@@ -609,6 +673,9 @@ func (e *Engine) resolvePortalsLocked(ctx context.Context) {
 			}
 			if !e.enf.Egress {
 				p.issues = append(p.issues, "the kernel has no netdev egress hook (5.16+): downloads are not counted, quotas count uploads only")
+			}
+			if e.enf.Nft && !e.enf.Quota {
+				p.issues = append(p.issues, "the kernel has no nft quota objects (nft_quota, nft_objref): data quotas are enforced by the tick only and may overshoot by one tick")
 			}
 		}
 		if !e.enf.Nft {
@@ -807,12 +874,13 @@ func (e *Engine) applyStructuralLocked() error {
 			return fmt.Errorf("removing the portal tables: %w", err)
 		}
 		e.applied = map[int64]map[string]bool{}
+		e.kq, e.kqMap, e.kqReseed = map[string]*kernelQuota{}, map[int64]map[string]string{}, nil
 		e.structural = false
 		return nil
 	}
 	now := e.clock.Now()
 	// Fold what the old counters hold since the last read.
-	if sets, err := e.readCountersLocked(); err == nil {
+	if sets, _, err := e.readCountersLocked(); err == nil {
 		e.foldCountersLocked(sets, now, 0)
 	}
 	carried := map[string][]string{}
@@ -826,7 +894,13 @@ func (e *Engine) applyStructuralLocked() error {
 		}
 	}
 	v4, v6 := e.routerAddrs()
-	spec := RulesetSpec{Local4: v4, Local6: v6, Egress: e.enf.Egress}
+	spec := RulesetSpec{Local4: v4, Local6: v6, Egress: e.enf.Egress, Quota: e.enf.Quota}
+	// The data cut, seeded with what each group has left after the fold.
+	var quotaMap map[int64]map[string]string
+	var quotaObjs map[string]*kernelQuota
+	if spec.Quota {
+		spec.Quotas, quotaMap, quotaObjs = e.quotaSpecLocked()
+	}
 	for _, p := range portals {
 		id := p.cfg.PortalID
 		auth := e.desiredAuth(id)
@@ -837,6 +911,7 @@ func (e *Engine) applyStructuralLocked() error {
 		for mac := range auth {
 			ps.Auth = append(ps.Auth, mac)
 		}
+		ps.Quota = quotaMap[id]
 		if p.cfg.IPBinding {
 			for _, g := range e.grants {
 				if g.PortalID == id && g.Live() && g.Bound != "" {
@@ -854,6 +929,10 @@ func (e *Engine) applyStructuralLocked() error {
 	e.applied = map[int64]map[string]bool{}
 	for _, p := range portals {
 		e.applied[p.cfg.PortalID] = e.desiredAuth(p.cfg.PortalID)
+	}
+	e.kq, e.kqMap, e.kqReseed = map[string]*kernelQuota{}, map[int64]map[string]string{}, nil
+	if spec.Quota {
+		e.kq, e.kqMap = quotaObjs, quotaMap
 	}
 	// Fresh tables count from zero.
 	for _, g := range e.grants {

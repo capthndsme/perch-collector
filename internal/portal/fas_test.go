@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -11,7 +13,9 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/capthndsme/perch-collector/internal/observe"
 )
@@ -45,7 +49,7 @@ func newFAS(t *testing.T, mutate func(*PortalConfig)) *fasFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := NewFAS(e, "", quietLog)
+	f := NewFAS(e, 0, quietLog)
 	go f.Serve(l)
 	t.Cleanup(func() { f.Shutdown(context.Background()) })
 	return &fasFixture{e: e, sys: sys, c: c, base: "http://" + l.Addr().String(),
@@ -271,5 +275,75 @@ func TestFASRelay(t *testing.T) {
 	res, _ = f.do(t, "DELETE", "/portal/v1/authorizations/02-00-00-00-20-12", "", nil, map[string]string{"Authorization": "Bearer perch_pa_x"})
 	if res.StatusCode != 201 || got.Op != "deauthorize" || got.MAC != macG2 {
 		t.Fatalf("%d %+v", res.StatusCode, got)
+	}
+}
+
+// fakeListener records what the pages would listen on.
+type fakeListener struct {
+	net.Listener
+	addr   string
+	closed bool
+}
+
+func (l *fakeListener) Close() error { l.closed = true; return nil }
+func (l *fakeListener) Accept() (net.Conn, error) {
+	for !l.closed {
+		time.Sleep(10 * time.Millisecond)
+	}
+	return nil, net.ErrClosed
+}
+func (l *fakeListener) Addr() net.Addr { return &net.TCPAddr{} }
+
+func TestGuestPagesListenOnlyOnPortalAddresses(t *testing.T) {
+	sys := newFakeSystem()
+	sys.devices["guest"] = []netip.Prefix{netip.MustParsePrefix("192.168.20.1/24"), netip.MustParsePrefix("fe80::1/64"), netip.MustParsePrefix("2001:db8:20::1/64")}
+	e, _ := newTestEngine(t, sys, filepath.Join(t.TempDir(), "s.db"))
+	f := NewFAS(e, 2080, quietLog)
+	var mu sync.Mutex
+	open := map[string]*fakeListener{}
+	f.listen = func(network, address string) (net.Listener, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if address == "[2001:db8:20::1]:2080" && open["fail"] == nil {
+			open["fail"] = &fakeListener{}
+			return nil, errors.New("bind: cannot assign requested address")
+		}
+		l := &fakeListener{addr: address}
+		open[address] = l
+		return l, nil
+	}
+	e.SetListener(f.Sync)
+	t.Cleanup(func() { f.Shutdown(context.Background()) })
+	// No portal: nothing listens.
+	e.Start(context.Background())
+	if got := f.Listening(); len(got) != 0 {
+		t.Fatalf("listening without a portal: %v", got)
+	}
+	c := newController(t)
+	if _, err := e.Configure(context.Background(), c.configure(guestPortal(3))); err != nil {
+		t.Fatal(err)
+	}
+	// The portal's addresses only (no link-local); the failed bind is
+	// retried on the next tick.
+	if got := fmt.Sprint(f.Listening()); got != "[192.168.20.1]" {
+		t.Fatalf("listening on %s", got)
+	}
+	e.Tick(context.Background())
+	if got := fmt.Sprint(f.Listening()); got != "[192.168.20.1 2001:db8:20::1]" {
+		t.Fatalf("after the retry: %s", got)
+	}
+	// The last portal goes: every listener closes.
+	if _, err := e.Configure(context.Background(), c.configure()); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.Listening(); len(got) != 0 {
+		t.Fatalf("still listening: %v", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for a, l := range open {
+		if a != "fail" && !l.closed {
+			t.Fatalf("%s not closed", a)
+		}
 	}
 }

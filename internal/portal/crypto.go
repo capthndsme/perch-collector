@@ -276,6 +276,7 @@ func (k *Keys) CanonicalOfflineVoucher(v WireOfflineVoucher) (string, error) {
 	c.int("timeUsedSeconds", v.TimeUsedSeconds)
 	c.int("bytesUsed", v.BytesUsed)
 	c.int("revision", v.Revision)
+	c.intp("firstUsedAt", v.FirstUsedAt)
 	return c.text()
 }
 

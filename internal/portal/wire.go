@@ -71,6 +71,10 @@ type WireOfflineVoucher struct {
 	TimeUsedSeconds int64   `json:"timeUsedSeconds"`
 	BytesUsed       int64   `json:"bytesUsed"`
 	Revision        int64   `json:"revision"`
+	// FirstUsedAt: when the voucher was first redeemed (epoch ms), null
+	// while unused. Signed, the record's last field. redeemBy applies to
+	// unused vouchers only.
+	FirstUsedAt *int64 `json:"firstUsedAt"`
 }
 
 // SignedOfflineVoucher is a WireOfflineVoucher with its signature.
@@ -136,13 +140,20 @@ type DeauthorizeResult struct {
 	Ended []int64 `json:"ended"`
 }
 
-// VouchersParams are portal.vouchers' params.
+// VouchersParams are portal.vouchers' params. A list longer than the
+// controller's part size (4000) arrives in parts, in order: part 1
+// (append false) replaces the held list, parts 2… (append true) add to it.
+// append is signed (the envelope's reason is "append"); part and parts
+// are informational. All parts of one list carry the same serverNow.
 type VouchersParams struct {
 	Enabled   bool                   `json:"enabled"`
 	ServerNow int64                  `json:"serverNow"`
 	Nonce     string                 `json:"nonce"`
 	KeyEpoch  int64                  `json:"keyEpoch"`
 	Vouchers  []SignedOfflineVoucher `json:"vouchers"`
+	Append    bool                   `json:"append,omitempty"`
+	Part      int                    `json:"part,omitempty"`
+	Parts     int                    `json:"parts,omitempty"`
 	Sig       string                 `json:"sig"`
 }
 
