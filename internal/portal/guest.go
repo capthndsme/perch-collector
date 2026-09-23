@@ -43,8 +43,16 @@ func ErrorStatus(code string) int {
 		return http.StatusGone
 	case "rate_limited":
 		return http.StatusTooManyRequests
-	case "controller_unreachable":
+	case "controller_unreachable", "terminal_offline", "not_ready":
 		return http.StatusServiceUnavailable
+	case "terminal_busy", "checkout_open", "checkout_paid", "below_minimum", "no_checkout":
+		return http.StatusConflict
+	case "terminal_unknown":
+		return http.StatusNotFound
+	case "clickthrough_used":
+		return http.StatusTooManyRequests
+	case "terms_required":
+		return http.StatusBadRequest
 	}
 	return http.StatusBadRequest
 }
@@ -99,6 +107,15 @@ func (e *Engine) Redeem(ctx context.Context, c Client, input string, replace boo
 	if !e.methodAllowed(c.PortalID, true) {
 		return fail("bad_request")
 	}
+	// A reference code the router minted and the controller does not know
+	// yet is redeemed here (§14.5), online or not.
+	e.mu.Lock()
+	if lv := e.localVoucherByCodeLocked(code); lv != nil {
+		o := e.localRedeemLocked(c, lv)
+		e.mu.Unlock()
+		return o
+	}
+	e.mu.Unlock()
 	out, err := e.callController(ctx, "portal.redeem", RedeemParams{PortalID: c.PortalID, MAC: c.MAC, IP: c.IP, Hostname: c.Hostname, Code: code, Replace: replace})
 	if err == nil {
 		return out
@@ -162,7 +179,8 @@ func (e *Engine) methodAllowed(portalID int64, voucher bool) bool {
 		return false
 	}
 	if voucher {
-		return p.cfg.Methods.Voucher
+		// A reference code is a voucher code.
+		return p.cfg.Methods.Voucher || p.cfg.Methods.Payment
 	}
 	return p.cfg.Methods.Password
 }
@@ -300,6 +318,9 @@ func newLocalRef(seq int64) string {
 // offlineRedeemLocked is planVoucherRedemption on the router
 // (docs/gateway/portal.md §4.7).
 func (e *Engine) offlineRedeemLocked(c Client, code string) Outcome {
+	if lv := e.localVoucherByCodeLocked(code); lv != nil {
+		return e.localRedeemLocked(c, lv)
+	}
 	if e.keys == nil || !*e.settings.OfflineRedemption {
 		return fail("controller_unreachable")
 	}

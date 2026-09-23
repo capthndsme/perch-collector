@@ -192,6 +192,60 @@ type Event struct {
 	StartsAt        *int64  `json:"startsAt,omitempty"`
 	ExpiresAt       *int64  `json:"expiresAt,omitempty"`
 	Hostname        *string `json:"hostname,omitempty"`
+	// checkout_finalized (docs §14.5; the record fields are signed),
+	// checkout_unclaimed, clickthrough_granted; offline_redeemed of a
+	// reference code the controller has not mapped yet carries CheckoutRef.
+	CheckoutRef     string  `json:"checkoutRef,omitempty"`
+	TerminalID      *int64  `json:"terminalId,omitempty"`
+	Amount          *int64  `json:"amount,omitempty"`
+	Currency        string  `json:"currency,omitempty"`
+	PriceTableID    *int64  `json:"priceTableId,omitempty"`
+	PriceRevision   *int64  `json:"priceRevision,omitempty"`
+	DurationMode    string  `json:"durationMode,omitempty"`
+	DurationSeconds *int64  `json:"durationSeconds,omitempty"`
+	QuotaBytes      *int64  `json:"quotaBytes,omitempty"`
+	DownKbps        *int64  `json:"downKbps,omitempty"`
+	UpKbps          *int64  `json:"upKbps,omitempty"`
+	OpenedAt        *int64  `json:"openedAt,omitempty"`
+	FinalizedAt     *int64  `json:"finalizedAt,omitempty"`
+	UnusedAmount    *int64  `json:"unusedAmount,omitempty"`
+	CoinCount       *int64  `json:"coinCount,omitempty"`
+	Coins           []Coin  `json:"coins,omitempty"`
+	KeyEpoch        *int64  `json:"keyEpoch,omitempty"`
+	Sig             string  `json:"sig,omitempty"`
+	EventID         *string `json:"eventId,omitempty"`
+}
+
+// Coin is one coin (or bill) a terminal reported.
+type Coin struct {
+	EventID string `json:"eventId"`
+	Amount  int64  `json:"amount"`
+	At      int64  `json:"at"`
+}
+
+// eventNullable are the fields an event type always carries, null when unset.
+var eventNullable = map[string][]string{
+	EvCheckoutFinalized:   {"quotaBytes", "downKbps", "upKbps"},
+	EvClickThroughGranted: {"quotaBytes", "downKbps", "upKbps"},
+}
+
+// MarshalJSON writes an event with its type's nullable fields as null.
+func (e Event) MarshalJSON() ([]byte, error) {
+	type plain Event
+	b, err := json.Marshal(plain(e))
+	if err != nil || len(eventNullable[e.Type]) == 0 {
+		return b, err
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, err
+	}
+	for _, k := range eventNullable[e.Type] {
+		if _, ok := m[k]; !ok {
+			m[k] = json.RawMessage("null")
+		}
+	}
+	return json.Marshal(m)
 }
 
 // Event types.
@@ -203,6 +257,10 @@ const (
 	EvExternalAuth    = "external_auth"
 	EvExternalDeauth  = "external_deauth"
 	EvOfflineRedeemed = "offline_redeemed"
+	// Paid Hotspot and click-through (§14).
+	EvCheckoutFinalized   = "checkout_finalized"
+	EvCheckoutUnclaimed   = "checkout_unclaimed"
+	EvClickThroughGranted = "clickthrough_granted"
 )
 
 // End reasons the router reports (RouterEndReason).
