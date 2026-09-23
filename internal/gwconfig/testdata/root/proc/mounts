@@ -1,0 +1,2 @@
+/dev/sdb2 / ext4 rw,relatime 0 0
+tmpfs /tmp tmpfs rw,nosuid,nodev,noatime 0 0

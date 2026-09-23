@@ -240,6 +240,9 @@ type Config struct {
 	// (a USB disk, say); when it is not mounted the state stays in RAM and
 	// goes to the default path instead, never onto an empty mount point.
 	PortalStorageMount string `yaml:"portal_storage_mount"`
+	// ConfigPlane is the router's opt-in to the config plane
+	// (config_plane.go).
+	ConfigPlane `yaml:",inline"`
 
 	// Deprecated lists the pre-rename GOCOLLECTOR_* variables that supplied
 	// a value, so main can say once that each has a new name. Never YAML.
@@ -354,6 +357,7 @@ func Defaults() Config {
 		ControllerAddressCache:      DefaultControllerAddressCache,
 		Portal:                      GatewayStatsAuto,
 		PortalPort:                  DefaultPortalPort,
+		ConfigPlane:                 defaultConfigPlane(),
 	}
 }
 
@@ -472,6 +476,7 @@ func load(configPath string, cli cliOverrides) (Config, error) {
 	env.str("PORTAL_STORAGE_PATH", &cfg.PortalStoragePath)
 	env.integer("PORTAL_FLUSH_INTERVAL", func(n int) { cfg.PortalFlushInterval = n })
 	env.str("PORTAL_STORAGE_MOUNT", &cfg.PortalStorageMount)
+	cfg.ConfigPlane.readEnv(env)
 	cfg.Deprecated = env.deprecated
 	if env.err != nil {
 		return cfg, env.err
@@ -646,6 +651,10 @@ func (c *Config) Validate() error {
 		c.DHCPLeasesRefresh = DHCPLeasesRefreshMax
 	}
 	if err := c.validateObserve(); err != nil {
+		return err
+	}
+
+	if err := c.ConfigPlane.validate(); err != nil {
 		return err
 	}
 

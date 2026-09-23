@@ -1,0 +1,14 @@
+#!/bin/sh /etc/rc.common
+# Perch config plane boot guard. When the router rebooted while a config
+# change from the Perch controller was waiting for its confirm, put the
+# configs back from the snapshot in /etc/perch-collector/rollback before the
+# network and its services read them (network starts at 20). The daemon
+# reports the outcome to the controller once it is connected again.
+
+START=15
+
+start() {
+	[ -x /usr/bin/perch-collector ] || return 0
+	/usr/bin/perch-collector config-guard 2>&1 | logger -t perch-collector-guard
+	return 0
+}

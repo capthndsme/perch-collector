@@ -88,10 +88,15 @@ define Package/perch-collector/description
   reach the router. Configured through UCI (/etc/config/perch-collector);
   the API key and the instance id are generated on first start. On a small
   router, option classification 'port' turns deep packet inspection off.
+  With config_access 'write' the controller manages the router's own
+  configuration (DHCP, networks, firewall): every change is confirmed over
+  a fresh connection or restored on its own, also across a reboot (the
+  perch-collector-guard boot script).
 endef
 
 define Package/perch-collector/conffiles
 /etc/config/perch-collector
+/etc/config/perch-managed
 endef
 
 define Build/Prepare
@@ -130,10 +135,13 @@ define Package/perch-collector/install
 	$(INSTALL_BIN) $(GO_PKG_BUILD_BIN_DIR)/perch-collector $(1)/usr/bin/perch-collector
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) ./files/perch-collector.init $(1)/etc/init.d/perch-collector
+	$(INSTALL_BIN) ./files/perch-collector-guard.init $(1)/etc/init.d/perch-collector-guard
 	$(INSTALL_DIR) $(1)/etc/config
 	$(INSTALL_CONF) ./files/perch-collector.config $(1)/etc/config/perch-collector
 	$(INSTALL_DIR) $(1)/etc/uci-defaults
 	$(INSTALL_BIN) ./files/perch-collector.defaults $(1)/etc/uci-defaults/90-perch-collector
+	$(INSTALL_DIR) $(1)/lib/upgrade/keep.d
+	$(INSTALL_DATA) ./files/perch-collector.keep $(1)/lib/upgrade/keep.d/perch-collector
 endef
 
 # Removing the package takes the guest portal's enforcement down with it

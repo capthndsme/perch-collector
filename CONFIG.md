@@ -277,6 +277,44 @@ portal_flush_interval: 0
 # point on the router's flash.
 # Default: ""
 portal_storage_mount: ""
+
+# The config plane (below): may the controller read, or also change, this
+# router's UCI configuration? "none", "read" or "write". Only on OpenWrt and
+# with transport websocket.
+# Default: "none"
+config_access: none
+
+# The UCI configs the controller may read (and with "write", change).
+# perch-collector, perch-apd, rpcd, uhttpd, dropbear and luci never are,
+# whatever is listed.
+# Default: [network, dhcp, firewall]
+managed_config: [network, dhcp, firewall]
+
+# Accept config writes over plain http:// or an unverified certificate when
+# the controller signs each request (it has to opt in too), and the longest
+# confirm window of a config change in seconds (30..3600).
+# Default: false, 600
+config_allow_insecure: false
+config_confirm_max: 600
+
+# The HMAC key of signed writes (16+ characters). Empty = the api_key, which
+# also travels as the connection's credential.
+# Default: ""
+config_sign_key: ""
+
+# Packages the controller may install besides its own list.
+# Default: []
+package_allow: []
+
+# Where the collector would keep local state; only its storage type is
+# detected and reported today. Must be absolute.
+# Default: "/etc/perch-collector"
+storage_path: /etc/perch-collector
+
+# The UCI network the capture interface belongs to, for the capabilities
+# report (the OpenWrt init script sets it from capture_network).
+# Default: ""
+capture_network: ""
 ```
 
 ## Environment Variables
@@ -328,6 +366,14 @@ Configuration values can also be set via environment variables. They take the hi
 | `PERCH_COLLECTOR_PORTAL_STORAGE_PATH` | `portal_storage_path` |
 | `PERCH_COLLECTOR_PORTAL_FLUSH_INTERVAL` | `portal_flush_interval` (seconds) |
 | `PERCH_COLLECTOR_PORTAL_STORAGE_MOUNT` | `portal_storage_mount` |
+| `PERCH_COLLECTOR_CONFIG_ACCESS` | `config_access` (`none`, `read`, `write`) |
+| `PERCH_COLLECTOR_MANAGED_CONFIGS` | `managed_config` (comma-separated config names) |
+| `PERCH_COLLECTOR_CONFIG_ALLOW_INSECURE` | `config_allow_insecure` (`true`/`false`, `1`/`0`) |
+| `PERCH_COLLECTOR_CONFIG_CONFIRM_MAX` | `config_confirm_max` (seconds) |
+| `PERCH_COLLECTOR_CONFIG_SIGN_KEY` | `config_sign_key` |
+| `PERCH_COLLECTOR_PACKAGE_ALLOW` | `package_allow` (comma-separated package names) |
+| `PERCH_COLLECTOR_STORAGE_PATH` | `storage_path` |
+| `PERCH_COLLECTOR_CAPTURE_NETWORK` | `capture_network` |
 
 The names before the rename, `GOCOLLECTOR_<NAME>`, are still read when
 `PERCH_COLLECTOR_<NAME>` is unset; the daemon logs one deprecation line per
@@ -898,6 +944,110 @@ probe gets its success answer (204, `Success`, …). Abuse limits: failed codes
 and logins only, per MAC 5/min and 20/h, per portal 60/min (settings), 429 +
 `Retry-After`; POSTs need `Origin`/`Referer` of the portal or none; bodies
 ≤ 4 KiB; 16 requests at a time; 10 s timeouts; limiter maps bounded (4096).
+## The config plane (`config_access`)
+
+Perch's managed gateway: with the owner's opt-in on the router, the
+controller can read the router's UCI configuration and is told when it
+changes (`read`), and change it (`write`), with every change confirmed over a
+fresh connection or restored on its own. The protocol is in ARCHITECTURE.md
+("The config plane"); the design in the controller repository
+(`docs/gateway/`).
+
+- **Opt-in.** `config_access` is `none` by default: nothing is read and the
+  hello says so. `read` lets the controller read the configs in
+  `managed_config` (default `network dhcp firewall`) plus the sync ledger
+  `perch-managed`. The agent's own config (so the controller can never flip
+  this switch or re-point `server_url`), `perch-apd`, `rpcd`, `uhttpd`,
+  `dropbear` and `luci` are never readable. The controller has its own
+  switch per gateway (mode `off`/`observe`/`managed`); the effective access
+  is the lower of the two.
+- **Where.** On OpenWrt (`/etc/openwrt_release`) with `transport websocket`.
+  A collector on a server offers no config plane.
+- **What is read.** The committed files in `/etc/config`, parsed by the
+  kit's libuci-compatible parser (anonymous sections carry the names libuci
+  gives them, `cfg0a1b2c`), never staged changes: `uci set` without a
+  commit and a LuCI session's unsaved edits are reported only as
+  `uncommitted`. Every section also carries a content hash.
+- **Secrets never leave the router.** Options named `key`, `password`,
+  `secret`, `psk`, `private_key`, `preshared_key`, `auth_secret`,
+  `sae_password`, `faskey`, `api_key`, `r0kh`, `r1kh`, `key1`..`key4` or
+  ending in `_key`, `_secret`, `_password`, `_passwd`, `_psk`, `_pwd` are
+  removed and replaced by `"hmac:" + 16 hex digits` of
+  HMAC-SHA256(api_key, `config.section.option=value`): the controller can
+  tell a value changed, or check one it holds, without seeing it.
+- **Change detection.** While the controller's mode is not `off`, every
+  readable config is stat'ed every `watchSeconds` (the controller's setting,
+  10..600, default 30) and re-hashed when its size or mtime moved. The
+  package's init script adds a procd reload trigger for each allowlisted
+  config; its `reload_service` sends SIGHUP, and the daemon re-hashes at once
+  (a LuCI save, `uci commit` through rpcd, `reload_config`). A change is
+  reported after `debounceSeconds` (1..60, default 5) of quiet, and held while
+  a LuCI apply waits for its confirm (at most 5 minutes; one that rolls back
+  is never reported). The author is a guess: the one logged-in LuCI user when
+  the trigger saw it, `cli` when only polling did, `unknown` otherwise.
+- **Writing** (`config_access write`). Each change arrives as one job. The
+  agent snapshots the configs it touches to `/etc/perch-collector/rollback/`
+  (on the root flash, whatever `storage_path` says), commits them through a
+  private rpcd session (a LuCI or `uci` edit in progress is never included),
+  lets the services reload, then drops its connection and dials a fresh one:
+  the controller confirms on that one. Without a confirm within the window
+  (the controller's setting, capped by `config_confirm_max`; at least 300 s
+  when the change touches the network the router reaches the controller
+  through) the agent restores the snapshot and reloads by itself. Router
+  edits made during the window are reported back when a rollback undoes them.
+  A reboot during the window is caught by the boot guard (`perch-collector
+  config-guard`, init script `perch-collector-guard`), which restores before
+  the network starts. Sections Perch manages are listed in
+  `/etc/config/perch-managed` (the ledger); nothing is marked inside the
+  other configs. While a LuCI apply waits for its confirm, or `uci set` left
+  uncommitted changes to `network`, a change is refused.
+- **Transport.** Writes need an `https` `server_url` with a verified
+  certificate. `config_allow_insecure '1'` also accepts them over plain
+  `http://` (or an unverified certificate) when the controller signs each
+  request (HMAC with the api_key, or `config_sign_key`; a timestamp within 5
+  minutes of the router's clock, a nonce used once, bound to the connection):
+  nobody on the path can change the router's config, but they can read it.
+  Secret values (Wi-Fi keys, WireGuard keys) are never accepted that way. The
+  api_key is also the connection's credential, so over plain `http://` it is
+  visible to anyone who can read the traffic; set `config_sign_key` (16+
+  characters, entered in the controller too) when that matters.
+- **Packages.** The controller may install the packages its features use
+  (sqm-scripts, opennds, wireguard-tools, mwan3, pbr, their LuCI apps, ...;
+  `list package_allow` adds more) with opkg or apk, after checking the free
+  flash; the install is confirmed like a config change and removed again on a
+  failure or without a confirm.
+- **Capabilities.** OpenWrt release and board, firewall (`fw4`/`fw3`),
+  package manager (opkg or apk) and the versions of the packages gateway
+  features depend on (read from the package database, never by running
+  opkg/apk), whether rpcd's `uci` object or only the uci CLI is there, free
+  flash, and what backs `storage_path` (`flash`, `emmc`, `sd`, `usb`,
+  `sata`, `nvme`, `disk`, `ram`, `network`, `unknown`; `onRoot` = the path is
+  on the router's own root, i.e. a USB stick meant for it is not mounted).
+
+OpenWrt package options (`/etc/config/perch-collector`, `main` section):
+
+```
+option config_access 'none'          # none | read | write
+list   managed_config 'network'      # the allowlist (package default network dhcp firewall)
+list   managed_config 'dhcp'
+list   managed_config 'firewall'
+option config_allow_insecure '0'     # '1' = signed writes over plain http
+# option config_sign_key ''          # HMAC key of those signatures (default: api_key)
+option config_confirm_max '600'      # longest confirm window, seconds (30-3600)
+# list package_allow 'tcpdump-mini'  # more packages the controller may install
+option storage_path '/etc/perch-collector'
+```
+
+`perch-collector gateway-config [config...]` prints the capabilities and the
+read the controller would get, as JSON, and exits. It takes its settings from
+`/etc/config/perch-collector` (environment variables win), reads nothing
+with `config_access none`, and writes nothing.
+
+`perch-collector config-guard` is the boot guard: when a change was waiting
+for its confirm at a reboot, it restores the configs from the snapshot (the
+package runs it at boot, before the network; on a router without the
+package, add it to an early init script by hand). The daemon does the same at
+start when no guard ran.
 
 ## Packaged deployments
 

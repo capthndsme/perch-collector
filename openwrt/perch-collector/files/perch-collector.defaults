@@ -36,4 +36,8 @@ if [ -z "$instance_id" ]; then
 fi
 
 [ "$changed" -eq 1 ] && uci -q commit "$CONF"
+
+# The config plane's boot guard runs before the network on every boot (an
+# upgrade from a version without it installs it disabled on some images).
+[ -x /etc/init.d/perch-collector-guard ] && /etc/init.d/perch-collector-guard enable
 exit 0

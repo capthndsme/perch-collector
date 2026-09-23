@@ -1,0 +1,69 @@
+# gateway network. IPv4 only; no IPv6 served anywhere.
+config interface 'loopback'
+	option device 'lo'
+	option proto 'static'
+	option ipaddr '127.0.0.1'
+	option netmask '255.0.0.0'
+
+config globals 'globals'
+	option packet_steering '0'
+
+# WAN: pure DHCP client upstream.
+config interface 'wan'
+	option device 'wan'
+	option proto 'dhcp'
+	option hostname 'gateway'
+	option peerdns '1'
+
+config interface 'lan'
+	option device 'lan'
+	option proto 'static'
+	option ipaddr '192.168.10.1'
+	option netmask '255.255.255.0'
+
+config interface 'guest'
+	option device 'guest'
+	option proto 'static'
+	option ipaddr '192.168.20.1'
+	option netmask '255.255.255.0'
+
+config interface 'iot'
+	option device 'iot'
+	option proto 'static'
+	option ipaddr '192.168.30.1'
+	option netmask '255.255.255.0'
+
+# Management network: the controller (192.168.5.10) lives here only.
+config interface 'mgmt'
+	option device 'mgmt'
+	option proto 'static'
+	option ipaddr '192.168.5.1'
+	option netmask '255.255.255.0'
+
+# 802.1Q trunk: native OpenWrt VLAN-filtering bridge on the "trunk" NIC.
+config device
+	option name 'br-trunk'
+	option type 'bridge'
+	list ports 'trunk'
+
+config bridge-vlan
+	option device 'br-trunk'
+	option vlan '110'
+	list ports 'trunk:t'
+
+config bridge-vlan
+	option device 'br-trunk'
+	option vlan '120'
+	list ports 'trunk:t'
+
+config interface 'vlan110'
+	option device 'br-trunk.110'
+	option proto 'static'
+	option ipaddr '192.168.110.1'
+	option netmask '255.255.255.0'
+
+config interface 'vlan120'
+	option device 'br-trunk.120'
+	option proto 'static'
+	option ipaddr '192.168.120.1'
+	option netmask '255.255.255.0'

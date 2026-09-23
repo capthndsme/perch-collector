@@ -25,6 +25,7 @@ Perch Network Gateway agent. Which means Perch can now have gateway related sett
 - **Talks to the controller over its own socket** — dials the controller, authenticates with its API key and pushes on the schedule the controller sets (JSON-RPC 2.0 over WebSocket, compressed); nothing has to reach the collector. Or announces itself over HTTP and is polled
 - **Gateway stats** — on the router: conntrack fill, established TCP, load, memory and per-interface WAN counters, read from `/proc`, so the controller needs no node_exporter
 - **The Gateway agent's ports** — on the router: every Ethernet port with its live link state (carrier, speed, duplex, link flaps), read from `/sys`, for the controller's infrastructure view
+- **Managed configuration (opt-in)** — with `config_access` on the router, the controller reads the router's UCI configs (secrets never leave it) and, with `write`, changes them: every change is snapshotted, confirmed over a fresh connection or restored on its own (also across a reboot), and packages the features need can be installed the same way (CONFIG.md, ARCHITECTURE.md "The config plane")
 - **DHCP leases and static hosts** — on the router: the dnsmasq/odhcpd leases and the static hosts of `/etc/config/dhcp`, sent when they change, so the controller names devices with nothing to configure on its side
 - **No ASN database** — peer enrichment (ASN, rDNS) is left to the controller
 - **JSON HTTP API** — live device stats, `?since=` windows, protocol → category list

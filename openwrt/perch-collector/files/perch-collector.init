@@ -80,6 +80,8 @@ start_service() {
 	local transport ca_file gateway_stats wan_interfaces ports dhcp_leases dhcp_leases_refresh
 	local observe observe_parts observe_refresh conntrack_flush gateway_backup address_cache
 	local portal portal_port portal_path portal_flush portal_mount
+	local capture_network config_access managed_configs config_allow_insecure config_confirm_max storage_path
+	local config_sign_key package_allow
 	local uci_dirty=0
 
 	config_load "$CONF"
@@ -167,6 +169,16 @@ start_service() {
 	config_get portal_flush main portal_flush_interval '0'
 	config_get portal_mount main portal_storage_mount
 
+	# The config plane: what the controller may read of this router's UCI.
+	config_get capture_network main capture_network 'lan'
+	config_get config_access main config_access 'none'
+	config_list_foreach main managed_config append_list managed_configs
+	config_get_bool config_allow_insecure main config_allow_insecure 0
+	config_get config_confirm_max main config_confirm_max '600'
+	config_get storage_path main storage_path '/etc/perch-collector'
+	config_get config_sign_key main config_sign_key
+	config_list_foreach main package_allow append_list package_allow
+
 	procd_open_instance
 	# No config file: everything comes from the environment below.
 	procd_set_param command "$PROG"
@@ -210,7 +222,15 @@ start_service() {
 		PERCH_COLLECTOR_PORTAL_PORT="$portal_port" \
 		PERCH_COLLECTOR_PORTAL_STORAGE_PATH="$portal_path" \
 		PERCH_COLLECTOR_PORTAL_FLUSH_INTERVAL="$portal_flush" \
-		PERCH_COLLECTOR_PORTAL_STORAGE_MOUNT="$portal_mount"
+		PERCH_COLLECTOR_PORTAL_STORAGE_MOUNT="$portal_mount" \
+		PERCH_COLLECTOR_CAPTURE_NETWORK="$capture_network" \
+		PERCH_COLLECTOR_CONFIG_ACCESS="$config_access" \
+		PERCH_COLLECTOR_MANAGED_CONFIGS="${managed_configs:-network,dhcp,firewall}" \
+		PERCH_COLLECTOR_CONFIG_ALLOW_INSECURE="$config_allow_insecure" \
+		PERCH_COLLECTOR_CONFIG_CONFIRM_MAX="$config_confirm_max" \
+		PERCH_COLLECTOR_STORAGE_PATH="$storage_path" \
+		PERCH_COLLECTOR_CONFIG_SIGN_KEY="$config_sign_key" \
+		PERCH_COLLECTOR_PACKAGE_ALLOW="$package_allow"
 	procd_set_param respawn 3600 5 0
 	procd_set_param stdout 1
 	procd_set_param stderr 1
@@ -218,12 +238,30 @@ start_service() {
 	logger -t perch-collector "starting on $dev, API on $listen ($mode)${server_url:+, controller $server_url}"
 }
 
+# procd reloads the service when an allowlisted config is committed through
+# rpcd (LuCI) or reload_config; reload_service below then tells the daemon to
+# re-hash at once (SIGHUP). CLI commits without a reload are found by polling.
+reload_service() {
+	start
+	procd_send_signal perch-collector '*' HUP
+}
+
 service_triggers() {
-	local capture listen
+	local capture listen access managed c
 	config_load "$CONF"
 	config_get capture main capture_network 'lan'
+	config_get access main config_access 'none'
 	listen="$(listen_network)"
 	procd_add_reload_trigger "$CONF"
+	if [ "$access" != "none" ]; then
+		config_list_foreach main managed_config append_list managed
+		for c in $(echo "${managed:-network,dhcp,firewall}" | tr ',' ' '); do
+			case "$c" in
+				perch-collector|perch-apd|rpcd|uhttpd|dropbear|luci) ;;
+				*) procd_add_reload_trigger "$c" ;;
+			esac
+		done
+	fi
 	procd_add_interface_trigger "interface.*.up" "$capture" /etc/init.d/perch-collector reload
 	[ "$listen" = "$capture" ] || procd_add_interface_trigger "interface.*.up" "$listen" /etc/init.d/perch-collector reload
 }

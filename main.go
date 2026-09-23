@@ -43,6 +43,12 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "dhcp" {
 		os.Exit(dhcpCommand(os.Args[2:], os.Stdout, os.Stderr, &observe.Reader{}))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "config-guard" {
+		os.Exit(configGuardCommand(os.Args[2:], os.Stdout, os.Stderr, "", guardAPIKey))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "gateway-config" {
+		os.Exit(gatewayConfigCommand(os.Args[2:], os.Stdout, os.Stderr, routerConfig))
+	}
 	if len(os.Args) > 1 {
 		if code, ok := gatewayCommand(os.Args[1], os.Args[2:], os.Stdout, os.Stderr); ok {
 			os.Exit(code)
@@ -259,6 +265,9 @@ func main() {
 		close(ctlDone)
 	}
 
+	// SIGHUP: re-hash the router's configs now (procd's reload trigger).
+	watchReloadSignal()
+
 	// Wait for shutdown signal.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -377,6 +386,7 @@ func buildController(cfg config.Config, agg *aggregator.Aggregator, cls classifi
 		Portal:           gw.portal,
 		Backup:           gw.backup,
 		AddressCache:     cfg.ControllerAddressCache,
+		Config:           configPlane(cfg),
 	})
 	if err != nil {
 		log.Fatalf("controller: %v", err)
@@ -451,6 +461,7 @@ func usage() {
 		"                            delete the conntrack entries of these addresses\n"+
 		"  perch-collector backup [-full] -o FILE\n"+
 		"                            write a (redacted) sysupgrade -b backup to FILE\n"+
+		"  perch-collector gateway-config [config...]  print the router capabilities and configs the config plane offers, as JSON\n"+
 		"  perch-collector version   print the version\n\n"+
 		"Flags:\n", version)
 	flag.PrintDefaults()
