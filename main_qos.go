@@ -7,6 +7,8 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/capthndsme/perch-collector/internal/config"
@@ -77,6 +79,27 @@ func qosCommand(args []string, stdout, stderr io.Writer, sys qos.System) int {
 		return report(e.Stop())
 	case "sync":
 		return report(e.Reconcile("cli sync", true))
+	case "run":
+		// The daemon's shaper loop in the foreground, without capture or a
+		// controller: debugging and lab tests.
+		d := qos.NewEngine(sys, true)
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-d.Notify():
+					for _, ev := range d.DrainEvents() {
+						b, _ := json.Marshal(ev)
+						fmt.Fprintf(stdout, "event %s\n", b)
+					}
+				}
+			}
+		}()
+		d.Run(ctx)
+		return 0
 	case "status":
 		e.Plan()
 		_ = enc.Encode(e.StatusReport())

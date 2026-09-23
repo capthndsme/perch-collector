@@ -238,6 +238,11 @@ observe_refresh: 600
 # Default: "auto"
 conntrack_flush: auto
 
+# Traffic shaping (per-device and bucket caps from /etc/config/perch-qos, the
+# perch-qos package). "auto" = on on OpenWrt when perch-qos is installed.
+# Default: "auto"
+qos: auto
+
 # Configuration backups (gateway.backup, sysupgrade -b) the controller may
 # take: "redacted" (secrets replaced, private key files left out), "full"
 # (the archive as is) or "off". Offered only with observe on and sysupgrade
@@ -297,6 +302,7 @@ Configuration values can also be set via environment variables. They take the hi
 | `PERCH_COLLECTOR_CONNTRACK_FLUSH` | `conntrack_flush` (`auto`, `on`, `off`) |
 | `PERCH_COLLECTOR_GATEWAY_BACKUP` | `gateway_backup` (`redacted`, `full`, `off`) |
 | `PERCH_COLLECTOR_CONTROLLER_ADDRESS_CACHE` | `controller_address_cache` |
+| `PERCH_COLLECTOR_QOS` | `qos` (`auto`, `on`, `off`) |
 
 The names before the rename, `GOCOLLECTOR_<NAME>`, are still read when
 `PERCH_COLLECTOR_<NAME>` is unset; the daemon logs one deprecation line per
@@ -769,6 +775,160 @@ resolver down, rebind protection), the collector dials that address instead
 and logs it once; the URL, the TLS server name and the `Host` header stay the
 controller's name, so certificate checks are unchanged. Not used with an
 HTTP proxy in the environment.
+
+### Traffic shaping (`qos`, gateway plan 3)
+
+With the `perch-qos` package installed (`qos: auto`) the daemon runs the
+shaper: per-device caps, shared buckets (nested up to four deep), network
+defaults with a leaf per device, data quotas and weekly schedules, on the LAN
+side of the router (how it is built: ARCHITECTURE.md "Traffic shaping"). sqm
+on the WAN is left alone and only reported. The controller writes the
+structure to `/etc/config/perch-qos` through its config plane and sends the
+per-MAC entries over the socket; the shaper keeps working without the
+controller (entries come back from `/etc/perch-qos/devices.json`, schedules
+run on the router's clock).
+
+`/etc/config/perch-qos` (as the controller's planner renders it; every
+option below is read, anything else is warned about and ignored):
+
+```
+config globals 'globals'
+	option enabled '1'            # '0' = local pause (all Perch tc objects removed)
+	option revision '12'          # set by the config plane; reported back
+	option min_wan_kbit '1000'    # sqm queues below it are reported (sqm_below_floor)
+	option min_device_kbit '64'   # caps below it are raised to it; HTB floor of shared leaves
+	option leaf_flows '64'        # fq_codel flows per device leaf
+	option leaf_limit '1000'      # fq_codel limit (packets) per device leaf
+	option leaf_memory_kb '1024'  # fq_codel memory_limit per device leaf
+	option rest_memlimit_kb '4096'# CAKE memlimit per bucket rest leaf
+	option dynamic_idle '1800'    # seconds without a confirmed neighbour or bytes → leaf freed
+	option dynamic_limit '1024'   # dynamic leaves in all; beyond: pool_exhausted
+	list exempt '198.51.100.0/24' # extra never-shaped prefixes (the LAN prefixes always are)
+config bucket 'b12'
+	option policy '2'             # push key b:2 / r:2 ('' → the section name)
+	option class '0x12'           # 0x02-0xff
+	option parent ''              # parent bucket; depth ≤ 4
+	option down_kbit '50000'      # 0 = unlimited that way
+	option up_kbit '10000'
+	option fairness 'per_host'    # rest leaf: per_host = CAKE dual-*host, per_flow = fq_codel
+	option include_lan '0'
+	list schedule 's7'
+config network 'guest'            # UCI interface of a LAN
+	option policy '2'
+	option bucket 'b12'           # '' = none
+	option each_down_kbit '5000'  # both '' = no leaf per device
+	option each_up_kbit '1000'
+	option include_lan '0'        # '1': LAN↔LAN traffic of the network shaped too
+	list schedule 's7'
+config schedule 's7'
+	list window 'mon-fri 18:00-23:00' # days a window starts on; end ≤ start = past midnight
+	option policy '2'             # a policy's schedule, or: option assignment '<id>'
+	option action 'limit'         # limit | unlimited | block | move
+	option down_kbit '25000'      # bucket rates while active ('' = keep, '0' = unlimited)
+	option up_kbit ''
+	option each_down_kbit '2500'  # member caps while active; for move: the new caps
+	option each_up_kbit ''
+	option bucket ''              # move: the bucket the members sit in meanwhile
+```
+
+The file is refused as a whole (the kernel keeps what it has, the push says
+`state: error` with the reasons) on a syntax error, a bucket class outside
+0x02-0xff or used twice, a missing or cyclic parent, nesting deeper than 4, a
+child bucket allowed more than its parent, children whose rates add up to
+more than the parent's, a network or move naming an unknown bucket, or a bad
+window.
+
+**Precedence per MAC:** its own entry (on every LAN, so a cap follows the
+device across SSIDs and VLANs), else its network's default. Within an entry,
+the first active schedule of `schedules` wins; an exhausted quota overrides
+schedules (`throttle` → the throttle rates, `block` → drop).
+
+**Schedules** use the router's clock and zone (`/tmp/TZ`, the POSIX TZ string
+OpenWrt writes from `system.timezone`). Until the clock is known to be synced
+(busybox ntpd's hotplug marker `/tmp/perch-qos/ntp-synced`, or the kernel's
+clock discipline) no schedule is in force and the push reports
+`schedule_clock_unsynced`. Window edges are applied within the 2 s tick, in
+place: rate changes are `tc class change`, moves are `tc filter replace`
+after the new class exists, so a flow never stops.
+
+#### Commands
+
+```
+perch-collector qos apply    # lift a stop, apply now (idempotent)
+perch-collector qos sync     # apply now, a stop stays (hotplug, init reload)
+perch-collector qos stop     # remove every Perch tc object; stays off until apply or reboot
+perch-collector qos status   # the push section + last apply, JSON
+perch-collector qos probe    # qos.probe's answer, JSON
+perch-collector qos render [-full]   # the tc batch apply would run (or the whole tree)
+perch-collector qos run      # the shaper loop in the foreground (no capture, no controller)
+```
+
+Every apply writes `/tmp/perch-qos/last.batch` (what ran), `full.batch` (the
+whole tree), `last-apply.json` and `state.json` (class and filter handle
+allocations, dynamic devices, epoch). `/etc/init.d/perch-qos`: start = apply,
+stop = `qos stop`, reload (triggered by changes of perch-qos, sqm and the
+firewall config) = sync. `/etc/hotplug.d/iface/40-perch-qos` syncs on
+ifup/ifdown/ifupdate (new IPv6 prefixes become exemptions at once).
+
+#### On the socket
+
+- **Hello:** capability `qos` while perch-qos is installed (and the optional
+  `QoSAllowed` gate, the config plane's managed mode, allows it).
+- **`qos.probe`** `{}` →
+  `{sqm:{installed, version, luci, queues:[device]}, kernel:{htb, htb_class, fq_codel, cake, clsact, flower, skbedit, mirred, matchall, chain, ifb}, conflicts:[pkg], flowOffload:{software, hardware}, lanDevices:[{network, device, prefixes:[cidr], conflict?}], tc, clockSynced, tz, configured, perchQosPackage?}`.
+  Kernel features are tried on a scratch ifb (`ifb-pqprobe`). Conflicts are
+  installed and enabled `qosify`, `nft-qos`, `eqos`.
+- **`qos.devices.set`** `{revision, devices: DeviceEntry[] (≤ 4096)}` →
+  `{revision, accepted, rejected:[{mac, error}]}`. `DeviceEntry` is exactly
+  the planner's: `{mac, bucket: string|null, downKbit: number|null,
+  upKbit: number|null, quota: {limitBytes, usedBytes, onExhausted:
+  'block'|'throttle', throttleDownKbit, throttleUpKbit}|null, expiresAt:
+  ISO|null, includeLan?: true, schedules?: string[]}` (null rate =
+  unlimited that way). Rejected one by one: `invalid_mac`, `duplicate_mac`,
+  `router_mac` (the router's own interfaces), `invalid_rate`,
+  `invalid_quota`, `invalid_expires_at`. Caps below `min_device_kbit` are
+  raised to it. Errors: -32602 (bad params, more than 4096), -32010
+  `qos_not_active` (no perch-qos). The set is kept in `/tmp/perch-qos/`
+  at once and in `/etc/perch-qos/devices.json` at most once a minute
+  (quota counters at most every 15 minutes). A `usedBytes` equal to the one
+  the controller sent before keeps the agent's own count; a different one
+  (a reset, a new quota) replaces it.
+- **`qos.status`** `{}` → `{qos: <push section>, lastApply, lans, summary}`.
+- **Push:** `collector.push` gains `qos` (absent = not reported):
+
+```
+{ "epoch": "3f2a…",                       // new = counters start over
+  "state": "active"|"paused"|"error",
+  "pausedBy": "config"|"local"|null,      // globals.enabled '0' | qos stop
+  "configRevision": "12"|null, "devicesRevision": 7|null,
+  "collectedAt": "…Z",
+  "wan": [{ "device": "wan2", "section": "wan2", "enabled": true,
+            "egress":  {kind, bandwidthKbit, bytes, packets, drops, overlimits, backlogBytes, ecnMarks, peakDelayUs}|null,
+            "ingress": {…}|null }],         // sqm's root qdiscs, as they are
+  "classes": [{ "id": "1:200", "key": "d:02:00:00:00:10:11"|"b:2"|"r:2"|"n:guest",
+                "dir": "down"|"up", "rateKbit", "ceilKbit",   // as applied now (schedules included)
+                "bytes", "packets", "drops", "overlimits", "backlogBytes" }],   // drops/backlog include the leaf qdisc
+  "devices": [{ "mac", "classId": "1:200"|"1:112"|null, "network": "guest"|null,
+                "dynamic": false, "state": "shaped"|"unshaped"|"blocked"|"throttled" }],
+  "quotas": [{ "mac", "usedBytes", "limitBytes", "exhausted", "enforced" }],
+  "schedules": [{ "name": "s7", "active": true, "since": "…Z"|null, "until": "…Z"|null }],  // inactive: until = next start
+  "errors": [{ "code", "detail" }] }
+```
+
+  `errors` codes: `apply_failed`, `stats_unreadable`, config refusals
+  (`config_*`), `unknown_bucket`, `unknown_network`, `pool_exhausted`,
+  `class_pool_exhausted`, `qos_conflict_sqm_on_lan`,
+  `schedule_clock_unsynced`, `sqm_paused` (a queue disabled on the router,
+  decision 15: reported, never reverted), `sqm_below_floor`,
+  `device_rejected`.
+- **`qos.event`** (notification) `{type, at, mac?, detail?}`, queued (128)
+  while no session is open: `quota_exhausted` {usedBytes, limitBytes,
+  onExhausted, enforced}, `pool_exhausted`, `apply_failed` {errors},
+  `local_pause` / `local_resume` {by: config|local},
+  `schedule_clock_unsynced`, `sqm_paused` / `sqm_resumed` {section,
+  device}, `cap_hit` {dir, classId, ceilKbit, rateKbit} (a device class at
+  ≥ 90 % of its ceiling for three reads, then 15 minutes quiet).
+- The controller socket is marked DSCP CS6 (CAKE's voice tin on a shaped WAN).
 
 ## Packaged deployments
 

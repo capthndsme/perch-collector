@@ -235,6 +235,88 @@ falls back to the address of the last accepted session when resolution
 fails. The TLS server name and Host header come from the URL, so they stay
 the name.
 
+## Traffic shaping (`internal/qos`, gateway plan 3 WP-E)
+
+The shaper turns `/etc/config/perch-qos` (structure, written by the
+controller's config plane) and the `qos.devices.set` entries (per MAC,
+runtime) into kernel objects, following the kernel amendment of 2026-09-23.
+Everything sits on the LAN side; sqm keeps the WAN root and its ifb:
+
+```
+download: WAN → ifb4<wan> [sqm CAKE] → route/de-NAT → LAN device egress (clsact)
+upload:   LAN device ingress (clsact) → route/NAT → WAN egress [sqm CAKE]
+
+clsact filters on every LAN L3 device (flower everywhere, one hook per direction):
+  pref 1   arp                              pass
+  pref 2   dst_mac multicast/broadcast      pass
+  pref 3/4 the router's own v4/v6 addresses pass (src_ip on egress, dst_ip on ingress)
+  pref 5   MACs with includeLan             skbedit priority 1:<class> | mirred → ifb
+  pref 6/7 each LAN prefix, exactly (+ list exempt, fe80::/10)
+                                            pass  (goto chain 1 on a network whose default shapes LAN traffic)
+  pref 10  one filter per MAC (handle = the MAC's allocated handle)
+                                            classify | pass (unshaped) | drop (blocked)
+  pref 100 network default (flower, no keys) classify into the bucket's rest leaf
+                                            or the network's overflow class
+  chain 1  (only with a LAN-shaping default) pref 10: MACs with their own entry pass;
+           pref 100: the default
+
+ifb-pdn (down) and ifb-pup (up), the same tree with each direction's rates:
+  htb 1: default 0 (no class = direct, never dropped) ─ 1:1 10 Gbit
+    ├ 1:<b>      bucket, rate = ceil (0 = the parent's), nested ≤ 4 deep
+    │ ├ 1:1<b>   rest leaf: CAKE unlimited besteffort dual-dsthost/-srchost (per_flow: fq_codel)
+    │ └ 1:2xx    device leaf in the bucket: rate min_device_kbit, ceil = cap
+    ├ 1:2xx      device without bucket: rate = ceil = cap
+    └ 1:2xx      network overflow (n:<network>): devices of a per-device-capped
+                 network without a leaf yet share one device's caps
+  quantum 1514 on every class; burst = max(1600 B, rate × 1 ms);
+  fq_codel limit/flows/memory_limit from globals, target = max(5 ms, 1.5 packet
+  times at the ceiling), interval = 100 ms + (target − 5 ms); CAKE memlimit.
+```
+
+- **Plan** (`plan.go`, pure): config + entries + LANs (`ubus call
+  network.interface dump`, less masquerading zones and default-route
+  interfaces; an enabled sqm queue on a LAN device excludes it:
+  `qos_conflict_sqm_on_lan`) + neighbour table + clock → the desired classes
+  and filters. Class minors of devices are allocated per `d:<mac>|<parent>`,
+  so moving a device to another bucket creates its new class first, repoints
+  the filter (`filter replace`), then deletes the old class: no queue is
+  dropped. A minor still in the kernel is never reused in the same apply.
+- **Diff** (`diff.go`): the kernel is read back with one `tc -s -j -force
+  -batch` (both ifbs, every LAN device's qdiscs and filters) and compared:
+  rates (exact bytes/s), bursts (2 %), leaf kind and options, filter match
+  and action. Only differences become commands (`class change`, `qdisc
+  change`, `filter replace`, adds, deletes last); a re-parented bucket is
+  deleted with its subtree and added again (the only non-hitless change).
+  A kernel that matches gives an empty batch: every apply is idempotent.
+- **Engine** (`engine.go`): the daemon ticks every 2 s (neighbour dump over
+  rtnetlink, file stamps, interfaces every 10 s) and replans only when an
+  input moved (config, sqm, firewall, TZ, device set, LANs, active schedules,
+  exhausted quotas, neighbours on per-device-capped networks), plus a full
+  verify every 60 s. The CLI (`perch-collector qos …`) and the hotplug/init
+  scripts run the same reconcile under the same flock
+  (`/tmp/perch-qos/lock`) and share `state.json`. The ifbs are created over
+  rtnetlink (no `ip-full`); tc is `tc-tiny` (the spike proved it suffices).
+- **Stats** (`stats.go`): one `tc -s -j -batch` per push (and every 5 s
+  without pushes while quotas exist): class counters (leaf qdisc drops and
+  backlog added), sqm's root qdiscs, and, for quotas, the per-MAC filters'
+  action byte counters, which count a MAC on every LAN device and both hooks
+  whatever class it is in. Quota deltas survive filter replacement.
+- **Schedules**: POSIX TZ from `/tmp/TZ` (`tz.go`, tested against zoneinfo);
+  inactive until the clock is known to be synced.
+- **Safety**: kernel state outlives the daemon (a crash or restart leaves the
+  tree enforcing); a broken perch-qos never tears shaping down; `qos stop`
+  and `globals.enabled '0'` remove every Perch object within one tick; the
+  router's own MACs are refused; router-originated and LAN↔LAN traffic
+  never enters a Perch class (pref 3-7), so the collector's socket to a
+  controller on the LAN is never shaped; the socket is marked DSCP CS6 for
+  sqm's CAKE on the WAN.
+- **Tests**: goldens render the controller planner's own output
+  (`testdata/planner-*`, `testdata/golden/`); a namespace test
+  (`unshare -rn`, skipped where unavailable) applies it to a real kernel,
+  checks idempotence, hitless schedule switches and `stop`; the captured
+  kernel read (`testdata/kernel-weekday-noon.json`) keeps the parser and the
+  diff tested without a namespace.
+
 ## Graceful Shutdown
 
 ```
