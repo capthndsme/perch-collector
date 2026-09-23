@@ -180,6 +180,26 @@ func (r *Reconciler) Captured() map[string]string {
 	return out
 }
 
+// dropper is an engine that can count its kernel drops (capture.Engine).
+type dropper interface{ Dropped() (uint64, bool) }
+
+// Drops maps each captured device to the frames the kernel dropped for its
+// capture since that capture started (devices whose engine cannot say are
+// left out).
+func (r *Reconciler) Drops() map[string]uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := map[string]uint64{}
+	for dev, run := range r.running {
+		if d, ok := run.engine.(dropper); ok {
+			if n, ok := d.Dropped(); ok {
+				out[dev] = n
+			}
+		}
+	}
+	return out
+}
+
 // Plan is the last plan (ok false before the first one).
 func (r *Reconciler) Plan() (Plan, bool) {
 	r.mu.Lock()

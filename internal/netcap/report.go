@@ -24,6 +24,9 @@ type Reporter struct {
 	Sys       SysNet
 	// Captured maps each captured device to its network.
 	Captured func() map[string]string
+	// Drops maps captured devices to their capture's kernel drops; nil =
+	// not known.
+	Drops func() map[string]uint64
 	// Agg supplies the device counts and capture counters; nil = none.
 	Agg *aggregator.Aggregator
 	// FS reads /proc/net/dev ("" = the real one).
@@ -66,6 +69,10 @@ func (r *Reporter) Read() *[]gateway.Network {
 	if r.Agg != nil {
 		counters = r.Agg.NetworkTraffic()
 		devices = r.Agg.NetworkDeviceCounts(ActiveWindow)
+	}
+	drops := map[string]uint64{}
+	if r.Drops != nil {
+		drops = r.Drops()
 	}
 	scope := "legacy"
 	if r.Scope != nil {
@@ -115,6 +122,9 @@ func (r *Reporter) Read() *[]gateway.Network {
 					n.Capture = captureOf(nc, scope)
 				} else {
 					n.Capture = &gateway.NetworkCapture{Scope: scope}
+				}
+				if d, ok := drops[i.Device]; ok {
+					n.Capture.KernelDrops = &d
 				}
 			}
 		}

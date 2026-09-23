@@ -413,6 +413,7 @@ func TestReporter(t *testing.T) {
 		Agg:      agg,
 		FS:       hoststat.FS{Root: root},
 		Scope:    func() string { return "routed" },
+		Drops:    func() map[string]uint64 { return map[string]uint64{"br-lan": 7} },
 		Now:      func() time.Time { return now },
 	}
 	first := *r.Read()
@@ -429,6 +430,9 @@ func TestReporter(t *testing.T) {
 	}
 	if lan.Devices != 1 || lan.ActiveDevices != 1 || lan.Capture == nil || lan.Capture.BytesOutWAN != 700 || lan.Capture.Scope != "routed" {
 		t.Errorf("lan capture %+v %+v", lan, lan.Capture)
+	}
+	if lan.Capture.KernelDrops == nil || *lan.Capture.KernelDrops != 7 {
+		t.Errorf("lan kernel drops %v", lan.Capture.KernelDrops)
 	}
 	if !reflect.DeepEqual(lan.IPv6, []string{"fd00:1::1/64", "2001:db8:0:10::/64"}) {
 		t.Errorf("lan ipv6 %v", lan.IPv6)

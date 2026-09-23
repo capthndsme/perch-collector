@@ -75,6 +75,22 @@ func NewForNetwork(iface, network string, snapLen int32, promisc bool, bpfFilter
 	}, nil
 }
 
+// Dropped is the number of frames the kernel dropped for this capture since
+// it started (libpcap's ps_drop: the ring buffer was full), ok false when
+// the handle cannot say or the engine has stopped.
+func (e *Engine) Dropped() (uint64, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.stopped {
+		return 0, false
+	}
+	st, err := e.handle.Stats()
+	if err != nil || st == nil {
+		return 0, false
+	}
+	return uint64(st.PacketsDropped), true
+}
+
 // Interface is the device the engine captures on.
 func (e *Engine) Interface() string { return e.iface }
 

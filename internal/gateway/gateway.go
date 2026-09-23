@@ -98,6 +98,11 @@ type NetworkCapture struct {
 	// Scope is the scope rule the split follows: "routed" (routed LAN and
 	// the router's LAN addresses count as LAN) or "legacy".
 	Scope string `json:"scope"`
+	// KernelDrops is the number of frames the kernel dropped for this
+	// network's capture since that capture started (its ring buffer was
+	// full: the counters above miss them). Absent when unknown. It restarts
+	// at 0 when the capture restarts (the network went away and came back).
+	KernelDrops *uint64 `json:"kernelDrops,omitempty"`
 }
 
 // Conntrack is the connection-tracking table fill.

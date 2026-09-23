@@ -153,7 +153,13 @@ func startCapture(cfg config.Config, agg *aggregator.Aggregator, configuredMACs 
 			cs.reporter = &netcap.Reporter{
 				Discover: func() netcap.Discovery { return disc.Discover(false) }, Selection: sel, Sys: sys,
 				Captured: func() map[string]string { return map[string]string{cfg.Interface: label} },
-				Agg:      agg, Scope: scope,
+				Drops: func() map[string]uint64 {
+					if n, ok := e.Dropped(); ok {
+						return map[string]uint64{cfg.Interface: n}
+					}
+					return nil
+				},
+				Agg: agg, Scope: scope,
 			}
 		}
 		close(cs.done)
@@ -253,7 +259,7 @@ func startCapture(cfg config.Config, agg *aggregator.Aggregator, configuredMACs 
 	if d := disc.Discover(false); d.Netifd {
 		cs.reporter = &netcap.Reporter{
 			Discover: func() netcap.Discovery { return disc.Discover(false) }, Selection: sel, Sys: sys,
-			Captured: cs.reconciler.Captured, Agg: agg, Scope: scope, FS: hoststat.FS{},
+			Captured: cs.reconciler.Captured, Drops: cs.reconciler.Drops, Agg: agg, Scope: scope, FS: hoststat.FS{},
 		}
 	}
 	return cs
