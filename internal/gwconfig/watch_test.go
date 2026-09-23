@@ -61,7 +61,7 @@ func watchSetup(t *testing.T) (string, *Plane, *fakeUbus, *clock, *inbox) {
 	root := newRoot(t)
 	clk := &clock{t: time.Date(2026, 9, 23, 10, 0, 0, 0, time.UTC)}
 	p, fu := plane(t, root, Options{Access: AccessRead, Allowlist: DefaultAllowlist, Now: clk.now})
-	p.Hello() // baseline
+	p.Hello(context.Background(), "") // baseline
 	p.Configure(Configure{Mode: ModeObserve, WatchSeconds: seconds(10), DebounceSeconds: seconds(5)})
 	return root, p, fu, clk, &inbox{ok: true}
 }
@@ -248,7 +248,7 @@ func TestWatchWithoutSessionAndRebase(t *testing.T) {
 	edit(t, root, "firewall", "\nconfig defaults\n\toption x '2'\n", clk.now().Add(2*time.Hour))
 	p.Trigger()
 	p.Step(in.notify)
-	h := p.Hello()
+	h := p.Hello(context.Background(), "")
 	in.ok = true
 	clk.add(10 * time.Second)
 	p.Step(in.notify)

@@ -12,12 +12,11 @@ import (
 // which configs. It lives in the collector's own config, which the plane can
 // never touch, so only someone with access to the router can change it.
 type ConfigPlane struct {
-	// ConfigAccess is none (default), read or write. write is accepted, but
-	// this version reads only.
+	// ConfigAccess is none (default), read or write.
 	ConfigAccess string `yaml:"config_access"`
 
 	// ManagedConfigs is the allowlist of UCI configs the controller may read
-	// (and later write). The agent's own config, perch-apd, rpcd, uhttpd,
+	// and, with write access, write. The agent's own config, perch-apd, rpcd, uhttpd,
 	// dropbear and luci are never allowed, whatever is listed.
 	ManagedConfigs []string `yaml:"managed_config"`
 
@@ -28,9 +27,20 @@ type ConfigPlane struct {
 	// ConfigConfirmMax caps any confirm window of a config apply, seconds.
 	ConfigConfirmMax int `yaml:"config_confirm_max"`
 
+	// ConfigSignKey is the HMAC key of signed writes over an unverified
+	// transport; empty = the api_key. Unlike the api_key (the Bearer token
+	// of every connection) it never crosses the wire: the admin pastes it
+	// into the controller.
+	ConfigSignKey string `yaml:"config_sign_key"`
+
+	// PackageAllow extends the packages the controller may install
+	// (gateway.package.install).
+	PackageAllow []string `yaml:"package_allow"`
+
 	// StoragePath is where the agent keeps local state later (quotas,
-	// vouchers, rollback snapshots). Today its storage type is only detected
-	// and reported in the gateway capabilities.
+	// vouchers). Today its storage type is only detected and reported in the
+	// gateway capabilities. Apply snapshots always live on the root flash
+	// (/etc/perch-collector/rollback), where the boot guard finds them.
 	StoragePath string `yaml:"storage_path"`
 
 	// CaptureNetwork is the UCI network the capture interface belongs to
@@ -78,6 +88,10 @@ func (c *ConfigPlane) readEnv(env *envReader) {
 	}
 	env.boolean("CONFIG_ALLOW_INSECURE", &c.ConfigAllowInsecure)
 	env.integer("CONFIG_CONFIRM_MAX", func(n int) { c.ConfigConfirmMax = n })
+	env.str("CONFIG_SIGN_KEY", &c.ConfigSignKey)
+	if list, ok := env.list("PACKAGE_ALLOW"); ok {
+		c.PackageAllow = list
+	}
 	env.str("STORAGE_PATH", &c.StoragePath)
 	env.str("CAPTURE_NETWORK", &c.CaptureNetwork)
 }
@@ -120,6 +134,11 @@ func (c *ConfigPlane) validate() error {
 		return fmt.Errorf("storage_path must be absolute, got %q", c.StoragePath)
 	}
 	c.CaptureNetwork = strings.TrimSpace(c.CaptureNetwork)
+	c.ConfigSignKey = strings.TrimSpace(c.ConfigSignKey)
+	if c.ConfigSignKey != "" && len(c.ConfigSignKey) < 16 {
+		return fmt.Errorf("config_sign_key must be at least 16 characters")
+	}
+	c.PackageAllow = cleanList(c.PackageAllow)
 	return nil
 }
 

@@ -64,6 +64,12 @@ type Capabilities struct {
 	Capture     Capture           `json:"capture"`
 	Flash       *Flash            `json:"flash"`
 	Storage     *Storage          `json:"storage"`
+	// Signing: how this session's writes are signed (write access only).
+	Signing *Signing `json:"signing,omitempty"`
+	// Management is the path to the controller (README 3.8).
+	Management *ManagementPath `json:"management"`
+	// InstallAllowlist: what gateway.package.install accepts.
+	InstallAllowlist []string `json:"installAllowlist"`
 }
 
 func strPtr(s string) *string {
@@ -73,8 +79,9 @@ func strPtr(s string) *string {
 	return &s
 }
 
-// Capabilities describes the router and what the plane may do there.
-func (p *Plane) Capabilities(ctx context.Context) *Capabilities {
+// Capabilities describes the router and what the plane may do there;
+// challenge is the session's signing challenge.
+func (p *Plane) Capabilities(ctx context.Context, challenge string) *Capabilities {
 	c := &Capabilities{
 		Protocol:         Protocol,
 		Access:           p.Access(),
@@ -89,8 +96,15 @@ func (p *Plane) Capabilities(ctx context.Context) *Capabilities {
 		Configs:          []string{},
 		Hashes:           map[string]string{},
 		Uncommitted:      []string{},
-		Apply:            ApplyState{State: "idle"},
+		Apply:            p.ApplyState(),
 		Capture:          Capture{Networks: []CaptureNetwork{}},
+		InstallAllowlist: append(append([]string(nil), InstallAllowlist...), p.o.PackageAllow...),
+	}
+	if p.o.Access == AccessWrite {
+		c.Signing = p.SigningFor(challenge)
+	}
+	if p.o.Access != AccessNone {
+		c.Management = p.ManagementPath(ctx)
 	}
 	if c.AllowedConfigs == nil {
 		c.AllowedConfigs = []string{}

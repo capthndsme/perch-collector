@@ -448,7 +448,7 @@ func TestHelloAddress(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		b, _ := json.Marshal(c.hello())
+		b, _ := json.Marshal(c.hello(context.Background(), ""))
 		if string(b) != tc.want {
 			t.Errorf("%s:\n got  %s\n want %s", tc.listen, b, tc.want)
 		}

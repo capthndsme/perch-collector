@@ -86,7 +86,8 @@ func TestConfigPlaneOnTheSocket(t *testing.T) {
 		}
 		var gc gwconfig.Hello
 		json.Unmarshal(p.GatewayConfig, &gc)
-		if gc.Protocol != 1 || gc.Access != "read" || gc.TransportOK || gc.Apply.State != "idle" || len(gc.Hashes) != 2 || gc.Hashes["network"] == "" {
+		if gc.Protocol != 1 || gc.Access != "write" || gc.TransportOK || gc.Apply.State != "idle" || len(gc.Hashes) != 2 || gc.Hashes["network"] == "" ||
+			gc.Signing == nil || !gc.Signing.Required || len(gc.Signing.Challenge) != 32 {
 			t.Errorf("gatewayConfig %s", p.GatewayConfig)
 		}
 		answerHello(ctx, c, hello, "adopted")
@@ -95,7 +96,7 @@ func TestConfigPlaneOnTheSocket(t *testing.T) {
 		caps := request(t, ctx, c, frames, 1, "gateway.capabilities", "{}")
 		var cp map[string]any
 		json.Unmarshal(caps.Result, &cp)
-		if caps.Error != nil || cp["access"] != "read" || cp["backend"] != "uci-cli" {
+		if caps.Error != nil || cp["access"] != "write" || cp["backend"] != "uci-cli" {
 			t.Errorf("capabilities %s %+v", caps.Result, caps.Error)
 		}
 		if ow, _ := json.Marshal(cp["openwrt"]); string(ow) != `{"release":"24.10.8"}` {
@@ -123,10 +124,12 @@ func TestConfigPlaneOnTheSocket(t *testing.T) {
 		if bad.Error == nil || bad.Error.Code != rpc.CodeInvalidParams {
 			t.Errorf("bad params %+v", bad)
 		}
-		// Writes do not exist in this version: an older collector's answer.
+		// Writes over plain HTTP without the router's opt-in: refused.
 		apply := request(t, ctx, c, frames, 6, "gateway.config.apply", `{}`)
-		if apply.Error == nil || apply.Error.Code != rpc.CodeMethodNotFound {
+		if apply.Error == nil || apply.Error.Code != rpc.CodeCommandFailed {
 			t.Errorf("apply %+v", apply)
+		} else if d, _ := json.Marshal(apply.Error.Data); string(d) != `{"error":"insecure_transport"}` {
+			t.Errorf("apply data %s", d)
 		}
 
 		// A `uci set … && uci commit` on the router: the next poll or the
@@ -191,7 +194,7 @@ func TestConfigPlaneWithOldController(t *testing.T) {
 	}
 
 	plain := &Client{o: Options{Source: testSource()}}
-	h := plain.hello()
+	h := plain.hello(context.Background(), "")
 	if h.GatewayConfig != nil || strings.Contains(strings.Join(h.Capabilities, ","), "gateway_config") {
 		t.Fatalf("%+v", h)
 	}

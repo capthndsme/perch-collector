@@ -119,16 +119,25 @@ func TestAccessAndAllowlist(t *testing.T) {
 		t.Fatalf("write with read access: %v", err)
 	}
 
-	// write configured: effective read, writes refused (insecure first).
+	// write over an unverified transport: refused without the router's
+	// opt-in, and without a signature even with it.
 	p, _ = plane(t, root, Options{Access: AccessWrite, Allowlist: DefaultAllowlist})
-	if p.Access() != AccessRead || p.ConfiguredAccess() != AccessWrite {
+	if p.Access() != AccessWrite || p.ConfiguredAccess() != AccessWrite {
 		t.Fatal(p.Access())
 	}
 	if err := p.RequireAccess(AccessWrite); !errors.Is(err, ErrInsecure) {
 		t.Fatalf("%v", err)
 	}
+	p, _ = plane(t, root, Options{Access: AccessWrite, AllowInsecure: true})
+	var pe *PlaneError
+	if err := p.RequireAccess(AccessWrite); !errors.As(err, &pe) || pe.Code != CodeSignatureRequired {
+		t.Fatalf("%v", err)
+	}
+	if err := p.RequireWrite(true); err != nil {
+		t.Fatalf("signed: %v", err)
+	}
 	p, _ = plane(t, root, Options{Access: AccessWrite, TransportOK: true})
-	if err := p.RequireAccess(AccessWrite); !errors.Is(err, ErrNotManaged) || !strings.Contains(err.Error(), "reads only") {
+	if err := p.RequireAccess(AccessWrite); err != nil {
 		t.Fatalf("%v", err)
 	}
 	if err := p.RequireAccess("admin"); err == nil {
@@ -144,14 +153,15 @@ func TestAccessAndAllowlist(t *testing.T) {
 func TestHello(t *testing.T) {
 	root := newRoot(t)
 	p, _ := plane(t, root, Options{Access: AccessNone, TransportOK: true})
-	h := p.Hello()
+	h := p.Hello(context.Background(), "")
 	b, _ := json.Marshal(h)
 	if string(b) != `{"protocol":1,"access":"none","transportOk":true,"apply":{"state":"idle"},"results":[]}` {
 		t.Fatal(string(b))
 	}
 	p, _ = plane(t, root, Options{Access: AccessWrite, Allowlist: DefaultAllowlist})
-	h = p.Hello()
-	if h.Access != AccessRead || h.AccessConfigured != AccessWrite || h.TransportOK {
+	h = p.Hello(context.Background(), "c1")
+	if h.Access != AccessWrite || h.AccessConfigured != "" || h.TransportOK || h.Signing == nil || !h.Signing.Required ||
+		h.Signing.Challenge != "c1" || h.Signing.Key != "api_key" {
 		t.Fatalf("%+v", h)
 	}
 	// dhcp is allowlisted but has no file: absent. The ledger counts.
@@ -250,7 +260,7 @@ func TestCapabilities(t *testing.T) {
 	put(t, root, "tmp/.uci/firewall", "firewall.x.y='1'\n")
 	p, _ := plane(t, root, Options{Access: AccessRead, Allowlist: DefaultAllowlist, TransportOK: true, ConfirmMax: 600,
 		CaptureNetwork: "lan", CaptureDevice: "br-lan", StoragePath: "/etc/perch-collector"})
-	c := p.Capabilities(context.Background())
+	c := p.Capabilities(context.Background(), "")
 	if c.Access != AccessRead || c.AccessConfigured != AccessRead || !c.TransportOK || c.ConfirmMax != 600 {
 		t.Fatalf("%+v", c)
 	}
@@ -290,12 +300,12 @@ func TestCapabilities(t *testing.T) {
 	os.RemoveAll(filepath.Join(root, "usr/lib/opkg"))
 	pn, fu := plane(t, root, Options{Access: AccessNone, LookPath: func(string) (string, error) { return "", errors.New("no") }})
 	fu.hasUci = false
-	c = pn.Capabilities(context.Background())
+	c = pn.Capabilities(context.Background(), "")
 	if *c.Firewall != "fw3" || c.Backend != nil || c.PackageManager != nil || len(c.Hashes) != 0 || len(c.Configs) != 0 || c.Storage != nil {
 		t.Fatalf("%+v", c)
 	}
 	os.Remove(filepath.Join(root, "etc/openwrt_release"))
-	if pn.Capabilities(context.Background()).OpenWrt != nil {
+	if pn.Capabilities(context.Background(), "").OpenWrt != nil {
 		t.Fatal("openwrt without a release file")
 	}
 }

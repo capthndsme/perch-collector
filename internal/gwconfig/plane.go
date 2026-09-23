@@ -7,9 +7,11 @@
 // none (default), read or write in /etc/config/perch-collector, and only
 // the configs on its allowlist are ever read.
 //
-// This version reads only. Access `write` is accepted in the configuration
-// and reported as configured, but the effective access stays `read`: the
-// apply engine (stage, commit, confirm, rollback) comes later.
+// With config_access 'write' the controller also writes: the apply engine
+// (engine.go) stages the changes in a private rpcd session, commits them in
+// apply order, reconnects, and restores its flash snapshot unless the
+// controller confirms on the fresh connection. Writes need verified TLS, or
+// the router's config_allow_insecure opt-in plus signed requests (sign.go).
 package gwconfig
 
 import (
@@ -38,7 +40,7 @@ const (
 )
 
 // SupportedAccess is the highest access this build implements.
-const SupportedAccess = AccessRead
+const SupportedAccess = AccessWrite
 
 // LedgerConfig is the sync ledger (plan 1 section 9): written only by the
 // agent, readable whenever access allows reading.
@@ -69,15 +71,24 @@ type Options struct {
 	Access string
 	// Allowlist is managed_config; denylisted names are dropped.
 	Allowlist []string
-	// AllowInsecure is config_allow_insecure (reported; writes do not exist
-	// yet).
+	// AllowInsecure is config_allow_insecure: writes over an unverified
+	// transport are accepted when signed.
 	AllowInsecure bool
 	// ConfirmMax is config_confirm_max in seconds (reported).
 	ConfirmMax int
 	// TransportOK: server_url is https with certificate verification on.
 	TransportOK bool
-	// APIKey keys the secret fingerprints (the controller has it too).
+	// APIKey keys the secret fingerprints (the controller has it too) and,
+	// without SignKey, the signatures of config writes.
 	APIKey string
+	// SignKey is config_sign_key: a separate HMAC key for signed writes
+	// that never crosses the wire (the api_key does, as the Bearer token of
+	// every connection).
+	SignKey string
+	// ServerURL is the controller; its address gives the management path.
+	ServerURL string
+	// PackageAllow extends InstallAllowlist (list package_allow).
+	PackageAllow []string
 	// StoragePath is the path for the agent's local state (README section
 	// 7.18); only detected and reported here.
 	StoragePath string
@@ -92,8 +103,16 @@ type Options struct {
 	Ubus *ubus.Client
 	// LookPath finds binaries (backend detection); nil = exec.LookPath.
 	LookPath func(string) (string, error)
-	// Now is the clock; nil = time.Now.
+	// Now is the clock; nil = time.Now (or Clock's).
 	Now func() time.Time
+	// Clock drives the apply engine's deadlines; nil = the real one.
+	Clock Clock
+	// Backend writes configs; nil = rpcd when it serves `uci`, else files.
+	Backend Backend
+	// Run runs commands (ip, opkg, apk); nil = ubus.ExecRunner.
+	Run ubus.Runner
+	// LookupHost resolves the controller's name; nil = the default resolver.
+	LookupHost func(ctx context.Context, host string) ([]string, error)
 }
 
 // Plane serves the config plane. Safe for concurrent use.
@@ -108,12 +127,22 @@ type Plane struct {
 	w  watchState
 	// poke wakes Run: a trigger or a configure.
 	poke chan struct{}
+
+	clock       Clock
+	backend     Backend
+	backendOnce sync.Once
+	nonces      nonceCache
+	ap          applier
+	hooks       Hooks
 }
 
 // New prepares a plane.
 func New(o Options) *Plane {
+	if o.Clock == nil {
+		o.Clock = realClock{}
+	}
 	if o.Now == nil {
-		o.Now = time.Now
+		o.Now = o.Clock.Now
 	}
 	if o.Ubus == nil {
 		o.Ubus = ubus.New()
@@ -129,6 +158,13 @@ func New(o Options) *Plane {
 		ubus:   o.Ubus,
 		redact: uci.Redactor{Key: []byte(o.APIKey)},
 		poke:   make(chan struct{}, 1),
+		clock:  o.Clock,
+	}
+	p.ap.state = StateIdle
+	if o.Backend != nil {
+		p.backend = o.Backend
+	} else {
+		p.backend = &lazyBackend{p: p}
 	}
 	seen := map[string]bool{}
 	for _, c := range o.Allowlist {
@@ -154,7 +190,7 @@ func rooted(root, p string) string {
 // Access is the effective access: the configured one, capped at what this
 // build implements.
 func (p *Plane) Access() string {
-	if p.o.Access == AccessWrite && SupportedAccess == AccessRead {
+	if p.o.Access == AccessWrite && SupportedAccess != AccessWrite {
 		return AccessRead
 	}
 	return p.o.Access
@@ -207,8 +243,8 @@ func (e *AccessError) Unwrap() error { return e.Code }
 
 // RequireAccess is the shared guard for anything that needs a level of
 // access (plan 1 section 7: live operations of later features call it too).
-// write is always refused by this build; write over an unverified transport
-// also needs config_allow_insecure.
+// write over an unverified transport needs config_allow_insecure and a
+// signed request: callers that unwrap signed params use RequireWrite.
 func (p *Plane) RequireAccess(level string) error {
 	have := p.Access()
 	switch level {
@@ -221,10 +257,7 @@ func (p *Plane) RequireAccess(level string) error {
 		if p.o.Access != AccessWrite {
 			return &AccessError{Code: ErrNotManaged, Message: fmt.Sprintf("the router allows %s access only (config_access)", have)}
 		}
-		if !p.o.TransportOK && !p.o.AllowInsecure {
-			return &AccessError{Code: ErrInsecure, Message: "writes need https with a verified certificate (or config_allow_insecure '1')"}
-		}
-		return &AccessError{Code: ErrNotManaged, Message: "this perch-collector version reads only; writing configs needs a newer version"}
+		return p.writeGate(false)
 	}
 	return fmt.Errorf("gwconfig: unknown access level %q", level)
 }
@@ -240,11 +273,18 @@ func (p *Plane) Hashes() map[string]string {
 	return out
 }
 
-// ApplyState is the hello's apply block; `idle` until applies exist.
+// RequireWrite is RequireAccess(write) for a request whose params may be
+// signed: signed tells whether they were (Plane.Unwrap).
+func (p *Plane) RequireWrite(signed bool) error { return p.writeGate(signed) }
+
+// ApplyState is the hello's apply block: idle, applying, pending_confirm
+// (with the deadline) or rolling_back.
 type ApplyState struct {
-	State    string `json:"state"`
-	ApplyID  string `json:"applyId,omitempty"`
-	Deadline string `json:"deadline,omitempty"`
+	State     string `json:"state"`
+	ApplyID   string `json:"applyId,omitempty"`
+	Kind      string `json:"kind,omitempty"`
+	Deadline  string `json:"deadline,omitempty"`
+	Protected bool   `json:"protected,omitempty"`
 }
 
 // Hello is the gatewayConfig block of collector.hello (plan 1 section 4).
@@ -257,21 +297,29 @@ type Hello struct {
 	TransportOK      bool              `json:"transportOk"`
 	Hashes           map[string]string `json:"hashes,omitempty"`
 	Apply            ApplyState        `json:"apply"`
-	// Results are apply outcomes not acknowledged yet; always empty here.
-	Results []any `json:"results"`
+	// Results are apply outcomes not acknowledged yet (gateway.config.ack).
+	Results []Result `json:"results"`
+	// Signing says how this session's writes are signed (write access only).
+	Signing *Signing `json:"signing,omitempty"`
+	// Management is the path to the controller (README 3.8), read now.
+	Management *ManagementPath `json:"management,omitempty"`
 }
 
 // Hello builds the hello block and makes its hashes the baseline change
 // notifications are judged against: the controller compares a new
 // session's hello with what it last saw, and every later change is
-// notified.
-func (p *Plane) Hello() *Hello {
+// notified. challenge is the session's signing challenge.
+func (p *Plane) Hello(ctx context.Context, challenge string) *Hello {
 	h := &Hello{
 		Protocol:    Protocol,
 		Access:      p.Access(),
 		TransportOK: p.o.TransportOK,
-		Apply:       ApplyState{State: "idle"},
-		Results:     []any{},
+		Apply:       p.ApplyState(),
+		Results:     p.Results(),
+	}
+	if p.o.Access == AccessWrite {
+		h.Signing = p.SigningFor(challenge)
+		h.Management = p.ManagementPath(ctx)
 	}
 	if h.Access != p.o.Access {
 		h.AccessConfigured = p.o.Access

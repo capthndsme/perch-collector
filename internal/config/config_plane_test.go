@@ -41,13 +41,16 @@ func TestConfigPlaneYAMLAndEnv(t *testing.T) {
 	t.Setenv("PERCH_COLLECTOR_CONFIG_CONFIRM_MAX", "99999")
 	t.Setenv("PERCH_COLLECTOR_CAPTURE_NETWORK", "lan")
 	t.Setenv("PERCH_COLLECTOR_STORAGE_PATH", "/tmp/perch")
+	t.Setenv("PERCH_COLLECTOR_CONFIG_SIGN_KEY", " a-long-enough-signing-key ")
+	t.Setenv("PERCH_COLLECTOR_PACKAGE_ALLOW", "tcpdump-mini, tcpdump-mini,iperf3")
 	cfg, err = load(path, cliOverrides{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	cp = cfg.ConfigPlane
 	if cp.ConfigAccess != "write" || !reflect.DeepEqual(cp.ManagedConfigs, []string{"dhcp", "opennds"}) || !cp.ConfigAllowInsecure ||
-		cp.ConfigConfirmMax != 3600 || cp.CaptureNetwork != "lan" || cp.StoragePath != "/tmp/perch" {
+		cp.ConfigConfirmMax != 3600 || cp.CaptureNetwork != "lan" || cp.StoragePath != "/tmp/perch" ||
+		cp.ConfigSignKey != "a-long-enough-signing-key" || !reflect.DeepEqual(cp.PackageAllow, []string{"tcpdump-mini", "iperf3"}) {
 		t.Fatalf("%+v", cp)
 	}
 }
@@ -59,6 +62,7 @@ func TestConfigPlaneBadValues(t *testing.T) {
 		{"PERCH_COLLECTOR_STORAGE_PATH", "relative"},
 		{"PERCH_COLLECTOR_CONFIG_CONFIRM_MAX", "soon"},
 		{"PERCH_COLLECTOR_CONFIG_ALLOW_INSECURE", "maybe"},
+		{"PERCH_COLLECTOR_CONFIG_SIGN_KEY", "short"},
 	} {
 		t.Run(tt.env, func(t *testing.T) {
 			t.Setenv(tt.env, tt.val)

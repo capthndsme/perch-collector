@@ -43,6 +43,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "dhcp" {
 		os.Exit(dhcpCommand(os.Args[2:], os.Stdout, os.Stderr, &observe.Reader{}))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "config-guard" {
+		os.Exit(configGuardCommand(os.Args[2:], os.Stdout, os.Stderr, "", guardAPIKey))
+	}
 	if len(os.Args) > 1 && os.Args[1] == "gateway-config" {
 		os.Exit(gatewayConfigCommand(os.Args[2:], os.Stdout, os.Stderr, routerConfig))
 	}

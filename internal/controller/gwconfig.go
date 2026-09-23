@@ -3,16 +3,26 @@ package controller
 // The config plane on the collector socket (plan 1 section 4 of the managed
 // gateway; ARCHITECTURE.md "Config plane"): the gateway_config capability,
 // the hello's gatewayConfig block, agent.configure's gatewayConfig, the
-// read-only requests gateway.capabilities and gateway.config.read, and the
-// gateway.config.changed notification. Everything is additive: an older
-// controller drops the unknown hello key, sends no gatewayConfig, and never
-// calls the methods.
+// requests gateway.capabilities, gateway.config.read and the write methods
+// (apply, confirm, rollback, ack, package install), and the notifications
+// gateway.config.changed and gateway.config.result. Everything is additive:
+// an older controller drops the unknown hello key, sends no gatewayConfig,
+// and never calls the methods.
+//
+// An apply ends its session on purpose: once the reload settled, the plane
+// asks for a fresh connection (a surviving TCP connection proves nothing
+// about DNS, routing, the firewall or TLS), and the controller confirms on
+// the new session. While an apply waits for that, and for a while after a
+// rollback, the loop redials every applyRedial.
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
 	"log"
+	"time"
+
+	"github.com/coder/websocket"
 
 	"github.com/capthndsme/perch-agentkit/link"
 	"github.com/capthndsme/perch-agentkit/rpc"
@@ -32,12 +42,32 @@ const (
 	NotifyGatewayConfigChange = "gateway.config.changed"
 )
 
+// Redial waits around an apply.
+const (
+	// applyRedialFirst: the first dial after the plane dropped the session.
+	applyRedialFirst = 250 * time.Millisecond
+	// applyRedial: retries while an apply waits for its confirm (plan 1
+	// section 3.4 step 5: every 2 s until the deadline).
+	applyRedial = 2 * time.Second
+)
+
 func (c *Client) registerConfigPlane() {
 	if c.o.Config == nil {
 		return
 	}
 	c.dispatcher.Register(MethodGatewayCapabilities, c.handleGatewayCapabilities)
 	c.dispatcher.Register(MethodGatewayConfigRead, c.handleGatewayConfigRead)
+	for _, m := range gwconfig.WriteMethods {
+		method := m
+		c.dispatcher.Register(method, func(ctx context.Context, params json.RawMessage) (any, error) {
+			res, err := c.o.Config.ServeWrite(ctx, method, params, c.sessionRef(ctx))
+			if err != nil {
+				return nil, configRPCError(err)
+			}
+			return res, nil
+		})
+	}
+	c.o.Config.SetHooks(gwconfig.Hooks{Reconnect: c.reconnectAfterApply, Result: c.notifyResult})
 }
 
 // configCapabilities are the hello capabilities of the config plane.
@@ -48,13 +78,39 @@ func (c *Client) configCapabilities() []string {
 	return []string{CapabilityGatewayConfig}
 }
 
+// configSessionStarting records a session before its hello: requests are
+// matched to it by their context (the kit serves them with the session's).
+func (c *Client) configSessionStarting(gen uint64, s *link.Session) string {
+	if c.o.Config == nil {
+		return ""
+	}
+	challenge := gwconfig.NewChallenge()
+	c.mu.Lock()
+	if gen == c.gen {
+		c.sessCtx, c.sessChallenge = s.Context(), challenge
+	}
+	c.mu.Unlock()
+	return challenge
+}
+
+// sessionRef identifies the session a request came in on: its number
+// (counting from 1) and signing challenge; zero for a session that ended.
+func (c *Client) sessionRef(ctx context.Context) gwconfig.SessionRef {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.sessCtx != nil && ctx == c.sessCtx {
+		return gwconfig.SessionRef{Gen: c.gen + 1, Challenge: c.sessChallenge}
+	}
+	return gwconfig.SessionRef{}
+}
+
 // configHello is the hello's gatewayConfig block; its hashes become the
 // baseline of change notifications for the session.
-func (c *Client) configHello() *gwconfig.Hello {
+func (c *Client) configHello(ctx context.Context, challenge string) *gwconfig.Hello {
 	if c.o.Config == nil {
 		return nil
 	}
-	return c.o.Config.Hello()
+	return c.o.Config.Hello(ctx, challenge)
 }
 
 // startConfigPlane runs the change watcher for the client's lifetime.
@@ -83,7 +139,7 @@ func (c *Client) configConfigure(raw json.RawMessage) {
 	}
 }
 
-// configSessionOpened makes s the session change notifications go to.
+// configSessionOpened makes s the session notifications go to.
 func (c *Client) configSessionOpened(gen uint64, s *link.Session) {
 	if c.o.Config == nil {
 		return
@@ -102,9 +158,57 @@ func (c *Client) configSessionEnded() {
 		return
 	}
 	c.mu.Lock()
-	c.configSession = nil
+	c.configSession, c.sessCtx, c.sessChallenge = nil, nil, ""
 	c.mu.Unlock()
 	c.o.Config.Configure(gwconfig.Configure{Mode: gwconfig.ModeOff})
+}
+
+// reconnectAfterApply is the plane's Reconnect hook: close the session
+// (1000) and dial a fresh one at once.
+func (c *Client) reconnectAfterApply(reason string) {
+	c.mu.Lock()
+	s := c.configSession
+	c.redialNow = true
+	c.mu.Unlock()
+	if s == nil {
+		return // no session: the loop is dialing already
+	}
+	log.Printf("controller: %s: dropping the session to dial a fresh one", reason)
+	s.Close(websocket.StatusNormalClosure, "reconnecting after apply")
+}
+
+// applyRedialWait adjusts the wait before the next dial around an apply.
+func (c *Client) applyRedialWait(o outcome) outcome {
+	if c.o.Config == nil {
+		return o
+	}
+	c.mu.Lock()
+	now := c.redialNow
+	c.redialNow = false
+	c.mu.Unlock()
+	if now {
+		return outcome{wait: applyRedialFirst, note: "dialing a fresh connection after a config apply"}
+	}
+	// Refusals that retrying cannot fix keep their slow retry.
+	if c.o.Config.RedialFast() && o.wait > applyRedial && o.wait < slowRetry {
+		o.wait = applyRedial
+	}
+	return o
+}
+
+// notifyResult is the plane's Result hook: gateway.config.result.
+func (c *Client) notifyResult(r gwconfig.Result) bool {
+	c.mu.Lock()
+	s := c.configSession
+	c.mu.Unlock()
+	if s == nil {
+		return false
+	}
+	if err := s.Notify(gwconfig.NotifyResult, r); err != nil {
+		c.log.Debug("gateway.config.result not sent", "err", err)
+		return false
+	}
+	return true
 }
 
 // notifyConfigChanged sends gateway.config.changed on the current session.
@@ -124,7 +228,7 @@ func (c *Client) notifyConfigChanged(ch gwconfig.Changed) bool {
 }
 
 func (c *Client) handleGatewayCapabilities(ctx context.Context, _ json.RawMessage) (any, error) {
-	return c.o.Config.Capabilities(ctx), nil
+	return c.o.Config.Capabilities(ctx, c.sessionRef(ctx).Challenge), nil
 }
 
 type configReadParams struct {
@@ -146,7 +250,8 @@ func (c *Client) handleGatewayConfigRead(_ context.Context, params json.RawMessa
 }
 
 // configRPCError maps a plane refusal onto -32000 with data.error, the
-// hello's convention (collector-agent.md section 3.2).
+// hello's convention (collector-agent.md section 3.2); bad params are
+// -32602.
 func configRPCError(err error) error {
 	var ae *gwconfig.AccessError
 	if errors.As(err, &ae) {
@@ -156,5 +261,17 @@ func configRPCError(err error) error {
 		}
 		return &rpc.Error{Code: rpc.CodeCommandFailed, Message: ae.Message, Data: data}
 	}
-	return &rpc.Error{Code: rpc.CodeCommandFailed, Message: err.Error(), Data: map[string]any{"error": "read_failed"}}
+	var pe *gwconfig.PlaneError
+	if errors.As(err, &pe) {
+		data := map[string]any{"error": pe.Code}
+		for k, v := range pe.Data {
+			data[k] = v
+		}
+		code := rpc.CodeCommandFailed
+		if pe.Code == gwconfig.CodeBadParams {
+			code = rpc.CodeInvalidParams
+		}
+		return &rpc.Error{Code: code, Message: pe.Message, Data: data}
+	}
+	return &rpc.Error{Code: rpc.CodeCommandFailed, Message: err.Error(), Data: map[string]any{"error": "failed"}}
 }
