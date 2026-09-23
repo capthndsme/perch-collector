@@ -1,0 +1,78 @@
+Package: libc
+Version: 1.2.5-r4
+Depends: libgcc
+Status: install hold installed
+Essential: yes
+Architecture: x86_64
+Installed-Time: 1784877710
+Auto-Installed: yes
+
+Package: rpcd
+Version: 2025.09.01~bba95191-r2
+Depends: libc, libubus20250102, libubox20240329, libuci20250120, libblobmsg-json20240329, libjson-c5
+Status: install ok installed
+Architecture: x86_64
+Conffiles:
+ /etc/config/rpcd 1a40da0ebe45b1afd131dfc4650592913e38445e7fe42f96d3b95ad5151ac0e6
+Installed-Time: 1784877710
+
+Package: firewall4
+Version: 2024.12.18~18fc0ead-r1
+Depends: ucode (>= 2022.03.22), libc, kmod-nft-core, kmod-nft-fib, kmod-nft-offload, kmod-nft-nat, nftables-json, ucode, ucode-mod-fs, ucode-mod-ubus, ucode-mod-uci
+Provides: uci-firewall
+Status: install ok installed
+Architecture: x86_64
+Conffiles:
+ /etc/config/firewall 68e73e236b55846f84f668a53f1a1b1802d16adca3f325953051d977a05d383c
+ /etc/nftables.d/10-custom-filter-chains.nft af5cbfeb3e3b61d32ce134ae33d15330ee27da838e6f4fb9c717f034923b8b16
+ /etc/nftables.d/README 0656d83221c1d000f6b9655757c412f328e332b5bdf25efbfa88611d8104490d
+Installed-Time: 1784877710
+
+Package: dnsmasq
+Version: 2.93-r1
+Depends: libc, libubus20250102
+Status: install ok installed
+Architecture: x86_64
+Conffiles:
+ /etc/config/dhcp a3ab720d8cd674dced9d6c22963a900e700480d9e666285c52c0cf0a418ba5bb
+ /etc/dnsmasq.conf 1e6ab19c1ae5e70d609ac7b6246541d52042e4dee1892f825266507ef52d7dfd
+Installed-Time: 1784877710
+
+Package: odhcpd-ipv6only
+Version: 2025.10.02~b14cf98c-r3
+Depends: libc, libjson-c5, libubox20240329, libuci20250120, libubus20250102, libnl-tiny1
+Status: install ok installed
+Architecture: x86_64
+Installed-Time: 1784877710
+
+Package: sqm-scripts
+Version: 1.6.0-r1
+Depends: libc, tc, kmod-sched-cake, kmod-ifb, iptables, iptables-mod-ipopt
+Status: install ok installed
+Architecture: all
+Conffiles:
+ /etc/config/sqm e250c66bc56921b788e1db345897e1fc57cbff588ad368a7f3afc327489d5d49
+ /etc/sqm/sqm.conf 9f27a5fa7813cc1f7ca299851274dce139e373e1d3451e12441c26e370520c1a
+Installed-Time: 1790113398
+Auto-Installed: yes
+
+Package: luci
+Version: 26.259.57575~0aa55c7
+Depends: libc, luci-light, luci-app-package-manager
+Status: install user installed
+Architecture: all
+Installed-Time: 1790113391
+
+Package: kmod-sched-cake
+Version: 6.6.144-r1
+Depends: kernel (= 6.6.144~50daf8372d971124fb3519e8d87e02ae-r1), kmod-sched-core
+Status: install ok installed
+Architecture: x86_64
+Installed-Time: 1790113393
+Auto-Installed: yes
+
+Package: miniupnpd-nftables
+Version: 2.3.7-r2
+Status: deinstall ok not-installed
+Architecture: x86_64
+

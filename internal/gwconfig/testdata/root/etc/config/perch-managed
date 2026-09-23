@@ -1,0 +1,10 @@
+
+config synced 'k2v9'
+	option config 'network'
+	option section 'lan'
+	option domain 'networks'
+
+config synced 'broken'
+	option config 'network'
+
+config other 'x'

@@ -1,0 +1,4 @@
+
+config collector 'main'
+	option api_key '0123456789abcdef'
+	option config_access 'read'
