@@ -251,6 +251,32 @@ gateway_backup: redacted
 # (survives a reboot).
 # Default: "/var/lib/perch-collector/controller-address"
 controller_address_cache: /var/lib/perch-collector/controller-address
+
+# The guest portal (capability "portal", see "Guest portal" below): Perch's
+# own nftables enforcement and the guest pages, set up by the controller.
+# Nothing is captive until the controller configures a portal. "auto" = on
+# under OpenWrt with the WebSocket transport; "off" also removes any
+# enforcement a previous run left (tables, fw4 drop-in, dnsmasq file).
+# Default: "auto"
+portal: auto
+# The guest pages' TCP port (plain HTTP, all addresses; only the portal
+# devices may reach it). Not 53, 67 or 80.
+# Default: 2080
+portal_port: 2080
+# Where grants, offline vouchers, keys and the journal are snapshotted.
+# Default: "" (/etc/perch-collector/portal/state.db)
+portal_storage_path: ""
+# Seconds between snapshots of byte/time counters; 0 = by storage kind (300
+# on flash, every enforcement tick on eMMC and disks). Grants and journal
+# events are written at once. 0 or 5-3600.
+# Default: 0
+portal_flush_interval: 0
+# Mount point portal_storage_path must be on (a USB disk). When it is not
+# mounted (and carries no .perch-portal-storage marker), the state stays in
+# RAM and is snapshotted to the default path, never onto the empty mount
+# point on the router's flash.
+# Default: ""
+portal_storage_mount: ""
 ```
 
 ## Environment Variables
@@ -297,6 +323,11 @@ Configuration values can also be set via environment variables. They take the hi
 | `PERCH_COLLECTOR_CONNTRACK_FLUSH` | `conntrack_flush` (`auto`, `on`, `off`) |
 | `PERCH_COLLECTOR_GATEWAY_BACKUP` | `gateway_backup` (`redacted`, `full`, `off`) |
 | `PERCH_COLLECTOR_CONTROLLER_ADDRESS_CACHE` | `controller_address_cache` |
+| `PERCH_COLLECTOR_PORTAL` | `portal` (`auto`, `on`, `off`; UCI `portal_enabled`) |
+| `PERCH_COLLECTOR_PORTAL_PORT` | `portal_port` |
+| `PERCH_COLLECTOR_PORTAL_STORAGE_PATH` | `portal_storage_path` |
+| `PERCH_COLLECTOR_PORTAL_FLUSH_INTERVAL` | `portal_flush_interval` (seconds) |
+| `PERCH_COLLECTOR_PORTAL_STORAGE_MOUNT` | `portal_storage_mount` |
 
 The names before the rename, `GOCOLLECTOR_<NAME>`, are still read when
 `PERCH_COLLECTOR_<NAME>` is unset; the daemon logs one deprecation line per
@@ -769,6 +800,104 @@ resolver down, rebind protection), the collector dials that address instead
 and logs it once; the URL, the TLS server name and the `Host` header stay the
 controller's name, so certificate checks are unchanged. Not used with an
 HTTP proxy in the environment.
+
+## Guest portal (`portal`, gateway plan 4, owner decision 27)
+
+The router side of the Perch guest portal. The controller's domain and the
+HMAC scheme are in the controller repository, `docs/gateway/portal.md`; this
+section is the collector's half of the wire contract. Enforcement is Perch's
+own nftables (no openNDS): see ARCHITECTURE.md, "Guest portal".
+
+**Hello.** `capabilities` gains `portal`, and the hello carries its details:
+
+```json
+"portal": {"version":1, "keyEpoch":1, "configRevision":4, "port":2080, "maxPortals":16,
+  "enforcement": {"nft":true, "egress":true, "fw4Include":"ok", "nftset":false, "conntrack":true},
+  "storage": {"path":"/etc/perch-collector/portal/state.db", "kind":"flash", "fsType":"jffs2",
+    "device":"/dev/mtdblock6", "mountPoint":"/overlay", "persistent":true,
+    "flushIntervalSeconds":300, "writeThrough":false, "fallback":false, "warning":""}}
+```
+
+`keyEpoch`/`configRevision` are null until the first `portal.configure`.
+`egress:false` (kernel < 5.16) = downloads are not counted per MAC; `nftset:false`
+= dnsmasq lacks nftset (not dnsmasq-full), the walled garden's names are
+resolved by the collector every 5 minutes instead; `fw4Include`: `ok`,
+`missing` (fw4 did not include the drop-in, `auto_includes 0`), `none` (no fw4).
+`storage.kind`: `flash`, `emmc`, `disk`, `ram`, `unknown`.
+
+**Controller → collector** (requests):
+
+| Method | Params → result |
+|---|---|
+| `portal.configure` | `{revision, gatewayId, keys?:{epoch, gatewayKey}, settings:{enforceIntervalSeconds, usageIntervalSeconds, guestFailuresPerDevicePerMinute, guestFailuresPerDevicePerHour, guestFailuresPerPortalPerMinute, preauthDnsPerDevicePerMinute, offlineRedemption, relayRequestsPerClientPerMinute}, storage?:{path, flushIntervalSeconds, expectMount}, portals:[{portalId, name, network, device?, enabled, methods:{voucher,password}, templateSha256, cspConnectSrc[], privacyNotice, gatewayName, walledGarden[], ipBinding?, relay?}]}` → `{revision, keyEpoch, missingTemplates[], portals:[{portalId, device, state:'active'\|'disabled'\|'waiting_device'\|'error', listen, counting, issues[]}], enforcement, storage, issues[]}` |
+| `portal.template` | `{sha256, files:[{name, contentType, dataBase64}]}` → `{stored:true}` |
+| `portal.authorize` | docs §6.4 (`full, serverNow, ackedEventSeq, nonce, keyEpoch, groups[+sig], grants[+sig], revertExternals, sig`) → `{results:[{grantId, localRef?, revision, state:'active'\|'pending_device'\|'rejected', error?}], ended:[{grantId, localRef?}]}` |
+| `portal.deauthorize` | `{grantIds, reason, serverNow, nonce, keyEpoch, sig}` → `{ended:[grantId]}` |
+| `portal.vouchers` | `{enabled, serverNow, nonce, keyEpoch, vouchers[+sig], sig}` → `{stored, rejected}` |
+| `portal.sync` | `{ackedEventSeq}` → `{lastEventSeq, truncated, events[], grants[], externals[]}` (RouterPortalReport, docs §7) |
+
+`portal.configure` is the whole desired portal set of the gateway (a portal
+not listed is removed); `keys` is sent when the hello's `keyEpoch` differs,
+and the key never leaves the router again. `settings` are clamped like the
+controller's settings service; missing = default. `walledGarden` entries are
+host names (dnsmasq `nftset=`, or resolved by the collector) or IPv4/IPv6
+addresses and CIDRs (static interval sets). Custom templates are stored by
+digest; `missingTemplates` lists the digests the router lacks (send them with
+`portal.template`); a portal whose template is missing serves the builtin one.
+
+Every signed message is checked: key epoch (`key_epoch_mismatch`, `no_keys`),
+envelope signature (`bad_signature`), nonce (last 256 remembered, persisted:
+`replayed`), freshness (10 minutes behind the newest accepted `serverNow`:
+`stale`); all as -32000 with `data.error`. An item with a bad signature is
+refused on its own (`rejected`, `bad_signature`); a grant whose group is not
+held is `unknown_group`, one for a portal not configured `unknown_portal`.
+A full set ends every held grant it does not list (`grant_ended`, reason
+`removed`) except offline redemptions journaled after its `ackedEventSeq`;
+a listed grant with both `grantId` and `localRef` maps the router's offline
+grant to its id. Group `base*` usage is taken as of `ackedEventSeq`: ended
+usage journaled later is added on the router until a newer set covers it.
+
+**Collector → controller.** Requests (sent only while a session is open):
+
+| Method | Params → result |
+|---|---|
+| `portal.redeem` | `{portalId, mac, ip, hostname?, code, replace?}` (code normalized) → `{grant:{WireGrant+sig}, group:{WireGroup+sig}}` or `{queued:true}`; errors -32000 `data.error` ∈ `invalid_code, invalid_credentials, expired, exhausted, revoked, disabled, device_limit, already_authorized, wrong_portal, rate_limited` |
+| `portal.login` | `{portalId, mac, ip, hostname?, username, password, replace?}` → as `portal.redeem` |
+| `portal.relay` | `{portalId, op:'authorize'\|'status'\|'deauthorize', mac?, token, body?, clientIp}` → `{status, body}` |
+
+The redeem/login answer's grant and group must be signed like
+`portal.authorize` items; the router verifies them and applies the grant at
+once (an existing group keeps its `base*` until the next full set). No answer
+within 8 s, or no session: the router redeems offline from its held list
+(decision 20) and journals `offline_redeemed`; logins need the controller.
+
+Notifications: `portal.event` = one journal entry as it happens (RouterEvent:
+`grant_active`, `grant_ended` with `reason` `expired|quota|router_deauth|logout|moved|removed`
+and final `bytesUp/bytesDown/activeSeconds`, `external_auth`, `offline_redeemed`
+with `voucherId, localRef, placement, demotedGrantId?, demotedLocalRef?, startsAt?, expiresAt?, ip?, hostname?`);
+`portal.sessions` every `usageIntervalSeconds` while any grant is live:
+`{collectedAt, clients:[GrantUsage & {hostname, sessionStartedAt}], preauthCount, portals:[{portalId, authenticated, preauth}]}`.
+The journal (1000 entries, persisted) is the source of truth; notifications
+are best effort, `portal.sync` settles.
+
+**Guest pages** (`http://<portal address>:<portal_port>`): `GET /` (login or
+status page, `?m=<message_code>`, `?o=<origin url>`), `POST /portal/voucher`
+`{code, replace?}`, `POST /portal/login` `{username, password, replace?}`,
+`POST /portal/logout` (form posts answer 303 `/?m=<code>`; JSON posts
+`200 {ok, status}` or `{ok:false, error, message}` with 400/401/403/409/410/429/503),
+`GET /portal/api/status` (`application/captive+json`: `captive, user-portal-url,
+seconds-remaining?, bytes-remaining?, can-extend-session:false, perch:{state, mac, methods, grant}`),
+`GET /assets/<templateSha256>/<file>` (immutable), and with `relay` the Paid
+Hotspot API relay `POST /portal/v1/authorizations`, `GET|DELETE
+/portal/v1/authorizations/<mac>` (Bearer token passed to the controller, never
+stored; 401 `invalid_api_token`, 404 `relay_disabled`, 429, 503). Any other
+host name (a request that reached the pages through the port-80 redirect) is
+answered with 302 to the portal (`?o=`), which is what opens the Android,
+Apple, Windows and Firefox login sheets; once the device is online such a
+probe gets its success answer (204, `Success`, …). Abuse limits: failed codes
+and logins only, per MAC 5/min and 20/h, per portal 60/min (settings), 429 +
+`Retry-After`; POSTs need `Origin`/`Referer` of the portal or none; bodies
+≤ 4 KiB; 16 requests at a time; 10 s timeouts; limiter maps bounded (4096).
 
 ## Packaged deployments
 

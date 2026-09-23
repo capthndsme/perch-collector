@@ -235,6 +235,91 @@ falls back to the address of the last accepted session when resolution
 fails. The TLS server name and Host header come from the URL, so they stay
 the name.
 
+## Guest portal
+
+`internal/portal` is the router side of the Perch guest portal (wire contract
+in CONFIG.md, "Guest portal"; controller domain in the controller repository,
+`docs/gateway/portal.md`). Owner decision 27: enforcement is Perch's own
+nftables, never openNDS, so several portals run side by side (one per guest
+network: a plain device, a bridge, a VLAN), IPv6 is gated in the same pass,
+and nothing depends on DHCP leases.
+
+```
+table inet perch_portal (collector-owned; fw4 reload/restart leave it alone)
+  per portal p<id>: set p<id>_auth (MACs)  [p<id>_bind4 MAC.IPv4 when ipBinding]
+                    walled garden: p<id>_wg4/_wg6 (timeout 1h, dnsmasq nftset= or resolved by
+                    the collector), p<id>_wgnet4/_wgnet6 (static CIDRs); p<id>_dns (DNS meter)
+  prerouting (dstnat-5):  iifname <dev> → not authorised, tcp 80, not walled → redirect :2080
+  forward   (filter-5):   iifname <dev> → authorised (or walled garden) returns to fw4, else reject
+  input     (filter-5):   iifname <dev> → DNS (rate-limited per MAC before auth), DHCP,
+                          DHCPv6 when the network serves it, :2080, ICMP; everything else rejected
+table netdev perch_portal_acct
+  per portal device: ingress / egress chains at priority -500 (before any flowtable),
+  router-local and multicast traffic excluded, per-MAC counter sets p<id>_up / p<id>_down
+/usr/share/nftables.d/chain-pre/input/30-perch-portal.nft
+  accepts the same ports in fw4's input chain on the portal devices (fw4 includes it on
+  every reload; a zone with input REJECT would otherwise refuse the guest pages)
+```
+
+`Engine` (engine.go) holds the working set in Go and writes every change
+through to the store; one mutex serialises the RPC handlers, the guest pages
+and the tick. `applyStructuralLocked` re-renders both tables in one nft
+transaction (create, delete, create) after folding the old counters into the
+grants and carrying the walled garden's resolved addresses over; it runs at
+start, on `portal.configure` and whenever a table is found missing. Single
+grant changes are element transactions (`ElementOps`; a delete is preceded by
+an idempotent add so it cannot fail on a missing element).
+
+Tick (tick.go, every `enforceIntervalSeconds`): read both tables as JSON; a
+missing table is re-applied (not a deauth); a MAC in an auth set without a
+Perch grant was added outside Perch and is removed and journaled
+(`external_auth`, decision 25); a Perch MAC missing from its set was removed
+outside Perch and its grant ends `router_deauth`; counter deltas go to each
+device's current grant (a counter below its baseline was reset); a group that
+moved traffic is charged the tick's time once, on its lowest-order grant;
+neighbours activate pending grants and teach addresses; exhausted groups end
+every device. Ending a grant removes the MAC, flushes the device's conntrack
+entries (every known address; deauth leaves established flows running
+otherwise), journals `grant_ended` with the final counters and keeps its usage
+for the group until the controller's `base*` includes it.
+
+Store (store.go, decision 18): SQLite (mattn/go-sqlite3, the amalgamation
+linked into the static cgo build, `sqlite_omit_load_extension`; a pure-Go
+SQLite would add several MB and newer releases need Go > 1.22) in RAM,
+snapshotted with `VACUUM INTO` + fsync + rename. Grant-class writes (grants,
+groups, vouchers, journal, keys, nonces, config) are snapshotted at once;
+counters every flush interval. storage.go finds what backs the path
+(`/proc/mounts`: overlay → its upper layer, jffs2/ubifs/mtd = flash, mmcblk =
+eMMC, sd/nvme = disk, tmpfs = RAM) and picks the default interval; a path
+under /mnt, /media, /srv or /data that is not mounted, or an
+`portal_storage_mount` that is not mounted (and has no marker), falls back to
+the default path. Clock (clock.go): the controller's `serverNow` offset is
+applied beyond 2 s; after a reboot without NTP time runs on from the last
+`savedAt`.
+
+Guest pages (fas.go): one `http.Server` on `:portal_port`; the portal is the
+one whose device holds the connection's local address, the guest the
+neighbour-table MAC of the TCP source on that device (a LAN host reaching the
+address gets 403). Templates (template.go) are the controller's builtin set
+(byte-identical, digest of the empty set) or a stored custom set, checked
+again on arrival, rendered with escaped variables under a CSP; SVG assets get
+`default-src 'none'`, template HTML is never served as an asset.
+
+Offline redemption (guest.go): the controller's `planVoucherRedemption` on the
+router (groups.go ports its group math): verifier lookup, status, device
+slots (a voucher follows the newest device, the first one leaves `moved`),
+time before data (a time voucher over a running data bucket swaps it into
+the queue; anything else queues), a first-use wall clock started at
+redemption, a `localRef` grant and an `offline_redeemed` journal entry.
+Offline-queued entitlements are promoted by the router only while the
+controller is away.
+
+The controller hook is `controller.Options.Portal`: the client registers the
+portal.* handlers, adds the hello details, and hands the session to the engine
+(`SetAgent`) while it is open. `main_portal.go` builds it (portal auto = OpenWrt
+with the WebSocket transport), re-applies the held grants before any
+controller is reached, and with `portal off` removes what a previous run left.
+
 ## Graceful Shutdown
 
 ```
