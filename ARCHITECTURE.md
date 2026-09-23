@@ -323,7 +323,11 @@ the default path. Clock (clock.go): the controller's `serverNow` offset is
 applied beyond 2 s; after a reboot without NTP time runs on from the last
 `savedAt`.
 
-Guest pages (fas.go): one `http.Server` on `:portal_port`; the portal is the
+Guest pages (fas.go): one `http.Server` with a listener per router address
+(IPv4 and global IPv6) on the enforcing portals' devices, opened and closed
+as portals and addresses change (configure, start, every tick; a failed bind
+is retried on the next tick); nothing listens while no portal runs, and
+never on the wildcard address. The portal is the
 one whose device holds the connection's local address, the guest the
 neighbour-table MAC of the TCP source on that device (a LAN host reaching the
 address gets 403). Templates (template.go) are the controller's builtin set

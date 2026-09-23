@@ -199,6 +199,7 @@ func (e *Engine) Tick(ctx context.Context) {
 		e.promoteQueuedLocked(now, ops)
 	}
 	e.applyOpsLocked(ops)
+	e.syncListenLocked()
 	e.resolveWalledGardenLocked(ctx, wall)
 	e.sendSessionsLocked(wall, now)
 	e.snapshotIfDue()

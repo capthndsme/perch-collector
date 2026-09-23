@@ -11,14 +11,19 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 // The guest pages (the "FAS", plan 4 §8) on portal_port, plain HTTP
-// (decision 24). One listener on every address; the portal is the one
-// whose device holds the connection's local address, and the guest is the
+// (decision 24). One listener per router address of the enforcing portals'
+// networks (never the wildcard: the LAN and the WAN do not see the port),
+// opened and closed as portals come and go, none while no portal runs.
+// The portal is the one whose device holds the connection's local address,
+// and the guest is the
 // MAC behind the TCP source address on that device (the neighbour table),
 // never anything the request says. Port 80 of unauthorised guests is
 // redirected here by perch_portal's dstnat chain, so the operating systems'
@@ -99,16 +104,24 @@ type FAS struct {
 	log    *slog.Logger
 	sem    chan struct{}
 	server *http.Server
+	port   int
+
+	mu        sync.Mutex
+	listeners map[netip.Addr]net.Listener
+	failed    map[netip.Addr]string // last bind error per address (logged once)
+	closed    bool
+	listen    func(network, address string) (net.Listener, error)
 }
 
-// NewFAS builds the server for addr (":2080").
-func NewFAS(e *Engine, addr string, log *slog.Logger) *FAS {
+// NewFAS builds the server for the guest pages' port. It listens on
+// nothing until Sync names the addresses (Engine.SetListener).
+func NewFAS(e *Engine, port int, log *slog.Logger) *FAS {
 	if log == nil {
 		log = slog.Default()
 	}
-	f := &FAS{e: e, log: log, sem: make(chan struct{}, fasMaxConcurrent)}
+	f := &FAS{e: e, log: log, sem: make(chan struct{}, fasMaxConcurrent), port: port,
+		listeners: map[netip.Addr]net.Listener{}, failed: map[netip.Addr]string{}, listen: net.Listen}
 	f.server = &http.Server{
-		Addr:              addr,
 		Handler:           f,
 		ReadTimeout:       fasTimeout,
 		ReadHeaderTimeout: 5 * time.Second,
@@ -120,14 +133,77 @@ func NewFAS(e *Engine, addr string, log *slog.Logger) *FAS {
 	return f
 }
 
-// ListenAndServe runs the server (returns http.ErrServerClosed on Shutdown).
-func (f *FAS) ListenAndServe() error { return f.server.ListenAndServe() }
+// Sync listens on exactly addrs (the portals' router addresses): it opens
+// what is missing (a bind that fails is retried on the next Sync, each
+// tick) and closes what is no longer wanted. Connections in flight on a
+// closed listener finish.
+func (f *FAS) Sync(addrs []netip.Addr) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closed {
+		return
+	}
+	want := map[netip.Addr]bool{}
+	for _, a := range addrs {
+		a = a.Unmap()
+		want[a] = true
+		if f.listeners[a] != nil {
+			continue
+		}
+		hp := netip.AddrPortFrom(a, uint16(f.port)).String()
+		l, err := f.listen("tcp", hp)
+		if err != nil {
+			if f.failed[a] != err.Error() {
+				f.failed[a] = err.Error()
+				f.log.Warn("portal: guest pages cannot listen", "address", hp, "err", err)
+			}
+			continue
+		}
+		delete(f.failed, a)
+		f.listeners[a] = l
+		f.log.Info("portal: guest pages listening", "address", hp)
+		go func() { _ = f.server.Serve(l) }()
+	}
+	for a, l := range f.listeners {
+		if !want[a] {
+			_ = l.Close()
+			delete(f.listeners, a)
+			f.log.Info("portal: guest pages stopped listening", "address", netip.AddrPortFrom(a, uint16(f.port)).String())
+		}
+	}
+	for a := range f.failed {
+		if !want[a] {
+			delete(f.failed, a)
+		}
+	}
+}
+
+// Listening is the addresses listened on now (sorted).
+func (f *FAS) Listening() []netip.Addr {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]netip.Addr, 0, len(f.listeners))
+	for a := range f.listeners {
+		out = append(out, a)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Less(out[j]) })
+	return out
+}
 
 // Serve runs the server on a listener (tests).
 func (f *FAS) Serve(l net.Listener) error { return f.server.Serve(l) }
 
-// Shutdown stops the server.
-func (f *FAS) Shutdown(ctx context.Context) error { return f.server.Shutdown(ctx) }
+// Shutdown stops the server and every listener.
+func (f *FAS) Shutdown(ctx context.Context) error {
+	f.mu.Lock()
+	f.closed = true
+	for a, l := range f.listeners {
+		_ = l.Close()
+		delete(f.listeners, a)
+	}
+	f.mu.Unlock()
+	return f.server.Shutdown(ctx)
+}
 
 func securityHeaders(h http.Header) {
 	h.Set("X-Content-Type-Options", "nosniff")

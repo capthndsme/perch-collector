@@ -242,6 +242,9 @@ type Engine struct {
 	agentMu sync.Mutex
 	agent   Agent
 
+	// listener opens and closes the guest pages' listeners (FAS.Sync).
+	listener func([]netip.Addr)
+
 	lastTick     time.Time
 	lastSessions time.Time
 	lastResolve  time.Time
@@ -351,6 +354,49 @@ func (e *Engine) SetAgent(a Agent) {
 	e.agentMu.Unlock()
 }
 
+// SetListener sets the function that makes the guest pages listen on the
+// enforcing portals' router addresses (FAS.Sync); it is called at once and
+// whenever the portals or their addresses may have changed (configure,
+// start, every tick).
+func (e *Engine) SetListener(f func([]netip.Addr)) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.listener = f
+	e.syncListenLocked()
+}
+
+// ListenAddrs are the addresses the guest pages listen on: the router's
+// addresses on each enforcing portal's device (IPv6 link-local left out:
+// the port-80 redirect never lands on one). None without a portal.
+func (e *Engine) ListenAddrs() []netip.Addr {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.listenAddrsLocked()
+}
+
+func (e *Engine) listenAddrsLocked() []netip.Addr {
+	seen := map[netip.Addr]bool{}
+	var out []netip.Addr
+	for _, p := range e.enforcing() {
+		for _, pfx := range p.addrs {
+			a := pfx.Addr().Unmap()
+			if a.IsLinkLocalUnicast() || a.IsUnspecified() || seen[a] {
+				continue
+			}
+			seen[a] = true
+			out = append(out, a)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Less(out[j]) })
+	return out
+}
+
+func (e *Engine) syncListenLocked() {
+	if e.listener != nil {
+		e.listener(e.listenAddrsLocked())
+	}
+}
+
 func (e *Engine) currentAgent() Agent {
 	e.agentMu.Lock()
 	defer e.agentMu.Unlock()
@@ -366,6 +412,7 @@ func (e *Engine) Start(ctx context.Context) {
 	e.syncSystemLocked(ctx)
 	e.structural = true
 	e.applyStructuralLocked()
+	e.syncListenLocked()
 	n := 0
 	for _, g := range e.grants {
 		if g.Live() {
@@ -503,6 +550,7 @@ func (e *Engine) Configure(ctx context.Context, c Config) (ConfigureResult, erro
 	}
 	// A new walled garden is resolved on the next tick (without nftset).
 	e.lastResolve = time.Time{}
+	e.syncListenLocked()
 	return e.configureResultLocked(issues), nil
 }
 

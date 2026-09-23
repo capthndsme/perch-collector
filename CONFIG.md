@@ -259,8 +259,9 @@ controller_address_cache: /var/lib/perch-collector/controller-address
 # enforcement a previous run left (tables, fw4 drop-in, dnsmasq file).
 # Default: "auto"
 portal: auto
-# The guest pages' TCP port (plain HTTP, all addresses; only the portal
-# devices may reach it). Not 53, 67 or 80.
+# The guest pages' TCP port (plain HTTP). Listened on only on the router's
+# addresses on the portal networks, and only while a portal runs there;
+# nothing listens without a portal. Not 53, 67 or 80.
 # Default: 2080
 portal_port: 2080
 # Where grants, offline vouchers, keys and the journal are snapshotted.
