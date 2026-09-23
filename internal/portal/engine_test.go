@@ -112,9 +112,12 @@ func timeGroup(key string, expiresAt int64) WireGroup {
 	return WireGroup{GroupKey: key, DurationMode: ModeWallClock, ExpiresAt: &expiresAt, DurationSeconds: &d, MaxDevices: 1, Revision: 1}
 }
 
-func configured(t *testing.T) (*Engine, *fakeSystem, *controllerSide, *testClock) {
+func configured(t *testing.T, setup ...func(*fakeSystem)) (*Engine, *fakeSystem, *controllerSide, *testClock) {
 	t.Helper()
 	sys := newFakeSystem()
+	for _, f := range setup {
+		f(sys)
+	}
 	e, tc := newTestEngine(t, sys, filepath.Join(t.TempDir(), "state.db"))
 	c := newController(t)
 	res, err := e.Configure(context.Background(), c.configure(guestPortal(3)))
@@ -162,8 +165,13 @@ func TestConfigureRendersAndWritesDropIns(t *testing.T) {
 	}
 }
 
+// TestAuthorizeTickCountAndQuota: a kernel without quota objects; the tick
+// alone enforces the quota (and overshoots by what one tick moved).
 func TestAuthorizeTickCountAndQuota(t *testing.T) {
-	e, sys, c, _ := configured(t)
+	e, sys, c, _ := configured(t, func(s *fakeSystem) { s.noQuota = true })
+	if e.enf.Quota {
+		t.Fatal("quota probe passed on a kernel without quotas")
+	}
 	ctx := context.Background()
 	gid := int64(42)
 	res, err := e.Authorize(ctx, c.authorize(true, 0,

@@ -125,6 +125,9 @@ type Enforcement struct {
 	// collector resolves the names itself every few minutes.
 	Nftset    bool `json:"nftset"`
 	Conntrack bool `json:"conntrack"`
+	// Quota: data quotas are cut by the kernel (named nft quotas and
+	// object maps); without it the tick alone enforces them.
+	Quota bool `json:"quota"`
 }
 
 // ConfigureResult is portal.configure's result.
@@ -228,6 +231,14 @@ type Engine struct {
 
 	externals map[string]*External // portal|mac → still present
 
+	// The kernel's data cut (quota.go): group key → quota object, portal →
+	// MAC → object name, the generation counter, and groups whose object is
+	// re-seeded with the next apply.
+	kq       map[string]*kernelQuota
+	kqMap    map[int64]map[string]string
+	kqGen    int64
+	kqReseed map[string]bool
+
 	agentMu sync.Mutex
 	agent   Agent
 
@@ -266,6 +277,7 @@ func New(o Options) (*Engine, error) {
 		portals: map[int64]*portalRuntime{}, grants: map[int64]*Grant{}, groups: map[string]*Group{},
 		vouchers: map[int64]*Voucher{}, voucherByVerifier: map[string]int64{},
 		applied: map[int64]map[string]bool{}, externals: map[string]*External{},
+		kq: map[string]*kernelQuota{}, kqMap: map[int64]map[string]string{},
 		tickNow: time.Now, leases: o.Leases,
 		failMin: NewWindow(5, time.Minute), failHour: NewWindow(20, time.Hour), failPortal: NewWindow(60, time.Minute),
 		relayLimit: NewWindow(60, time.Minute), relayPortal: NewWindow(600, time.Minute),
@@ -302,6 +314,7 @@ func (e *Engine) Probe(ctx context.Context) {
 	defer e.mu.Unlock()
 	e.enf.Nft = e.sys.Apply("table inet perch_portal_probe\ndelete table inet perch_portal_probe\n") == nil
 	e.enf.Egress = e.enf.Nft && ProbeEgress(e.sys, "lo")
+	e.enf.Quota = e.enf.Nft && ProbeQuota(e.sys)
 	if out, err := e.sys.Command(ctx, "dnsmasq", "--version"); err == nil {
 		e.enf.Nftset = DnsmasqHasNftset(string(out))
 	}
@@ -368,7 +381,7 @@ func (e *Engine) Start(ctx context.Context) {
 func (e *Engine) Run(ctx context.Context) {
 	for {
 		e.mu.Lock()
-		every := time.Duration(e.settings.EnforceIntervalSeconds) * time.Second
+		every := e.nextTickLocked()
 		e.mu.Unlock()
 		t := time.NewTimer(every)
 		select {
@@ -613,6 +626,9 @@ func (e *Engine) resolvePortalsLocked(ctx context.Context) {
 			if !e.enf.Egress {
 				p.issues = append(p.issues, "the kernel has no netdev egress hook (5.16+): downloads are not counted, quotas count uploads only")
 			}
+			if e.enf.Nft && !e.enf.Quota {
+				p.issues = append(p.issues, "the kernel has no nft quota objects (nft_quota, nft_objref): data quotas are enforced by the tick only and may overshoot by one tick")
+			}
 		}
 		if !e.enf.Nft {
 			p.state = "error"
@@ -810,12 +826,13 @@ func (e *Engine) applyStructuralLocked() error {
 			return fmt.Errorf("removing the portal tables: %w", err)
 		}
 		e.applied = map[int64]map[string]bool{}
+		e.kq, e.kqMap, e.kqReseed = map[string]*kernelQuota{}, map[int64]map[string]string{}, nil
 		e.structural = false
 		return nil
 	}
 	now := e.clock.Now()
 	// Fold what the old counters hold since the last read.
-	if sets, err := e.readCountersLocked(); err == nil {
+	if sets, _, err := e.readCountersLocked(); err == nil {
 		e.foldCountersLocked(sets, now, 0)
 	}
 	carried := map[string][]string{}
@@ -829,7 +846,13 @@ func (e *Engine) applyStructuralLocked() error {
 		}
 	}
 	v4, v6 := e.routerAddrs()
-	spec := RulesetSpec{Local4: v4, Local6: v6, Egress: e.enf.Egress}
+	spec := RulesetSpec{Local4: v4, Local6: v6, Egress: e.enf.Egress, Quota: e.enf.Quota}
+	// The data cut, seeded with what each group has left after the fold.
+	var quotaMap map[int64]map[string]string
+	var quotaObjs map[string]*kernelQuota
+	if spec.Quota {
+		spec.Quotas, quotaMap, quotaObjs = e.quotaSpecLocked()
+	}
 	for _, p := range portals {
 		id := p.cfg.PortalID
 		auth := e.desiredAuth(id)
@@ -840,6 +863,7 @@ func (e *Engine) applyStructuralLocked() error {
 		for mac := range auth {
 			ps.Auth = append(ps.Auth, mac)
 		}
+		ps.Quota = quotaMap[id]
 		if p.cfg.IPBinding {
 			for _, g := range e.grants {
 				if g.PortalID == id && g.Live() && g.Bound != "" {
@@ -857,6 +881,10 @@ func (e *Engine) applyStructuralLocked() error {
 	e.applied = map[int64]map[string]bool{}
 	for _, p := range portals {
 		e.applied[p.cfg.PortalID] = e.desiredAuth(p.cfg.PortalID)
+	}
+	e.kq, e.kqMap, e.kqReseed = map[string]*kernelQuota{}, map[int64]map[string]string{}, nil
+	if spec.Quota {
+		e.kq, e.kqMap = quotaObjs, quotaMap
 	}
 	// Fresh tables count from zero.
 	for _, g := range e.grants {

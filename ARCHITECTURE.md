@@ -256,6 +256,9 @@ table inet perch_portal (collector-owned; fw4 reload/restart leave it alone)
 table netdev perch_portal_acct
   per portal device: ingress / egress chains at priority -500 (before any flowtable),
   router-local and multicast traffic excluded, per-MAC counter sets p<id>_up / p<id>_down
+  data cut: quota q<group>_<gen> { over <bytes the group has left> } per group with a data
+  quota, map p<id>_quota (MAC → quota), `quota name ether saddr|daddr map @p<id>_quota drop`
+  before the counters (upload + download together, like the group's quota)
 /usr/share/nftables.d/chain-pre/input/30-perch-portal.nft
   accepts the same ports in fw4's input chain on the portal devices (fw4 includes it on
   every reload; a zone with input REJECT would otherwise refuse the guest pages)
@@ -282,6 +285,29 @@ every device. Ending a grant removes the MAC, flushes the device's conntrack
 entries (every known address; deauth leaves established flows running
 otherwise), journals `grant_ended` with the final counters and keeps its usage
 for the group until the controller's `base*` includes it.
+
+Exact data quotas (quota.go). The tick alone would overshoot a data quota by
+what a device moves in one tick (30 MB at 52 Mbit/s and 5 s, lab 2026-09-23),
+so the kernel cuts the device off at the byte: every group with a data quota
+and a device on a counting portal has one named nft quota object seeded with
+the bytes the group has left, shared by the group's devices through the
+portal's MAC → quota map. The rule runs before the counters, so the quota
+consumes exactly what the counters count and a dropped packet is not usage.
+The map follows every grant change in the same transaction as the auth sets
+(a device is cut from its first byte). The tick keeps the books: it reads
+the counters and the quota objects in one dump; a group the kernel cut off is
+used up (the unusable remainder under one packet, at most 256 KiB, is charged
+to its current grant so the controller sees the quota used) and its grants
+end like any exhausted group (deauth, conntrack flush, `grant_ended` quota);
+a group whose kernel remainder drifted from the books by more than 256 KiB
+(the controller moved its `base*`, another router used some of a shared
+voucher) is re-seeded: a quota object's limit cannot change in place, so the
+next generation is created, the MACs repointed and the old object deleted in
+one transaction. Every full re-render folds the counters first and seeds the
+objects with what is left, so a collector restart neither loses nor forgives
+bytes. While any group is within 10 % of its quota the tick runs every
+second. A kernel without `nft_quota`/`nft_objref` (probe at start,
+`enforcement.quota`) falls back to the tick alone.
 
 Store (store.go, decision 18): SQLite (mattn/go-sqlite3, the amalgamation
 linked into the static cgo build, `sqlite_omit_load_extension`; a pure-Go

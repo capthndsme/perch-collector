@@ -273,21 +273,40 @@ func (e *Engine) unauthorizeMACLocked(portalID int64, mac string, ops *ElementOp
 // applyOpsLocked runs queued element changes; on failure the next tick
 // re-renders everything.
 func (e *Engine) applyOpsLocked(ops *ElementOps) {
-	if ops.Empty() || !e.enf.Nft {
-		return
-	}
-	if len(e.enforcing()) == 0 {
+	if !e.enf.Nft || len(e.enforcing()) == 0 {
 		return
 	}
 	if e.structural {
 		_ = e.applyStructuralLocked()
 		return
 	}
-	if err := e.sys.Apply(ops.Script()); err != nil {
+	// The data cut follows every change of the sets in the same
+	// transaction: a device authorised here is cut at its quota from its
+	// first byte, not from the next tick.
+	script := &ElementOps{}
+	var nextQ map[string]*kernelQuota
+	var nextQMap map[int64]map[string]string
+	if e.enf.Quota {
+		pre, post := &ElementOps{}, &ElementOps{}
+		nextQ, nextQMap = e.quotaOpsLocked(pre, post, e.kqReseed)
+		script.Append(pre)
+		script.Append(ops)
+		script.Append(post)
+	} else {
+		script.Append(ops)
+	}
+	if script.Empty() {
+		e.kqReseed = nil
+		return
+	}
+	if err := e.sys.Apply(script.Script()); err != nil {
 		e.log.Warn("portal: set update failed; re-rendering the ruleset", "err", err)
 		e.structural = true
 		_ = e.applyStructuralLocked()
 		return
+	}
+	if e.enf.Quota {
+		e.kq, e.kqMap, e.kqReseed = nextQ, nextQMap, nil
 	}
 	for _, p := range e.enforcing() {
 		e.applied[p.cfg.PortalID] = e.desiredAuth(p.cfg.PortalID)

@@ -27,7 +27,13 @@ import (
 //     egress chain at priority -500 (before any flowtable fast path) that
 //     count every authorised MAC's forwarded bytes in per-element set
 //     counters: upload keyed by source MAC, download by destination MAC,
-//     traffic to and from the router itself excluded.
+//     traffic to and from the router itself excluded. Data quotas are cut
+//     here too, exactly: one named `quota` object per group with a data
+//     quota (over the bytes the group has left), shared by its devices
+//     through a per-portal MAC → quota map, and a rule before the counters
+//     that drops a device's packets once its group's quota is used up
+//     (upload and download together, like the group's quota). The tick
+//     still ends the grant, flushes its connections and reports it.
 //
 // fw4's own input chain still has the last word on the router's ports, so
 // a drop-in at /usr/share/nftables.d/chain-pre/input/ accepts the portal's
@@ -63,6 +69,15 @@ type PortalSpec struct {
 	DNSPerMinute int
 	// DHCPv6 opens 547 on the input gate.
 	DHCPv6 bool
+	// Quota maps a MAC to the name of its group's quota object (only MACs
+	// whose current grant's group has a data quota).
+	Quota map[string]string
+}
+
+// QuotaSpec is one kernel quota object: a group's remaining bytes.
+type QuotaSpec struct {
+	Name  string
+	Bytes int64
 }
 
 // MACIP is one binding element.
@@ -79,6 +94,27 @@ type RulesetSpec struct {
 	// Egress: the kernel has the netdev egress hook (5.16+). Without it the
 	// download direction cannot be counted per MAC.
 	Egress bool
+	// Quota: the kernel has named quotas and object maps (nft_quota,
+	// nft_objref): the data cut is rendered. Quotas are the objects.
+	Quota  bool
+	Quotas []QuotaSpec
+}
+
+// quotaMapName is a portal's MAC → quota object map.
+func quotaMapName(id int64) string { return setName(id, "quota") }
+
+// quotaMapElems renders a MAC → quota map's elements, sorted by MAC.
+func quotaMapElems(m map[string]string) []string {
+	macs := make([]string, 0, len(m))
+	for mac := range m {
+		macs = append(macs, mac)
+	}
+	sort.Strings(macs)
+	out := make([]string, len(macs))
+	for i, mac := range macs {
+		out[i] = mac + " : " + quote(m[mac])
+	}
+	return out
 }
 
 func setName(id int64, what string) string { return "p" + strconv.FormatInt(id, 10) + "_" + what }
@@ -216,6 +252,13 @@ func RenderNetdev(spec RulesetSpec) string {
 	local6 := append(append([]string(nil), spec.Local6...), "fe80::/10", "ff00::/8")
 	fmt.Fprintf(&b, "\tset local4 {\n\t\ttype ipv4_addr\n\t\tflags interval\n\t\tauto-merge\n%s\t}\n", elements(sortedCopy(local4)))
 	fmt.Fprintf(&b, "\tset local6 {\n\t\ttype ipv6_addr\n\t\tflags interval\n\t\tauto-merge\n%s\t}\n", elements(sortedCopy(local6)))
+	if spec.Quota {
+		quotas := append([]QuotaSpec(nil), spec.Quotas...)
+		sort.Slice(quotas, func(a, b int) bool { return quotas[a].Name < quotas[b].Name })
+		for _, q := range quotas {
+			fmt.Fprintf(&b, "\tquota %s {\n\t\tover %d bytes\n\t}\n", q.Name, nonNegative(q.Bytes))
+		}
+	}
 	for _, p := range sortedPortals(spec.Portals) {
 		if !p.Counting {
 			continue
@@ -223,6 +266,9 @@ func RenderNetdev(spec RulesetSpec) string {
 		auth := sortedCopy(p.Auth)
 		fmt.Fprintf(&b, "\tset %s {\n\t\ttype ether_addr\n\t\tcounter\n%s\t}\n", setName(p.ID, "up"), elements(auth))
 		fmt.Fprintf(&b, "\tset %s {\n\t\ttype ether_addr\n\t\tcounter\n%s\t}\n", setName(p.ID, "down"), elements(auth))
+		if spec.Quota {
+			fmt.Fprintf(&b, "\tmap %s {\n\t\ttype ether_addr : quota\n%s\t}\n", quotaMapName(p.ID), elements(quotaMapElems(p.Quota)))
+		}
 	}
 	for _, p := range sortedPortals(spec.Portals) {
 		if !p.Counting {
@@ -230,10 +276,17 @@ func RenderNetdev(spec RulesetSpec) string {
 		}
 		fmt.Fprintf(&b, "\tchain %s {\n\t\ttype filter hook ingress device %s priority -500; policy accept;\n", setName(p.ID, "ingress"), quote(p.Device))
 		b.WriteString("\t\tip daddr @local4 return\n\t\tip6 daddr @local6 return\n")
+		if spec.Quota {
+			// Before the counter: a dropped packet is not usage.
+			fmt.Fprintf(&b, "\t\tquota name ether saddr map @%s drop\n", quotaMapName(p.ID))
+		}
 		fmt.Fprintf(&b, "\t\tether saddr @%s\n\t}\n", setName(p.ID, "up"))
 		if spec.Egress {
 			fmt.Fprintf(&b, "\tchain %s {\n\t\ttype filter hook egress device %s priority -500; policy accept;\n", setName(p.ID, "egress"), quote(p.Device))
 			b.WriteString("\t\tip saddr @local4 return\n\t\tip6 saddr @local6 return\n")
+			if spec.Quota {
+				fmt.Fprintf(&b, "\t\tquota name ether daddr map @%s drop\n", quotaMapName(p.ID))
+			}
 			fmt.Fprintf(&b, "\t\tether daddr @%s\n\t}\n", setName(p.ID, "down"))
 		}
 	}
@@ -300,6 +353,40 @@ func (o *ElementOps) WalledAddress(p int64, ip netip.Addr) {
 	} else {
 		o.add("inet", TableInet, setName(p, "wg6"), ip.String())
 	}
+}
+
+// AddQuota creates a quota object: over `bytes` bytes, nothing used yet.
+func (o *ElementOps) AddQuota(name string, bytes int64) {
+	fmt.Fprintf(&o.b, "add quota netdev %s %s { over %d bytes }\n", TableNetdev, name, nonNegative(bytes))
+}
+
+// DeleteQuota removes a quota object nothing refers to any more.
+func (o *ElementOps) DeleteQuota(name string) {
+	fmt.Fprintf(&o.b, "delete quota netdev %s %s\n", TableNetdev, name)
+}
+
+// MapQuota points a MAC at a quota object (the MAC is not in the map).
+func (o *ElementOps) MapQuota(p int64, mac, name string) {
+	fmt.Fprintf(&o.b, "add element netdev %s %s { %s : %s }\n", TableNetdev, quotaMapName(p), mac, quote(name))
+}
+
+// UnmapQuota removes a MAC from a portal's quota map (it is there).
+func (o *ElementOps) UnmapQuota(p int64, mac string) {
+	fmt.Fprintf(&o.b, "delete element netdev %s %s { %s }\n", TableNetdev, quotaMapName(p), mac)
+}
+
+// Append adds another transaction's text after this one's.
+func (o *ElementOps) Append(other *ElementOps) {
+	if other != nil {
+		o.b.WriteString(other.b.String())
+	}
+}
+
+func nonNegative(v int64) int64 {
+	if v < 0 {
+		return 0
+	}
+	return v
 }
 
 // Script is the transaction text.
@@ -376,10 +463,48 @@ type Counter struct {
 	Bytes   int64
 }
 
-// SetContents is a parsed set: its elements and their counters.
+// SetContents is a parsed set: its elements and their counters (and, for
+// a map, each key's value).
 type SetContents struct {
 	Elements []string
 	Counters map[string]Counter
+	Values   map[string]string
+}
+
+// QuotaUse is a quota object as the kernel reports it.
+type QuotaUse struct {
+	Bytes int64 // the limit (over)
+	Used  int64 // consumed so far, dropped packets included
+}
+
+// Over reports whether the quota is used up (the drop rule fires).
+func (q QuotaUse) Over() bool { return q.Used >= q.Bytes }
+
+// ParseQuotasJSON reads the quota objects of `nft -j list table ...`.
+func ParseQuotasJSON(data []byte) (map[string]QuotaUse, error) {
+	var doc struct {
+		Nftables []map[string]json.RawMessage `json:"nftables"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, err
+	}
+	out := map[string]QuotaUse{}
+	for _, item := range doc.Nftables {
+		raw, ok := item["quota"]
+		if !ok {
+			continue
+		}
+		var q struct {
+			Name  string `json:"name"`
+			Bytes int64  `json:"bytes"`
+			Used  int64  `json:"used"`
+		}
+		if err := json.Unmarshal(raw, &q); err != nil {
+			return nil, err
+		}
+		out[q.Name] = QuotaUse{Bytes: q.Bytes, Used: q.Used}
+	}
+	return out, nil
 }
 
 // ParseTableJSON parses `nft -j list table ...` into its sets.
@@ -394,6 +519,9 @@ func ParseTableJSON(data []byte) (map[string]SetContents, error) {
 	for _, item := range doc.Nftables {
 		raw, ok := item["set"]
 		if !ok {
+			raw, ok = item["map"]
+		}
+		if !ok {
 			continue
 		}
 		var s struct {
@@ -403,8 +531,19 @@ func ParseTableJSON(data []byte) (map[string]SetContents, error) {
 		if err := json.Unmarshal(raw, &s); err != nil {
 			return nil, err
 		}
-		sc := SetContents{Counters: map[string]Counter{}}
+		sc := SetContents{Counters: map[string]Counter{}, Values: map[string]string{}}
 		for _, e := range s.Elem {
+			// A map element is [key, value].
+			var pair []json.RawMessage
+			if json.Unmarshal(e, &pair) == nil && len(pair) == 2 {
+				k, _, ok1 := parseElem(pair[0])
+				var v string
+				if ok1 && json.Unmarshal(pair[1], &v) == nil {
+					sc.Elements = append(sc.Elements, k)
+					sc.Values[k] = v
+				}
+				continue
+			}
 			val, ctr, ok := parseElem(e)
 			if !ok {
 				continue
@@ -486,5 +625,16 @@ func ProbeEgress(n NFT, device string) bool {
 	script := fmt.Sprintf("table netdev perch_portal_probe\ndelete table netdev perch_portal_probe\n"+
 		"table netdev perch_portal_probe {\n\tchain e {\n\t\ttype filter hook egress device %s priority -500; policy accept;\n\t}\n}\n"+
 		"delete table netdev perch_portal_probe\n", quote(device))
+	return n.Apply(script) == nil
+}
+
+// ProbeQuota reports whether the kernel has named quotas and object maps
+// (nft_quota, nft_objref), which the exact data cut needs.
+func ProbeQuota(n NFT) bool {
+	script := "table netdev perch_portal_probe\ndelete table netdev perch_portal_probe\n" +
+		"table netdev perch_portal_probe {\n\tquota q {\n\t\tover 1 bytes\n\t}\n" +
+		"\tmap m {\n\t\ttype ether_addr : quota\n\t\telements = { 02:00:00:00:00:01 : \"q\" }\n\t}\n" +
+		"\tchain c {\n\t\tquota name ether saddr map @m drop\n\t}\n}\n" +
+		"delete table netdev perch_portal_probe\n"
 	return n.Apply(script) == nil
 }

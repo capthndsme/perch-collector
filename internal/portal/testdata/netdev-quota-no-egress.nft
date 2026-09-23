@@ -1,0 +1,64 @@
+table netdev perch_portal_acct
+delete table netdev perch_portal_acct
+table netdev perch_portal_acct {
+	set local4 {
+		type ipv4_addr
+		flags interval
+		auto-merge
+		elements = { 192.168.110.1, 192.168.20.1, 203.0.113.2, 224.0.0.0/4, 255.255.255.255 }
+	}
+	set local6 {
+		type ipv6_addr
+		flags interval
+		auto-merge
+		elements = { 2001:db8::1, fe80::/10, ff00::/8 }
+	}
+	quota qg4_2 {
+		over 1000 bytes
+	}
+	quota qv17_1 {
+		over 31457280 bytes
+	}
+	set p3_up {
+		type ether_addr
+		counter
+		elements = { 02:00:00:00:20:11, 02:00:00:00:20:12 }
+	}
+	set p3_down {
+		type ether_addr
+		counter
+		elements = { 02:00:00:00:20:11, 02:00:00:00:20:12 }
+	}
+	map p3_quota {
+		type ether_addr : quota
+		elements = { 02:00:00:00:20:11 : "qv17_1", 02:00:00:00:20:12 : "qv17_1" }
+	}
+	set p4_up {
+		type ether_addr
+		counter
+		elements = { 02:00:00:00:99:11 }
+	}
+	set p4_down {
+		type ether_addr
+		counter
+		elements = { 02:00:00:00:99:11 }
+	}
+	map p4_quota {
+		type ether_addr : quota
+		elements = { 02:00:00:00:99:11 : "qg4_2" }
+	}
+	chain p3_ingress {
+		type filter hook ingress device "guest" priority -500; policy accept;
+		ip daddr @local4 return
+		ip6 daddr @local6 return
+		quota name ether saddr map @p3_quota drop
+		ether saddr @p3_up
+	}
+	chain p4_ingress {
+		type filter hook ingress device "br-trunk.110" priority -500; policy accept;
+		ip daddr @local4 return
+		ip6 daddr @local6 return
+		quota name ether saddr map @p4_quota drop
+		ether saddr @p4_up
+	}
+}

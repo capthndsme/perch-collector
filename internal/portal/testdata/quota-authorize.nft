@@ -1,0 +1,5 @@
+add quota netdev perch_portal_acct qv5_1 { over 5000 bytes }
+add element inet perch_portal p3_auth { 02:00:00:00:20:11 }
+add element netdev perch_portal_acct p3_up { 02:00:00:00:20:11 }
+add element netdev perch_portal_acct p3_down { 02:00:00:00:20:11 }
+add element netdev perch_portal_acct p3_quota { 02:00:00:00:20:11 : "qv5_1" }

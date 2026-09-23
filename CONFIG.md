@@ -812,7 +812,7 @@ own nftables (no openNDS): see ARCHITECTURE.md, "Guest portal".
 
 ```json
 "portal": {"version":1, "keyEpoch":1, "configRevision":4, "port":2080, "maxPortals":16,
-  "enforcement": {"nft":true, "egress":true, "fw4Include":"ok", "nftset":false, "conntrack":true},
+  "enforcement": {"nft":true, "egress":true, "fw4Include":"ok", "nftset":false, "conntrack":true, "quota":true},
   "storage": {"path":"/etc/perch-collector/portal/state.db", "kind":"flash", "fsType":"jffs2",
     "device":"/dev/mtdblock6", "mountPoint":"/overlay", "persistent":true,
     "flushIntervalSeconds":300, "writeThrough":false, "fallback":false, "warning":""}}
@@ -823,6 +823,10 @@ own nftables (no openNDS): see ARCHITECTURE.md, "Guest portal".
 = dnsmasq lacks nftset (not dnsmasq-full), the walled garden's names are
 resolved by the collector every 5 minutes instead; `fw4Include`: `ok`,
 `missing` (fw4 did not include the drop-in, `auto_includes 0`), `none` (no fw4).
+`quota:false` = the kernel lacks named nft quotas or object maps (`nft_quota`,
+`nft_objref`): data quotas are then enforced by the tick alone and can overshoot
+by what a device moves in one tick; with it the kernel cuts a device at the
+exact byte (ARCHITECTURE.md, "Guest portal").
 `storage.kind`: `flash`, `emmc`, `disk`, `ram`, `unknown`.
 
 **Controller → collector** (requests):
