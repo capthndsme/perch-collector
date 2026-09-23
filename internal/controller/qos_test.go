@@ -227,3 +227,53 @@ func TestDialerMarksCS6(t *testing.T) {
 		t.Errorf("TOS %#x", tos)
 	}
 }
+
+// Installed but not allowed (the gateway is not in managed mode): the hello
+// still names "qos" (the controller's capability check), but the push has
+// no `qos` and qos.* are refused with -32010 qos_not_active.
+func TestQoSNotAllowed(t *testing.T) {
+	fq := &fakeQoS{configured: true, notify: make(chan struct{}, 1)}
+	allowed := false
+	type seen struct {
+		caps       string
+		push       map[string]json.RawMessage
+		set, probe rpc.Message
+	}
+	result := make(chan seen, 1)
+	fc := &fakeController{t: t}
+	fc.session = func(ctx context.Context, c *websocket.Conn, frames <-chan []byte, hello rpc.Message) {
+		var s seen
+		var hp map[string]json.RawMessage
+		json.Unmarshal(hello.Params, &hp)
+		s.caps = string(hp["capabilities"])
+		answerHello(ctx, c, hello, "adopted")
+		send(ctx, c, `{"jsonrpc":"2.0","method":"agent.configure","params":{"metricsIntervalSeconds":0.1,"lifecycle":"adopted"}}`)
+		m, _ := next(t, frames, pushFrame, 2*time.Second)
+		json.Unmarshal(m.Params, &s.push)
+		send(ctx, c, `{"jsonrpc":"2.0","id":1,"method":"qos.devices.set","params":{"revision":1,"devices":[]}}`)
+		s.set, _ = next(t, frames, responseFrame, 2*time.Second)
+		send(ctx, c, `{"jsonrpc":"2.0","id":2,"method":"qos.probe","params":{}}`)
+		s.probe, _ = next(t, frames, responseFrame, 2*time.Second)
+		result <- s
+		c.Close(4002, "done")
+	}
+	srv := httptest.NewServer(fc)
+	defer srv.Close()
+	_, _, stop := newTestClient(t, srv, func(o *Options) {
+		o.QoS = fq
+		o.QoSAllowed = func() bool { return allowed }
+	})
+	defer stop()
+	s := <-result
+	if !strings.Contains(s.caps, `"qos"`) || s.push["qos"] != nil {
+		t.Errorf("caps %s push qos %s", s.caps, s.push["qos"])
+	}
+	for name, m := range map[string]rpc.Message{"set": s.set, "probe": s.probe} {
+		if e := m.Error; e == nil || e.Code != -32010 || !strings.Contains(string(mustJSON(e.Data)), "qos_not_active") {
+			t.Errorf("%s = %+v", name, m.Error)
+		}
+	}
+	if len(fq.sets) != 0 {
+		t.Errorf("set reached the shaper: %+v", fq.sets)
+	}
+}

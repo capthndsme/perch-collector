@@ -4,7 +4,8 @@ package controller
 // metrics-be docs/gateway/qos.md; details in ARCHITECTURE.md "Traffic
 // shaping"):
 //
-//   - hello capability "qos" while perch-qos is installed;
+//   - hello capability "qos" while perch-qos is installed (any mode);
+//   - qos.* and the push's `qos` only while QoSAllowed (managed mode);
 //   - qos.probe → what the router can do (kernel features by trial, sqm,
 //     conflicts, flow offload, the LANs);
 //   - qos.devices.set {revision, devices} → {revision, accepted, rejected};
@@ -41,14 +42,19 @@ type QoS interface {
 	DrainEvents() []qos.Event
 }
 
+// qosInstalled: perch-qos is installed; the hello names "qos" then, in any
+// mode (the controller learns the mode's gate from its own agent.configure).
+func (c *Client) qosInstalled() bool {
+	return c.o.QoS != nil && c.o.QoS.Configured()
+}
+
+// qosOn: installed and allowed (managed mode), so qos.* answer and the push
+// carries `qos`.
 func (c *Client) qosOn() bool {
-	if c.o.QoS == nil {
-		return false
-	}
 	if c.o.QoSAllowed != nil && !c.o.QoSAllowed() {
 		return false
 	}
-	return c.o.QoS.Configured()
+	return c.qosInstalled()
 }
 
 func (c *Client) registerQoS() {

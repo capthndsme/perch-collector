@@ -546,6 +546,12 @@ the controller's `agent.configure` mode `managed` on the session
 - `base`: the file hash of **every config an op touches** (required; `""` =
   the file does not exist) and optionally of `perch-managed`. Any mismatch is
   `stale_base` with `data.configs` and `data.hashes` (all readable hashes now).
+- Validators run on the simulated result before anything is staged:
+  `invalid_config` (`data.config`, `data.section`, `data.detail`) when it
+  breaks a rule of the router's. One so far: an enabled sqm queue shaping
+  below perch-qos `globals.min_wan_kbit` (`detail` `sqm_below_floor`,
+  `data.minWanKbit`; `qos.CheckSQMFloor`), checked when sqm or perch-qos is
+  touched.
 - `put` creates the section or fully replaces an owned one: listed options are
   set (a list replaces the whole list; `[]` = no option), unlisted ones are
   deleted, `{"$keep":true}` leaves the router's value, `{"$secret":ref}`
@@ -760,7 +766,7 @@ as the package manager does (a minute or more with `update`).
 `apply_pending`|`luci_pending`|`uncommitted`), `foreign_staged` (+`config`,
 `changes`), `not_owned`, `name_taken`, `no_section`, `unknown_apply`,
 `deadline_passed`, `not_reconnected`, `apply_failed`, `package_not_allowed`,
-`no_package_manager`, `insufficient_flash`, `install_failed`. Bad params:
+`no_package_manager`, `insufficient_flash`, `install_failed`, `invalid_config`. Bad params:
 -32602 with `data.error` `bad_params`.
 
 ## Traffic shaping (`internal/qos`, gateway plan 3 WP-E)

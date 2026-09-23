@@ -324,6 +324,20 @@ func (p *Plane) apply(ctx context.Context, a *ApplyParams, sess SessionRef, secu
 	if err != nil {
 		return nil, err
 	}
+	if err := validateApply(sim.configs, func(name string) *uci.Config {
+		if c, ok := sim.desired[name]; ok {
+			return c
+		}
+		if c, ok := current[name]; ok {
+			return c
+		}
+		if l, err := p.files.Load(name); err == nil {
+			return l.Config
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
 	if sim.usesSecrets && !secure {
 		return nil, &AccessError{Code: ErrInsecure, Message: "secret values are only accepted over verified TLS"}
 	}

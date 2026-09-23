@@ -1016,7 +1016,7 @@ option below is read, anything else is warned about and ignored):
 config globals 'globals'
 	option enabled '1'            # '0' = local pause (all Perch tc objects removed)
 	option revision '12'          # set by the config plane; reported back
-	option min_wan_kbit '1000'    # sqm queues below it are reported (sqm_below_floor)
+	option min_wan_kbit '1000'    # floor of sqm rates: config plane edits below it are refused, queues already below it reported (sqm_below_floor)
 	option min_device_kbit '64'   # caps below it are raised to it; HTB floor of shared leaves
 	option leaf_flows '64'        # fq_codel flows per device leaf
 	option leaf_limit '1000'      # fq_codel limit (packets) per device leaf
@@ -1093,8 +1093,12 @@ ifup/ifdown/ifupdate (new IPv6 prefixes become exemptions at once).
 
 #### On the socket
 
-- **Hello:** capability `qos` while perch-qos is installed (and the optional
-  `QoSAllowed` gate, the config plane's managed mode, allows it).
+- **Hello:** capability `qos` while perch-qos is installed, in any mode.
+- **Managed-mode gate:** `qos.probe`, `qos.devices.set`, `qos.status` and the
+  push's `qos` need the controller's `agent.configure` mode `managed` on the
+  config plane (so also `config_access` read or write); otherwise -32010
+  `qos_not_active`, and the push carries no `qos`. The shaper keeps running
+  what it has meanwhile.
 - **`qos.probe`** `{}` →
   `{sqm:{installed, version, luci, queues:[device]}, kernel:{htb, htb_class, fq_codel, cake, clsact, flower, skbedit, mirred, matchall, chain, ifb}, conflicts:[pkg], flowOffload:{software, hardware}, lanDevices:[{network, device, prefixes:[cidr], conflict?}], tc, clockSynced, tz, configured, perchQosPackage?}`.
   Kernel features are tried on a scratch ifb (`ifb-pqprobe`). Conflicts are

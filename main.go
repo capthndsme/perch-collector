@@ -402,6 +402,7 @@ func buildController(cfg config.Config, agg *aggregator.Aggregator, captures *ca
 	if shaper != nil {
 		shaping = shaper
 	}
+	plane := configPlane(cfg, captures.Captured())
 	ctl, err := controller.New(controller.Options{
 		ServerURL:            cfg.ServerURL,
 		InstanceID:           instanceID,
@@ -421,8 +422,9 @@ func buildController(cfg config.Config, agg *aggregator.Aggregator, captures *ca
 		Portal:               gw.portal,
 		Backup:               gw.backup,
 		AddressCache:         cfg.ControllerAddressCache,
-		Config:               configPlane(cfg, captures.Captured()),
+		Config:               plane,
 		QoS:                  shaping,
+		QoSAllowed:           qosAllowed(plane),
 	})
 	if err != nil {
 		log.Fatalf("controller: %v", err)

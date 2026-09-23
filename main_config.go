@@ -32,6 +32,13 @@ var (
 	activePlane *gwconfig.Plane
 )
 
+// qosAllowed is the managed-mode gate of qos.* (gateway plan 3 section 6):
+// the shaper takes orders only while the controller runs this gateway in
+// managed mode (agent.configure), which needs the config plane.
+func qosAllowed(plane *gwconfig.Plane) func() bool {
+	return func() bool { return plane != nil && plane.Mode() == gwconfig.ModeManaged }
+}
+
 // configPlane builds the config plane when the collector runs on OpenWrt;
 // nil elsewhere (a collector on a server has no UCI to offer).
 func configPlane(cfg config.Config, captured func() map[string]string) *gwconfig.Plane {

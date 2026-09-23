@@ -401,7 +401,7 @@ func (c *Client) hello(ctx context.Context, challenge string) helloParams {
 	}
 	p.Capabilities = append(p.Capabilities, c.configCapabilities()...)
 	p.GatewayConfig = c.configHello(ctx, challenge)
-	if c.qosOn() {
+	if c.qosInstalled() {
 		p.Capabilities = append(p.Capabilities, CapabilityQoS)
 	}
 	return p
