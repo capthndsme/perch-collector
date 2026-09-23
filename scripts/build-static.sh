@@ -7,7 +7,7 @@
 #   scripts/build-static.sh [output]        # default: out/perch-collector-ndpi.static
 #
 # Environment: VERSION (baked into the start-up line, /healthz and the hello,
-# default 1.0.0-rc.3-static), NDPI_TAG (git tag, default 5.0), GOARCH (default
+# default 1.0.0-static), NDPI_TAG (git tag, default 5.0), GOARCH (default
 # amd64), AGENTKIT (a local perch-agentkit checkout to build against instead
 # of the published module; default ../perch-agentkit when it exists).
 # Then, on the router: copy it to /usr/bin/perch-collector together with
@@ -15,7 +15,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 OUT="${1:-out/perch-collector-ndpi.static}"
-VERSION="${VERSION:-1.0.0-rc.3-static}"
+VERSION="${VERSION:-1.0.0-static}"
 NDPI_TAG="${NDPI_TAG:-5.0}"
 GOARCH="${GOARCH:-amd64}"
 AGENTKIT="${AGENTKIT:-}"

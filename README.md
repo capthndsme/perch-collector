@@ -275,7 +275,7 @@ Example response:
   "meta": {
     "capture_interface": "br-lan",
     "query_time": "2026-05-25T02:15:01Z",
-    "version": "1.0.0-rc.3",
+    "version": "1.0.0",
     "transport": "websocket",
     "announce_status": "adopted"
   }
