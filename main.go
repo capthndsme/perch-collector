@@ -425,6 +425,7 @@ func buildController(cfg config.Config, agg *aggregator.Aggregator, captures *ca
 		Config:               plane,
 		QoS:                  shaping,
 		QoSAllowed:           qosAllowed(plane),
+		CaptureExclude:       captures.ControllerExclude,
 	})
 	if err != nil {
 		log.Fatalf("controller: %v", err)

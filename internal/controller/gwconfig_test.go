@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -201,5 +202,39 @@ func TestConfigPlaneWithOldController(t *testing.T) {
 	b, _ := json.Marshal(h)
 	if strings.Contains(string(b), "gatewayConfig") {
 		t.Fatal(string(b))
+	}
+}
+
+// agent.configure's capture.exclude (the controller's per-network capture
+// toggle) reaches the capture; an absent block clears it; junk is dropped.
+func TestConfigureCaptureExclude(t *testing.T) {
+	var mu sync.Mutex
+	var got [][]string
+	done := make(chan struct{})
+	fc := &fakeController{t: t}
+	fc.session = func(ctx context.Context, c *websocket.Conn, frames <-chan []byte, hello rpc.Message) {
+		answerHello(ctx, c, hello, "adopted")
+		send(ctx, c, `{"jsonrpc":"2.0","method":"agent.configure","params":{"metricsIntervalSeconds":0,"lifecycle":"adopted","capture":{"exclude":["guest","","../x","iot"]}}}`)
+		send(ctx, c, `{"jsonrpc":"2.0","method":"agent.configure","params":{"metricsIntervalSeconds":0,"lifecycle":"adopted","capture":{"exclude":[]}}}`)
+		send(ctx, c, `{"jsonrpc":"2.0","method":"agent.configure","params":{"metricsIntervalSeconds":0,"lifecycle":"adopted"}}`)
+		time.Sleep(150 * time.Millisecond)
+		close(done)
+		<-ctx.Done()
+	}
+	srv := httptest.NewServer(fc)
+	defer srv.Close()
+	_, _, st := newTestClient(t, srv, func(o *Options) {
+		o.CaptureExclude = func(networks []string) {
+			mu.Lock()
+			got = append(got, networks)
+			mu.Unlock()
+		}
+	})
+	defer st()
+	<-done
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 3 || !reflect.DeepEqual(got[0], []string{"guest", "iot"}) || got[1] != nil || got[2] != nil {
+		t.Fatalf("%#v", got)
 	}
 }
