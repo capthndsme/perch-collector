@@ -22,6 +22,8 @@ func signed(t *testing.T, e *env, key, method, challenge string, ts time.Time, n
 
 func TestSignedWritesOverPlainHTTP(t *testing.T) {
 	e := newEnv(t, insecure)
+	// The key of a pairing signs (pair_test.go); the api_key never does.
+	key := string(pairUp(t, e, "00112233aabbccdd").key)
 	ctx := context.Background()
 	sess := SessionRef{Gen: 1, Challenge: "chal-1"}
 	var params map[string]any
@@ -39,11 +41,11 @@ func TestSignedWritesOverPlainHTTP(t *testing.T) {
 		want string
 	}{
 		{"wrong key", signed(t, e, "other-key", MethodApply, "chal-1", now, "nonce-0000000001", params), CodeBadSignature},
-		{"other session", signed(t, e, "test-api-key", MethodApply, "chal-0", now, "nonce-0000000002", params), CodeBadSignature},
-		{"other method", signed(t, e, "test-api-key", MethodRollback, "chal-1", now, "nonce-0000000003", params), CodeBadSignature},
-		{"too old", signed(t, e, "test-api-key", MethodApply, "chal-1", now.Add(-301*time.Second), "nonce-0000000004", params), CodeStaleSignature},
-		{"from the future", signed(t, e, "test-api-key", MethodApply, "chal-1", now.Add(301*time.Second), "nonce-0000000005", params), CodeStaleSignature},
-		{"short nonce", signed(t, e, "test-api-key", MethodApply, "chal-1", now, "n1", params), CodeBadSignature},
+		{"other session", signed(t, e, key, MethodApply, "chal-0", now, "nonce-0000000002", params), CodeBadSignature},
+		{"other method", signed(t, e, key, MethodRollback, "chal-1", now, "nonce-0000000003", params), CodeBadSignature},
+		{"too old", signed(t, e, key, MethodApply, "chal-1", now.Add(-301*time.Second), "nonce-0000000004", params), CodeStaleSignature},
+		{"from the future", signed(t, e, key, MethodApply, "chal-1", now.Add(301*time.Second), "nonce-0000000005", params), CodeStaleSignature},
+		{"short nonce", signed(t, e, key, MethodApply, "chal-1", now, "n1", params), CodeBadSignature},
 		{"half an envelope", json.RawMessage(`{"payload":"{}"}`), CodeBadSignature},
 		{"version", json.RawMessage(`{"payload":"{}","sig":{"v":2,"ts":1,"nonce":"nonce-0000000006","challenge":"chal-1","mac":"00"}}`), CodeBadSignature},
 	}
@@ -53,7 +55,7 @@ func TestSignedWritesOverPlainHTTP(t *testing.T) {
 		}
 	}
 	// A tampered payload.
-	good := signed(t, e, "test-api-key", MethodApply, "chal-1", now, "nonce-0000000007", params)
+	good := signed(t, e, key, MethodApply, "chal-1", now, "nonce-0000000007", params)
 	var env map[string]any
 	json.Unmarshal(good, &env)
 	env["payload"] = strings.Replace(env["payload"].(string), "192.168.1.20", "192.168.1.66", 1)
@@ -74,11 +76,11 @@ func TestSignedWritesOverPlainHTTP(t *testing.T) {
 	}
 	// Confirm on the next session, signed with its challenge.
 	sess2 := SessionRef{Gen: 2, Challenge: "chal-2"}
-	c1 := signed(t, e, "test-api-key", MethodConfirm, "chal-1", now, "nonce-0000000008", map[string]string{"applyId": "a1"})
+	c1 := signed(t, e, key, MethodConfirm, "chal-1", now, "nonce-0000000008", map[string]string{"applyId": "a1"})
 	if _, err := e.p.ServeWrite(ctx, MethodConfirm, c1, sess2); code(err) != CodeBadSignature {
 		t.Fatal(err)
 	}
-	c2 := signed(t, e, "test-api-key", MethodConfirm, "chal-2", now, "nonce-0000000009", map[string]string{"applyId": "a1"})
+	c2 := signed(t, e, key, MethodConfirm, "chal-2", now, "nonce-0000000009", map[string]string{"applyId": "a1"})
 	if out, err := e.p.ServeWrite(ctx, MethodConfirm, c2, sess2); err != nil || out.(map[string]any)["state"] != StateConfirmed {
 		t.Fatalf("%v %v", out, err)
 	}
@@ -86,11 +88,11 @@ func TestSignedWritesOverPlainHTTP(t *testing.T) {
 	sec := map[string]any{"applyId": "s1", "base": e.base("network"),
 		"ops":     []any{map[string]any{"op": "put", "config": "network", "section": "wg0", "type": "interface", "options": map[string]any{"private_key": map[string]string{"$secret": "k"}}}},
 		"secrets": map[string]string{"k": "v"}}
-	if _, err := e.p.ServeWrite(ctx, MethodApply, signed(t, e, "test-api-key", MethodApply, "chal-2", now, "nonce-0000000010", sec), sess2); code(err) != ErrInsecure.Error() {
+	if _, err := e.p.ServeWrite(ctx, MethodApply, signed(t, e, key, MethodApply, "chal-2", now, "nonce-0000000010", sec), sess2); code(err) != ErrInsecure.Error() {
 		t.Fatal(err)
 	}
 	// Reads need no signature; a stale session has no challenge.
-	if _, err := e.p.ServeWrite(ctx, MethodAck, signed(t, e, "test-api-key", MethodAck, "chal-2", now, "nonce-0000000011", map[string]any{"applyIds": []string{}}), SessionRef{}); code(err) != CodeBadSignature {
+	if _, err := e.p.ServeWrite(ctx, MethodAck, signed(t, e, key, MethodAck, "chal-2", now, "nonce-0000000011", map[string]any{"applyIds": []string{}}), SessionRef{}); code(err) != CodeBadSignature {
 		t.Fatal(err)
 	}
 }
@@ -125,14 +127,14 @@ func TestSignKeyAndHelloBlock(t *testing.T) {
 	json.Unmarshal([]byte(reservationJSON(e, "a1")), &params)
 	sess := SessionRef{Gen: 1, Challenge: "chal"}
 	if _, err := e.p.ServeWrite(context.Background(), MethodApply, signed(t, e, "test-api-key", MethodApply, "chal", now, "nonce-0000000001", params), sess); code(err) != CodeBadSignature {
-		t.Fatalf("the api_key no longer signs: %v", err)
+		t.Fatalf("the api_key never signs: %v", err)
 	}
 	if _, err := e.p.ServeWrite(context.Background(), MethodApply, signed(t, e, "a-separate-signing-key", MethodApply, "chal", now, "nonce-0000000002", params), sess); err != nil {
 		t.Fatal(err)
 	}
 	// Over verified TLS nothing needs signing, but a signed request is fine.
 	e2 := newEnv(t)
-	if s := e2.p.Hello(context.Background(), "x").Signing; s.Required || s.Key != "api_key" {
+	if s := e2.p.Hello(context.Background(), "x").Signing; s.Required || s.Key != SignKeyNone {
 		t.Fatalf("%+v", s)
 	}
 }

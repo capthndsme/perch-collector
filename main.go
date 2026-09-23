@@ -46,6 +46,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "config-guard" {
 		os.Exit(configGuardCommand(os.Args[2:], os.Stdout, os.Stderr, "", guardAPIKey))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "pair" {
+		os.Exit(pairCommand(os.Args[2:], os.Stdout, os.Stderr, ""))
+	}
 	if len(os.Args) > 1 && os.Args[1] == "gateway-config" {
 		os.Exit(gatewayConfigCommand(os.Args[2:], os.Stdout, os.Stderr, routerConfig))
 	}
@@ -439,6 +442,7 @@ func usage() {
 		"  perch-collector ports     print the Ethernet ports the Gateway agent reports, as JSON\n"+
 		"  perch-collector dhcp      print the DHCP leases and static hosts it reports, as JSON\n"+
 		"  perch-collector gateway-config [config...]  print the router capabilities and configs the config plane offers, as JSON\n"+
+		"  perch-collector pair status|confirm <code>|reject|forget  pair with the controller for signed config writes over plain HTTP (root)\n"+
 		"  perch-collector version   print the version\n\n"+
 		"Flags:\n", version)
 	flag.PrintDefaults()

@@ -161,7 +161,7 @@ func TestHello(t *testing.T) {
 	p, _ = plane(t, root, Options{Access: AccessWrite, Allowlist: DefaultAllowlist})
 	h = p.Hello(context.Background(), "c1")
 	if h.Access != AccessWrite || h.AccessConfigured != "" || h.TransportOK || h.Signing == nil || !h.Signing.Required ||
-		h.Signing.Challenge != "c1" || h.Signing.Key != "api_key" {
+		h.Signing.Challenge != "c1" || h.Signing.Key != SignKeyNone {
 		t.Fatalf("%+v", h)
 	}
 	// dhcp is allowlisted but has no file: absent. The ledger counts.

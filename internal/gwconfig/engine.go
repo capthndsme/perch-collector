@@ -43,6 +43,9 @@ type Hooks struct {
 	// Result sends gateway.config.result on the current session; false when
 	// there is none (the outcome then waits in the hello's results).
 	Result func(Result) bool
+	// PairState sends gateway.pair.state on the current session; false
+	// when there is none (the next hello's signing block tells).
+	PairState func(PairStateNote) bool
 }
 
 // SessionRef identifies the session a request came in on.

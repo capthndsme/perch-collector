@@ -25,6 +25,12 @@ var WriteMethods = []string{MethodApply, MethodConfirm, MethodRollback, MethodAc
 // write gate (access write; verified TLS, or the router's opt-in and a
 // valid signature), decode the params and run the method.
 func (p *Plane) ServeWrite(ctx context.Context, method string, raw json.RawMessage, sess SessionRef) (any, error) {
+	// Refusals by the router's settings come before any signature check.
+	if p.o.Access != AccessWrite || (!p.o.TransportOK && !p.o.AllowInsecure) {
+		if err := p.writeGate(false); err != nil {
+			return nil, err
+		}
+	}
 	params, signed, err := p.Unwrap(method, raw, sess)
 	if err != nil {
 		return nil, err

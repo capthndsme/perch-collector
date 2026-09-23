@@ -27,10 +27,11 @@ type ConfigPlane struct {
 	// ConfigConfirmMax caps any confirm window of a config apply, seconds.
 	ConfigConfirmMax int `yaml:"config_confirm_max"`
 
-	// ConfigSignKey is the HMAC key of signed writes over an unverified
-	// transport; empty = the api_key. Unlike the api_key (the Bearer token
-	// of every connection) it never crosses the wire: the admin pastes it
-	// into the controller.
+	// ConfigSignKey is a fixed HMAC key of signed writes over an unverified
+	// transport; empty = the key of a pairing with the controller
+	// (perch-collector pair). The api_key (the Bearer token of every
+	// connection) never signs. It never crosses the wire: the admin pastes
+	// it into the controller.
 	ConfigSignKey string `yaml:"config_sign_key"`
 
 	// PackageAllow extends the packages the controller may install
