@@ -258,7 +258,7 @@ func (e *Engine) authorizeMACLocked(portalID int64, mac string, ops *ElementOps)
 	if p == nil || !p.cfg.Enabled || p.device == "" {
 		return
 	}
-	ops.Authorize(portalID, mac, p.counting)
+	ops.Authorize(portalID, mac, e.countingOf(p))
 }
 
 // unauthorizeMACLocked takes a MAC out of a portal's sets unless another
@@ -273,7 +273,7 @@ func (e *Engine) unauthorizeMACLocked(portalID int64, mac string, ops *ElementOp
 	if p == nil || !p.cfg.Enabled || p.device == "" {
 		return
 	}
-	ops.Deauthorize(portalID, mac, p.counting)
+	ops.Deauthorize(portalID, mac, e.countingOf(p))
 }
 
 // applyOpsLocked runs queued element changes; on failure the next tick
@@ -291,10 +291,10 @@ func (e *Engine) applyOpsLocked(ops *ElementOps) {
 	// first byte, not from the next tick.
 	script := &ElementOps{}
 	var nextQ map[string]*kernelQuota
-	var nextQMap map[int64]map[string]string
+	var nextQMap, nextQAddr map[int64]map[string]string
 	if e.enf.Quota {
 		pre, post := &ElementOps{}, &ElementOps{}
-		nextQ, nextQMap = e.quotaOpsLocked(pre, post, e.kqReseed)
+		nextQ, nextQMap, nextQAddr = e.quotaOpsLocked(pre, post, e.kqReseed)
 		script.Append(pre)
 		script.Append(ops)
 		script.Append(post)
@@ -312,7 +312,7 @@ func (e *Engine) applyOpsLocked(ops *ElementOps) {
 		return
 	}
 	if e.enf.Quota {
-		e.kq, e.kqMap, e.kqReseed = nextQ, nextQMap, nil
+		e.kq, e.kqMap, e.kqAddr, e.kqReseed = nextQ, nextQMap, nextQAddr, nil
 	}
 	for _, p := range e.enforcing() {
 		e.applied[p.cfg.PortalID] = e.desiredAuth(p.cfg.PortalID)
@@ -403,7 +403,7 @@ func (e *Engine) revertExternalLocked(x ExternalRef, ops *ElementOps) {
 		if p.device == "" || !p.cfg.Enabled {
 			continue
 		}
-		ops.Deauthorize(id, mac, p.counting)
+		ops.Deauthorize(id, mac, e.countingOf(p))
 		delete(e.externals, fmt.Sprintf("%d|%s", id, mac))
 	}
 }

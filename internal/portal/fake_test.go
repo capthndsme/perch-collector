@@ -37,8 +37,8 @@ type fakeSystem struct {
 	fw4       bool
 	// Named quotas and object maps (the kernel data cut); noQuota = a
 	// kernel without them (every script mentioning a quota fails).
-	quotas  map[string]*fakeQuota        // "netdev perch_portal_acct qv17_1"
-	maps    map[string]map[string]string // "netdev perch_portal_acct p3_quota" → mac → quota name
+	quotas  map[string]*fakeQuota        // "inet perch_portal_acct qv17_1"
+	maps    map[string]map[string]string // "inet perch_portal_acct p3_quota" → mac (or address) → quota name
 	noQuota bool
 }
 
@@ -62,8 +62,8 @@ var (
 	reQuota     = regexp.MustCompile(`^quota (\S+) \{$`)
 	reOver      = regexp.MustCompile(`^over (\d+) bytes$`)
 	reMap       = regexp.MustCompile(`^map (\S+) \{$`)
-	reAddQuota  = regexp.MustCompile(`^add quota (netdev) (\S+) (\S+) \{ over (\d+) bytes \}$`)
-	reDelQuota  = regexp.MustCompile(`^delete quota (netdev) (\S+) (\S+)$`)
+	reAddQuota  = regexp.MustCompile(`^add quota (inet|netdev) (\S+) (\S+) \{ over (\d+) bytes \}$`)
+	reDelQuota  = regexp.MustCompile(`^delete quota (inet|netdev) (\S+) (\S+)$`)
 	reMapElem   = regexp.MustCompile(`^(\S+) : "(\S+)"$`)
 )
 
@@ -326,62 +326,123 @@ func (f *fakeSystem) ListJSON(args ...string) ([]byte, error) {
 	return json.Marshal(map[string]any{"nftables": items})
 }
 
-// count adds bytes to a MAC's counter in a set (the kernel counting).
+const (
+	fakeAcct = "inet " + TableAcct + " "
+	fakeFast = "netdev " + TableFast + " "
+)
+
+// cut runs a packet of bytes through a quota map (the data cut runs before
+// the counter: consumed, then dropped once over); false = dropped.
+func (f *fakeSystem) cut(mapKey, key string, bytes int64) bool {
+	name, ok := f.maps[mapKey][key]
+	if !ok {
+		return true
+	}
+	q := f.quotas[fakeAcct+name]
+	q.used += bytes
+	return q.used < q.over
+}
+
+func (f *fakeSystem) bump(set, elem string, bytes int64) {
+	if f.counters[set] == nil {
+		f.counters[set] = map[string]Counter{}
+	}
+	c := f.counters[set][elem]
+	c.Bytes += bytes
+	c.Packets++
+	f.counters[set][elem] = c
+}
+
+// count moves bytes the way the kernel counts them (nft.go): set is the
+// direction, "p<id>_up" (the device's upload: counted per MAC, its
+// addresses learned from the neighbour table), "p<id>_down" (download to
+// the addresses the device was seen using, counted per address) or
+// "p<id>_fdown" (the flowtable fast path's download, per MAC).
 func (f *fakeSystem) count(set, mac string, bytes int64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	k := "netdev " + TableNetdev + " " + set
-	if !f.sets[k][mac] {
-		return
-	}
-	// The data cut runs before the counter: consumed, then dropped once over.
 	portal := set[:strings.Index(set, "_")]
-	if name, ok := f.maps["netdev "+TableNetdev+" "+portal+"_quota"][mac]; ok {
-		q := f.quotas["netdev "+TableNetdev+" "+name]
-		q.used += bytes
-		if q.used >= q.over {
+	switch strings.TrimPrefix(set, portal+"_") {
+	case "up":
+		if !f.cut(fakeAcct+portal+"_quota", mac, bytes) {
 			return
 		}
+		if f.sets[fakeAcct+set][mac] {
+			f.bump(fakeAcct+set, mac, bytes)
+		}
+		if !f.sets[fakeAcct+portal+"_ok"][mac] {
+			return
+		}
+		for _, n := range f.neighbors {
+			if n.MAC != mac || isV6(n.IP) {
+				continue
+			}
+			if f.sets[fakeAcct+portal+"_ip4"] != nil {
+				f.sets[fakeAcct+portal+"_ip4"][n.IP] = true
+				f.sets[fakeAcct+portal+"_a4"][n.IP+" . "+mac] = true
+			}
+		}
+	case "down":
+		for el := range f.sets[fakeAcct+portal+"_a4"] {
+			ip, m, _ := strings.Cut(el, " . ")
+			if m != mac || !f.sets[fakeAcct+portal+"_ip4"][ip] {
+				continue
+			}
+			if !f.cut(fakeAcct+portal+"_quota4", ip, bytes) {
+				return
+			}
+			f.sets[fakeAcct+portal+"_d4"][ip] = true
+			f.bump(fakeAcct+portal+"_d4", ip, bytes)
+			return
+		}
+	case "fdown":
+		if f.sets[fakeFast+set][mac] {
+			f.bump(fakeFast+set, mac, bytes)
+		}
 	}
-	if f.counters[k] == nil {
-		f.counters[k] = map[string]Counter{}
-	}
-	c := f.counters[k][mac]
-	c.Bytes += bytes
-	c.Packets++
-	f.counters[k][mac] = c
 }
 
 // quotaOf is the kernel quota a MAC is cut at on a portal (nil: none).
 func (f *fakeSystem) quotaOf(portal int64, mac string) (string, *fakeQuota) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	name, ok := f.maps["netdev "+TableNetdev+" "+setName(portal, "quota")][mac]
+	name, ok := f.maps[fakeAcct+setName(portal, "quota")][mac]
 	if !ok {
 		return "", nil
 	}
-	q := *f.quotas["netdev "+TableNetdev+" "+name]
+	q := *f.quotas[fakeAcct+name]
 	return name, &q
+}
+
+// quotaOfAddr is the kernel quota an address is cut at (download).
+func (f *fakeSystem) quotaOfAddr(portal int64, ip string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.maps[fakeAcct+quotaAddrMapName(portal, isV6(ip))][ip]
+}
+
+// tableKey: "inet" = the gate, "acct" = the counting table, "fast" = the
+// fast-path table.
+func tableKey(family string) string {
+	switch family {
+	case "acct":
+		return fakeAcct
+	case "fast":
+		return fakeFast
+	}
+	return family + " " + TableInet + " "
 }
 
 func (f *fakeSystem) has(family, set, elem string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	table := TableInet
-	if family == "netdev" {
-		table = TableNetdev
-	}
-	return f.sets[family+" "+table+" "+set][elem]
+	return f.sets[tableKey(family)+set][elem]
 }
 
 func (f *fakeSystem) setElem(family, set, elem string, present bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	table := TableInet
-	if family == "netdev" {
-		table = TableNetdev
-	}
-	k := family + " " + table + " " + set
+	k := tableKey(family) + set
 	if present {
 		f.sets[k][elem] = true
 	} else {

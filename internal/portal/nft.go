@@ -23,17 +23,45 @@ import (
 //     the timeout sets), the forward gate (IPv4 and IPv6 in one pass), and the
 //     input gate (DNS with a per-MAC rate limit before authorisation, DHCP,
 //     DHCPv6 when enabled, the pages' port, ICMP; nothing else);
-//   - table netdev perch_portal_acct: per portal device an ingress and an
-//     egress chain at priority -500 (before any flowtable fast path) that
-//     count every authorised MAC's forwarded bytes in per-element set
-//     counters: upload keyed by source MAC, download by destination MAC,
-//     traffic to and from the router itself excluded. Data quotas are cut
-//     here too, exactly: one named `quota` object per group with a data
-//     quota (over the bytes the group has left), shared by its devices
-//     through a per-portal MAC → quota map, and a rule before the counters
-//     that drops a device's packets once its group's quota is used up
-//     (upload and download together, like the group's quota). The tick
-//     still ends the grant, flushes its connections and reports it.
+//   - table inet perch_portal_acct: counting and the data cut. Upload is
+//     counted per source MAC, download per destination address, traffic to
+//     and from the router itself excluded (below). Data quotas are cut here
+//     too, exactly: one named `quota` object per group with a data quota
+//     (over the bytes the group has left), shared by its devices through a
+//     per-portal MAC → quota map (upload) and address → quota maps
+//     (download), and rules before the counters that drop a device's
+//     packets once its group's quota is used up (upload and download
+//     together, like the group's quota). The tick still ends the grant,
+//     flushes its connections and reports it;
+//   - table netdev perch_portal_fast (kernels with the netdev egress hook):
+//     the download the flowtable fast path carries past the IP hooks,
+//     counted per destination MAC on the portal device's egress.
+//
+// Why the counting sits on the IP hooks (2026-09-24). Shaping redirects
+// packets through an ifb: sqm's WAN ingress (every download) and
+// perch-qos's LAN clsact hooks (a shaped device's upload). The kernel
+// re-injects such a packet with the netdev hooks switched off
+// (nf_skip_egress, tc_skip_classify): a netdev egress chain on the portal
+// device never sees an sqm-shaped download, a netdev ingress chain never
+// sees a perch-qos-shaped upload. The lab counted 1.4 kB of a 25 MB
+// download that way. Every forwarded packet the slow path carries passes
+// prerouting and postrouting, shaped or not, so:
+//
+//   - upload: prerouting (priority -350), keyed by `ether saddr`;
+//   - download: postrouting (priority 350, after the filter), keyed by the
+//     destination address. The router knows a device's addresses from its
+//     own upload: the upload rule learns `address` and `address . MAC`
+//     (dynamic sets, refreshed by traffic) and the tick gives each
+//     address's bytes to the MAC that used it last;
+//   - the flowtable fast path (fw4 flow offloading) skips both IP hooks.
+//     Upload is counted before it anyway: an inet ingress chain on the
+//     portal device (priority -500, before the flowtable's hook) counts and
+//     marks the packet (CountedMark), and prerouting skips marked packets
+//     (and clears the bit before routing sees it). Download on the fast
+//     path passes only the portal device's netdev egress: postrouting marks
+//     what it counted, and the egress chain counts the unmarked rest per
+//     MAC (and clears the bit). The fast path's download is charged by the
+//     tick, not by the kernel quota: within one tick of the cut.
 //
 // fw4's own input chain still has the last word on the router's ports, so
 // a drop-in at /usr/share/nftables.d/chain-pre/input/ accepts the portal's
@@ -41,9 +69,23 @@ import (
 
 // Table names.
 const (
-	TableInet   = "perch_portal"
-	TableNetdev = "perch_portal_acct"
+	TableInet = "perch_portal"
+	// TableAcct counts and cuts (family inet). Before 2026-09-24 a netdev
+	// table of the same name did; the first full render removes it.
+	TableAcct = "perch_portal_acct"
+	// TableFast counts the flowtable fast path's download (family netdev).
+	TableFast = "perch_portal_fast"
 )
+
+// CountedMark is the packet mark bit the counting passes between the hooks
+// (above): set on a packet one chain counted, cleared by the next. It is
+// cleared before routing on upload and on the portal device on download, so
+// policy routing (mwan3 0x3f00, pbr 0x00ff0000) never sees it.
+const CountedMark uint32 = 0x10000000
+
+// addrTimeout is how long a learned address (and its counter) outlives the
+// device's last packet.
+const addrTimeout = "2h"
 
 var ifnameRe = regexp.MustCompile(`^[A-Za-z0-9._@:-]{1,15}$`)
 
@@ -72,6 +114,12 @@ type PortalSpec struct {
 	// Quota maps a MAC to the name of its group's quota object (only MACs
 	// whose current grant's group has a data quota).
 	Quota map[string]string
+	// QuotaAddrs maps those MACs' addresses (IPv4 and IPv6) to the same
+	// objects: the download direction's cut.
+	QuotaAddrs map[string]string
+	// Learned are the addresses the authorised devices were seen using,
+	// carried over a full render so download counting goes on at once.
+	Learned []MACIP
 }
 
 // QuotaSpec is one kernel quota object: a group's remaining bytes.
@@ -91,9 +139,14 @@ type RulesetSpec struct {
 	Portals []PortalSpec
 	// Local4/Local6 are the router's own addresses (excluded from counting).
 	Local4, Local6 []string
-	// Egress: the kernel has the netdev egress hook (5.16+). Without it the
-	// download direction cannot be counted per MAC.
+	// Egress: the kernel has the netdev egress hook (5.16+): the fast
+	// path's download is counted (TableFast).
 	Egress bool
+	// Ingress: the kernel has the inet ingress hook (5.10+): the fast
+	// path's upload is counted before the flowtable takes it.
+	Ingress bool
+	// Mark is the counted bit (0 = CountedMark).
+	Mark uint32
 	// Quota: the kernel has named quotas and object maps (nft_quota,
 	// nft_objref): the data cut is rendered. Quotas are the objects.
 	Quota  bool
@@ -102,6 +155,17 @@ type RulesetSpec struct {
 
 // quotaMapName is a portal's MAC → quota object map.
 func quotaMapName(id int64) string { return setName(id, "quota") }
+
+// quotaAddrMapName is a portal's address → quota object map of one family.
+func quotaAddrMapName(id int64, v6 bool) string {
+	if v6 {
+		return setName(id, "quota6")
+	}
+	return setName(id, "quota4")
+}
+
+// isV6 reports whether an address string is IPv6.
+func isV6(ip string) bool { return strings.Contains(ip, ":") }
 
 // quotaMapElems renders a MAC → quota map's elements, sorted by MAC.
 func quotaMapElems(m map[string]string) []string {
@@ -243,11 +307,20 @@ func sortedPortals(in []PortalSpec) []PortalSpec {
 	return out
 }
 
-// RenderNetdev renders the counting table (full replacement script).
-// Portals without a present device get no chains (Counting false).
-func RenderNetdev(spec RulesetSpec) string {
+func (spec RulesetSpec) mark() uint32 {
+	if spec.Mark != 0 {
+		return spec.Mark
+	}
+	return CountedMark
+}
+
+// RenderAcct renders the counting table (full replacement script). It also
+// removes the netdev counting table of collectors before 2026-09-24.
+// Portals without a present device count nothing (Counting false).
+func RenderAcct(spec RulesetSpec) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "table netdev %s\ndelete table netdev %s\ntable netdev %s {\n", TableNetdev, TableNetdev, TableNetdev)
+	fmt.Fprintf(&b, "table netdev %s\ndelete table netdev %s\n", TableAcct, TableAcct)
+	fmt.Fprintf(&b, "table inet %s\ndelete table inet %s\ntable inet %s {\n", TableAcct, TableAcct, TableAcct)
 	local4 := append(append([]string(nil), spec.Local4...), "224.0.0.0/4", "255.255.255.255")
 	local6 := append(append([]string(nil), spec.Local6...), "fe80::/10", "ff00::/8")
 	fmt.Fprintf(&b, "\tset local4 {\n\t\ttype ipv4_addr\n\t\tflags interval\n\t\tauto-merge\n%s\t}\n", elements(sortedCopy(local4)))
@@ -259,45 +332,147 @@ func RenderNetdev(spec RulesetSpec) string {
 			fmt.Fprintf(&b, "\tquota %s {\n\t\tover %d bytes\n\t}\n", q.Name, nonNegative(q.Bytes))
 		}
 	}
-	for _, p := range sortedPortals(spec.Portals) {
+	portals := sortedPortals(spec.Portals)
+	learned := func(name, typ string, counter bool, elems []string) {
+		ctr := ""
+		if counter {
+			ctr = "\t\tcounter\n"
+		}
+		fmt.Fprintf(&b, "\tset %s {\n\t\ttype %s\n\t\tsize 65535\n\t\tflags dynamic,timeout\n\t\ttimeout %s\n%s%s\t}\n",
+			name, typ, addrTimeout, ctr, elements(sortedCopy(elems)))
+	}
+	for _, p := range portals {
 		if !p.Counting {
 			continue
 		}
+		id := p.ID
 		auth := sortedCopy(p.Auth)
-		fmt.Fprintf(&b, "\tset %s {\n\t\ttype ether_addr\n\t\tcounter\n%s\t}\n", setName(p.ID, "up"), elements(auth))
-		fmt.Fprintf(&b, "\tset %s {\n\t\ttype ether_addr\n\t\tcounter\n%s\t}\n", setName(p.ID, "down"), elements(auth))
+		fmt.Fprintf(&b, "\tset %s {\n\t\ttype ether_addr\n%s\t}\n", setName(id, "ok"), elements(auth))
+		fmt.Fprintf(&b, "\tset %s {\n\t\ttype ether_addr\n\t\tcounter\n%s\t}\n", setName(id, "up"), elements(auth))
+		var ip4, ip6, a4, a6 []string
+		for _, l := range p.Learned {
+			if isV6(l.IP) {
+				ip6, a6 = append(ip6, l.IP), append(a6, l.IP+" . "+l.MAC)
+			} else {
+				ip4, a4 = append(ip4, l.IP), append(a4, l.IP+" . "+l.MAC)
+			}
+		}
+		learned(setName(id, "ip4"), "ipv4_addr", false, ip4)
+		learned(setName(id, "ip6"), "ipv6_addr", false, ip6)
+		learned(setName(id, "a4"), "ipv4_addr . ether_addr", false, a4)
+		learned(setName(id, "a6"), "ipv6_addr . ether_addr", false, a6)
+		learned(setName(id, "d4"), "ipv4_addr", true, nil)
+		learned(setName(id, "d6"), "ipv6_addr", true, nil)
 		if spec.Quota {
-			fmt.Fprintf(&b, "\tmap %s {\n\t\ttype ether_addr : quota\n%s\t}\n", quotaMapName(p.ID), elements(quotaMapElems(p.Quota)))
+			fmt.Fprintf(&b, "\tmap %s {\n\t\ttype ether_addr : quota\n%s\t}\n", quotaMapName(id), elements(quotaMapElems(p.Quota)))
+			v4, v6 := map[string]string{}, map[string]string{}
+			for ip, q := range p.QuotaAddrs {
+				if isV6(ip) {
+					v6[ip] = q
+				} else {
+					v4[ip] = q
+				}
+			}
+			fmt.Fprintf(&b, "\tmap %s {\n\t\ttype ipv4_addr : quota\n%s\t}\n", quotaAddrMapName(id, false), elements(quotaMapElems(v4)))
+			fmt.Fprintf(&b, "\tmap %s {\n\t\ttype ipv6_addr : quota\n%s\t}\n", quotaAddrMapName(id, true), elements(quotaMapElems(v6)))
 		}
 	}
-	for _, p := range sortedPortals(spec.Portals) {
+	mark := spec.mark()
+	for _, p := range portals {
 		if !p.Counting {
 			continue
 		}
-		fmt.Fprintf(&b, "\tchain %s {\n\t\ttype filter hook ingress device %s priority -500; policy accept;\n", setName(p.ID, "ingress"), quote(p.Device))
+		id := p.ID
+		// Upload, from either hook: the router's own addresses are not
+		// usage; the cut before the counter (a dropped packet is not usage);
+		// the addresses an authorised device uses are learned.
+		fmt.Fprintf(&b, "\tchain %s {\n", setName(id, "up"))
 		b.WriteString("\t\tip daddr @local4 return\n\t\tip6 daddr @local6 return\n")
 		if spec.Quota {
-			// Before the counter: a dropped packet is not usage.
-			fmt.Fprintf(&b, "\t\tquota name ether saddr map @%s drop\n", quotaMapName(p.ID))
+			fmt.Fprintf(&b, "\t\tquota name ether saddr map @%s drop\n", quotaMapName(id))
 		}
-		fmt.Fprintf(&b, "\t\tether saddr @%s\n\t}\n", setName(p.ID, "up"))
+		fmt.Fprintf(&b, "\t\tether saddr @%s\n", setName(id, "up"))
+		fmt.Fprintf(&b, "\t\tether saddr @%s update @%s { ip saddr } update @%s { ip saddr . ether saddr }\n",
+			setName(id, "ok"), setName(id, "ip4"), setName(id, "a4"))
+		fmt.Fprintf(&b, "\t\tether saddr @%s update @%s { ip6 saddr } update @%s { ip6 saddr . ether saddr }\n",
+			setName(id, "ok"), setName(id, "ip6"), setName(id, "a6"))
+		b.WriteString("\t}\n")
+		if spec.Ingress {
+			fmt.Fprintf(&b, "\tchain %s {\n\t\ttype filter hook ingress device %s priority -500; policy accept;\n", setName(id, "ingress"), quote(p.Device))
+			fmt.Fprintf(&b, "\t\tmeta mark set meta mark or 0x%08x jump %s\n\t}\n", mark, setName(id, "up"))
+		}
+		// Download: after the filter; what the fast path's egress chain must
+		// not count again is marked first (the router's own traffic too).
+		fmt.Fprintf(&b, "\tchain %s {\n", setName(id, "down"))
 		if spec.Egress {
-			fmt.Fprintf(&b, "\tchain %s {\n\t\ttype filter hook egress device %s priority -500; policy accept;\n", setName(p.ID, "egress"), quote(p.Device))
-			b.WriteString("\t\tip saddr @local4 return\n\t\tip6 saddr @local6 return\n")
-			if spec.Quota {
-				fmt.Fprintf(&b, "\t\tquota name ether daddr map @%s drop\n", quotaMapName(p.ID))
-			}
-			fmt.Fprintf(&b, "\t\tether daddr @%s\n\t}\n", setName(p.ID, "down"))
+			fmt.Fprintf(&b, "\t\tmeta mark set meta mark or 0x%08x\n", mark)
 		}
+		b.WriteString("\t\tip saddr @local4 return\n\t\tip6 saddr @local6 return\n")
+		if spec.Quota {
+			fmt.Fprintf(&b, "\t\tquota name ip daddr map @%s drop\n", quotaAddrMapName(id, false))
+			fmt.Fprintf(&b, "\t\tquota name ip6 daddr map @%s drop\n", quotaAddrMapName(id, true))
+		}
+		fmt.Fprintf(&b, "\t\tip daddr @%s update @%s { ip daddr }\n", setName(id, "ip4"), setName(id, "d4"))
+		fmt.Fprintf(&b, "\t\tip6 daddr @%s update @%s { ip6 daddr }\n", setName(id, "ip6"), setName(id, "d6"))
+		b.WriteString("\t}\n")
+	}
+	b.WriteString("\tchain prerouting {\n\t\ttype filter hook prerouting priority -350; policy accept;\n")
+	for _, p := range portals {
+		if !p.Counting {
+			continue
+		}
+		if spec.Ingress {
+			// Counted on the ingress hook already.
+			fmt.Fprintf(&b, "\t\tiifname %s meta mark and 0x%08x == 0x%08x meta mark set meta mark and 0x%08x accept\n",
+				quote(p.Device), mark, mark, ^mark)
+		}
+		fmt.Fprintf(&b, "\t\tiifname %s jump %s\n", quote(p.Device), setName(p.ID, "up"))
+	}
+	b.WriteString("\t}\n")
+	b.WriteString("\tchain postrouting {\n\t\ttype filter hook postrouting priority 350; policy accept;\n")
+	for _, p := range portals {
+		if p.Counting {
+			fmt.Fprintf(&b, "\t\toifname %s jump %s\n", quote(p.Device), setName(p.ID, "down"))
+		}
+	}
+	b.WriteString("\t}\n}\n")
+	return b.String()
+}
+
+// RenderFast renders the fast-path table (full replacement script); without
+// the egress hook it only removes it.
+func RenderFast(spec RulesetSpec) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "table netdev %s\ndelete table netdev %s\n", TableFast, TableFast)
+	if !spec.Egress {
+		return b.String()
+	}
+	fmt.Fprintf(&b, "table netdev %s {\n", TableFast)
+	portals := sortedPortals(spec.Portals)
+	for _, p := range portals {
+		if p.Counting {
+			fmt.Fprintf(&b, "\tset %s {\n\t\ttype ether_addr\n\t\tcounter\n%s\t}\n", setName(p.ID, "fdown"), elements(sortedCopy(p.Auth)))
+		}
+	}
+	mark := spec.mark()
+	for _, p := range portals {
+		if !p.Counting {
+			continue
+		}
+		fmt.Fprintf(&b, "\tchain %s {\n\t\ttype filter hook egress device %s priority -500; policy accept;\n", setName(p.ID, "egress"), quote(p.Device))
+		fmt.Fprintf(&b, "\t\tmeta mark and 0x%08x == 0x%08x meta mark set meta mark and 0x%08x return\n", mark, mark, ^mark)
+		b.WriteString("\t\tmeta protocol != { ip, ip6 } return\n")
+		fmt.Fprintf(&b, "\t\tether daddr @%s\n\t}\n", setName(p.ID, "fdown"))
 	}
 	b.WriteString("}\n")
 	return b.String()
 }
 
-// RenderDeleteAll removes both tables (portal off / no portals).
+// RenderDeleteAll removes every Perch portal table (portal off / no portals).
 func RenderDeleteAll() string {
-	return fmt.Sprintf("table inet %s\ndelete table inet %s\ntable netdev %s\ndelete table netdev %s\n",
-		TableInet, TableInet, TableNetdev, TableNetdev)
+	return fmt.Sprintf("table inet %s\ndelete table inet %s\ntable inet %s\ndelete table inet %s\n"+
+		"table netdev %s\ndelete table netdev %s\ntable netdev %s\ndelete table netdev %s\n",
+		TableInet, TableInet, TableAcct, TableAcct, TableFast, TableFast, TableAcct, TableAcct)
 }
 
 // ElementOps is one transaction of set element changes.
@@ -317,21 +492,37 @@ func (o *ElementOps) del(family, table, set, elem string) {
 	fmt.Fprintf(&o.b, "delete element %s %s %s { %s }\n", family, table, set, elem)
 }
 
+// Counting is which counting sets a portal has.
+type Counting struct {
+	// Acct: the counting table (the portal's device exists).
+	Acct bool
+	// Fast: the fast-path table too (the kernel has the egress hook).
+	Fast bool
+}
+
 // Authorize adds a MAC to a portal's sets (counting too, when it counts).
-func (o *ElementOps) Authorize(p int64, mac string, counting bool) {
+func (o *ElementOps) Authorize(p int64, mac string, c Counting) {
 	o.add("inet", TableInet, setName(p, "auth"), mac)
-	if counting {
-		o.add("netdev", TableNetdev, setName(p, "up"), mac)
-		o.add("netdev", TableNetdev, setName(p, "down"), mac)
+	if c.Acct {
+		o.add("inet", TableAcct, setName(p, "ok"), mac)
+		o.add("inet", TableAcct, setName(p, "up"), mac)
+	}
+	if c.Acct && c.Fast {
+		o.add("netdev", TableFast, setName(p, "fdown"), mac)
 	}
 }
 
-// Deauthorize removes a MAC from a portal's sets.
-func (o *ElementOps) Deauthorize(p int64, mac string, counting bool) {
+// Deauthorize removes a MAC from a portal's sets. The addresses it used
+// stay learned until they time out: download to them is counted but
+// belongs to no live grant.
+func (o *ElementOps) Deauthorize(p int64, mac string, c Counting) {
 	o.del("inet", TableInet, setName(p, "auth"), mac)
-	if counting {
-		o.del("netdev", TableNetdev, setName(p, "up"), mac)
-		o.del("netdev", TableNetdev, setName(p, "down"), mac)
+	if c.Acct {
+		o.del("inet", TableAcct, setName(p, "ok"), mac)
+		o.del("inet", TableAcct, setName(p, "up"), mac)
+	}
+	if c.Acct && c.Fast {
+		o.del("netdev", TableFast, setName(p, "fdown"), mac)
 	}
 }
 
@@ -357,22 +548,32 @@ func (o *ElementOps) WalledAddress(p int64, ip netip.Addr) {
 
 // AddQuota creates a quota object: over `bytes` bytes, nothing used yet.
 func (o *ElementOps) AddQuota(name string, bytes int64) {
-	fmt.Fprintf(&o.b, "add quota netdev %s %s { over %d bytes }\n", TableNetdev, name, nonNegative(bytes))
+	fmt.Fprintf(&o.b, "add quota inet %s %s { over %d bytes }\n", TableAcct, name, nonNegative(bytes))
 }
 
 // DeleteQuota removes a quota object nothing refers to any more.
 func (o *ElementOps) DeleteQuota(name string) {
-	fmt.Fprintf(&o.b, "delete quota netdev %s %s\n", TableNetdev, name)
+	fmt.Fprintf(&o.b, "delete quota inet %s %s\n", TableAcct, name)
 }
 
 // MapQuota points a MAC at a quota object (the MAC is not in the map).
 func (o *ElementOps) MapQuota(p int64, mac, name string) {
-	fmt.Fprintf(&o.b, "add element netdev %s %s { %s : %s }\n", TableNetdev, quotaMapName(p), mac, quote(name))
+	fmt.Fprintf(&o.b, "add element inet %s %s { %s : %s }\n", TableAcct, quotaMapName(p), mac, quote(name))
 }
 
 // UnmapQuota removes a MAC from a portal's quota map (it is there).
 func (o *ElementOps) UnmapQuota(p int64, mac string) {
-	fmt.Fprintf(&o.b, "delete element netdev %s %s { %s }\n", TableNetdev, quotaMapName(p), mac)
+	fmt.Fprintf(&o.b, "delete element inet %s %s { %s }\n", TableAcct, quotaMapName(p), mac)
+}
+
+// MapQuotaAddr points an address at a quota object (it is not in the map).
+func (o *ElementOps) MapQuotaAddr(p int64, ip, name string) {
+	fmt.Fprintf(&o.b, "add element inet %s %s { %s : %s }\n", TableAcct, quotaAddrMapName(p, isV6(ip)), ip, quote(name))
+}
+
+// UnmapQuotaAddr removes an address from a portal's quota map (it is there).
+func (o *ElementOps) UnmapQuotaAddr(p int64, ip string) {
+	fmt.Fprintf(&o.b, "delete element inet %s %s { %s }\n", TableAcct, quotaAddrMapName(p, isV6(ip)), ip)
 }
 
 // Append adds another transaction's text after this one's.
@@ -469,6 +670,9 @@ type SetContents struct {
 	Elements []string
 	Counters map[string]Counter
 	Values   map[string]string
+	// Expires is a dynamic element's time left in seconds (the larger, the
+	// more recently the traffic refreshed it).
+	Expires map[string]int64
 }
 
 // QuotaUse is a quota object as the kernel reports it.
@@ -531,7 +735,7 @@ func ParseTableJSON(data []byte) (map[string]SetContents, error) {
 		if err := json.Unmarshal(raw, &s); err != nil {
 			return nil, err
 		}
-		sc := SetContents{Counters: map[string]Counter{}, Values: map[string]string{}}
+		sc := SetContents{Counters: map[string]Counter{}, Values: map[string]string{}, Expires: map[string]int64{}}
 		for _, e := range s.Elem {
 			// A map element is [key, value].
 			var pair []json.RawMessage
@@ -552,10 +756,26 @@ func ParseTableJSON(data []byte) (map[string]SetContents, error) {
 			if ctr != nil {
 				sc.Counters[val] = *ctr
 			}
+			if exp, ok := elemExpires(e); ok {
+				sc.Expires[val] = exp
+			}
 		}
 		out[s.Name] = sc
 	}
 	return out, nil
+}
+
+// elemExpires reads a dynamic element's "expires" (seconds left).
+func elemExpires(raw json.RawMessage) (int64, bool) {
+	var obj struct {
+		Elem *struct {
+			Expires *int64 `json:"expires"`
+		} `json:"elem"`
+	}
+	if json.Unmarshal(raw, &obj) != nil || obj.Elem == nil || obj.Elem.Expires == nil {
+		return 0, false
+	}
+	return *obj.Elem.Expires, true
 }
 
 // parseElem reads one element: a plain value ("02:00:.."), a concatenation
@@ -631,10 +851,23 @@ func ProbeEgress(n NFT, device string) bool {
 // ProbeQuota reports whether the kernel has named quotas and object maps
 // (nft_quota, nft_objref), which the exact data cut needs.
 func ProbeQuota(n NFT) bool {
-	script := "table netdev perch_portal_probe\ndelete table netdev perch_portal_probe\n" +
-		"table netdev perch_portal_probe {\n\tquota q {\n\t\tover 1 bytes\n\t}\n" +
+	script := "table inet perch_portal_probe\ndelete table inet perch_portal_probe\n" +
+		"table inet perch_portal_probe {\n\tquota q {\n\t\tover 1 bytes\n\t}\n" +
 		"\tmap m {\n\t\ttype ether_addr : quota\n\t\telements = { 02:00:00:00:00:01 : \"q\" }\n\t}\n" +
-		"\tchain c {\n\t\tquota name ether saddr map @m drop\n\t}\n}\n" +
-		"delete table netdev perch_portal_probe\n"
+		"\tmap m4 {\n\t\ttype ipv4_addr : quota\n\t\telements = { 192.0.2.1 : \"q\" }\n\t}\n" +
+		"\tchain c {\n\t\tquota name ether saddr map @m drop\n\t\tquota name ip daddr map @m4 drop\n\t}\n}\n" +
+		"delete table inet perch_portal_probe\n"
+	return n.Apply(script) == nil
+}
+
+// ProbeIngress reports whether the kernel accepts an inet ingress chain
+// (5.10+): the fast path's upload is then counted before the flowtable.
+func ProbeIngress(n NFT, device string) bool {
+	if !ValidIfname(device) {
+		return false
+	}
+	script := fmt.Sprintf("table inet perch_portal_probe\ndelete table inet perch_portal_probe\n"+
+		"table inet perch_portal_probe {\n\tchain i {\n\t\ttype filter hook ingress device %s priority -500; policy accept;\n\t}\n}\n"+
+		"delete table inet perch_portal_probe\n", quote(device))
 	return n.Apply(script) == nil
 }

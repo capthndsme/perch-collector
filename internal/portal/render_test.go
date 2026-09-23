@@ -32,9 +32,10 @@ func golden(t *testing.T, name, got string) {
 
 func goldenSpec() RulesetSpec {
 	return RulesetSpec{
-		Local4: []string{"192.168.20.1", "192.168.110.1", "203.0.113.2"},
-		Local6: []string{"2001:db8::1"},
-		Egress: true,
+		Local4:  []string{"192.168.20.1", "192.168.110.1", "203.0.113.2"},
+		Local6:  []string{"2001:db8::1"},
+		Egress:  true,
+		Ingress: true,
 		Portals: []PortalSpec{
 			{ID: 4, Device: "br-trunk.110", Counting: true, Port: 2080, Auth: []string{"02:00:00:00:99:11"},
 				DNSPerMinute: 120, DHCPv6: true, IPBinding: true, Bind: []MACIP{{MAC: "02:00:00:00:99:11", IP: "192.168.110.100"}}},
@@ -53,19 +54,25 @@ func goldenQuotaSpec() RulesetSpec {
 	spec.Quota = true
 	spec.Quotas = []QuotaSpec{{Name: "qv17_1", Bytes: 31457280}, {Name: "qg4_2", Bytes: 1000}}
 	spec.Portals[1].Quota = map[string]string{"02:00:00:00:20:11": "qv17_1", "02:00:00:00:20:12": "qv17_1"}
+	spec.Portals[1].QuotaAddrs = map[string]string{"192.168.20.111": "qv17_1", "192.168.20.112": "qv17_1", "2001:db8:20::11": "qv17_1"}
 	spec.Portals[0].Quota = map[string]string{"02:00:00:00:99:11": "qg4_2"}
+	spec.Portals[0].QuotaAddrs = map[string]string{"192.168.110.100": "qg4_2"}
+	spec.Portals[1].Learned = []MACIP{{MAC: "02:00:00:00:20:11", IP: "192.168.20.111"}, {MAC: "02:00:00:00:20:11", IP: "2001:db8:20::11"}}
 	return spec
 }
 
 func TestRenderQuotaGolden(t *testing.T) {
 	spec := goldenQuotaSpec()
-	golden(t, "netdev-quota.nft", RenderNetdev(spec))
-	spec.Egress = false
-	golden(t, "netdev-quota-no-egress.nft", RenderNetdev(spec))
+	golden(t, "acct-quota.nft", RenderAcct(spec))
+	spec.Egress, spec.Ingress = false, false
+	golden(t, "acct-quota-no-hooks.nft", RenderAcct(spec))
 	var ops ElementOps
 	ops.AddQuota("qv17_2", 1000)
 	ops.UnmapQuota(3, "02:00:00:00:20:11")
+	ops.UnmapQuotaAddr(3, "192.168.20.111")
 	ops.MapQuota(3, "02:00:00:00:20:11", "qv17_2")
+	ops.MapQuotaAddr(3, "192.168.20.111", "qv17_2")
+	ops.MapQuotaAddr(3, "2001:db8:20::11", "qv17_2")
 	ops.DeleteQuota("qv17_1")
 	golden(t, "ops-quota.nft", ops.Script())
 }
@@ -73,15 +80,18 @@ func TestRenderQuotaGolden(t *testing.T) {
 func TestRenderGolden(t *testing.T) {
 	spec := goldenSpec()
 	golden(t, "inet.nft", RenderInet(spec))
-	golden(t, "netdev.nft", RenderNetdev(spec))
-	spec.Egress = false
-	golden(t, "netdev-no-egress.nft", RenderNetdev(spec))
+	golden(t, "acct.nft", RenderAcct(spec))
+	golden(t, "fast.nft", RenderFast(spec))
+	spec.Egress, spec.Ingress = false, false
+	golden(t, "acct-no-hooks.nft", RenderAcct(spec))
+	golden(t, "fast-no-egress.nft", RenderFast(spec))
 	golden(t, "fw4-include.nft", RenderFw4Include([]string{"guest", "br-trunk.110"}, []int{2080}, true))
 	golden(t, "dnsmasq.conf", RenderDnsmasqNftset(map[int64][]string{3: {"example.com", "pay.example.com"}, 4: {"example.net"}}))
 	golden(t, "delete.nft", RenderDeleteAll())
 	var ops ElementOps
-	ops.Authorize(3, "02:00:00:00:20:11", true)
-	ops.Deauthorize(3, "02:00:00:00:20:12", true)
+	ops.Authorize(3, "02:00:00:00:20:11", Counting{Acct: true, Fast: true})
+	ops.Deauthorize(3, "02:00:00:00:20:12", Counting{Acct: true, Fast: true})
+	ops.Authorize(5, "02:00:00:00:20:13", Counting{})
 	ops.Bind(4, "02:00:00:00:99:11", "192.168.110.100")
 	golden(t, "ops.nft", ops.Script())
 }

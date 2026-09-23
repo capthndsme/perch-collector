@@ -254,6 +254,12 @@ func (e *Engine) loadState() error {
 		e.lastSeq = seq.Int64
 	}
 	fmt.Sscan(e.store.Meta("newestServerNow"), &e.newestServerNow)
+	if raw := e.store.Meta("addrCounters"); raw != "" {
+		_ = json.Unmarshal([]byte(raw), &e.addrCtr)
+		if e.addrCtr == nil {
+			e.addrCtr = map[string]int64{}
+		}
+	}
 	if raw := e.store.Meta("config"); raw != "" {
 		var c Config
 		if err := json.Unmarshal([]byte(raw), &c); err == nil {

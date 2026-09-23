@@ -1,4 +1,8 @@
 table inet perch_portal
 delete table inet perch_portal
+table inet perch_portal_acct
+delete table inet perch_portal_acct
+table netdev perch_portal_fast
+delete table netdev perch_portal_fast
 table netdev perch_portal_acct
 delete table netdev perch_portal_acct

@@ -329,12 +329,21 @@ table inet perch_portal (collector-owned; fw4 reload/restart leave it alone)
   forward   (filter-5):   iifname <dev> → authorised (or walled garden) returns to fw4, else reject
   input     (filter-5):   iifname <dev> → DNS (rate-limited per MAC before auth), DHCP,
                           DHCPv6 when the network serves it, :2080, ICMP; everything else rejected
-table netdev perch_portal_acct
-  per portal device: ingress / egress chains at priority -500 (before any flowtable),
-  router-local and multicast traffic excluded, per-MAC counter sets p<id>_up / p<id>_down
-  data cut: quota q<group>_<gen> { over <bytes the group has left> } per group with a data
-  quota, map p<id>_quota (MAC → quota), `quota name ether saddr|daddr map @p<id>_quota drop`
-  before the counters (upload + download together, like the group's quota)
+table inet perch_portal_acct (counting and the data cut; router-local and multicast excluded)
+  upload   p<id>_up chain, jumped to from prerouting (-350, iifname <dev>) and from an inet
+           ingress chain on the device (-500, before the flowtable; marks the packet 0x10000000
+           and prerouting skips + clears marked ones): counter set p<id>_up per MAC; learns
+           p<id>_ip4/_ip6 (the authorised devices' addresses) and p<id>_a4/_a6 (address . MAC),
+           dynamic sets with a 2 h timeout refreshed by traffic
+  download p<id>_down chain from postrouting (350, oifname <dev>): per-address counter sets
+           p<id>_d4/_d6 (dynamic, created by the first packet to a learned address); the tick
+           gives each address's bytes to the MAC that used it last
+  data cut quota q<group>_<gen> { over <bytes the group has left> } per group with a data quota,
+           maps p<id>_quota (MAC → quota, upload) and p<id>_quota4/_quota6 (address → quota,
+           download), `quota name ... map ... drop` before the counters
+table netdev perch_portal_fast (kernel 5.16+: the egress hook)
+  per portal device: egress chain (-500) counting per MAC (p<id>_fdown) only what the IP hooks
+  did not (unmarked: the flowtable fast path's download); clears the mark
 /usr/share/nftables.d/chain-pre/input/30-perch-portal.nft
   accepts the same ports in fw4's input chain on the portal devices (fw4 includes it on
   every reload; a zone with input REJECT would otherwise refuse the guest pages)
@@ -362,15 +371,32 @@ entries (every known address; deauth leaves established flows running
 otherwise), journals `grant_ended` with the final counters and keeps its usage
 for the group until the controller's `base*` includes it.
 
+Why the IP hooks (2026-09-24). Shaping redirects packets through an ifb:
+sqm's WAN ingress (every download) and perch-qos's clsact hooks (a shaped
+device's upload). The kernel re-injects such a packet with the netdev hooks
+switched off (`nf_skip_egress`, `tc_skip_classify`), so the netdev counting
+of 1.0.0-rc.2 missed them: the lab counted 1.4 kB of a 25 MB download under
+sqm, and a 20 MB quota never cut. Prerouting and postrouting see every packet
+the slow path forwards, shaped or not; what they cannot see is the flowtable
+fast path (fw4 flow offloading), which the ingress chain (upload) and the
+fast table (download) count instead. `TestCountingUnderShapingNetns` sends
+traffic through the rendered tables in network namespaces with each shaping
+setup. The first full render after an upgrade folds the old netdev table's
+per-MAC counters and removes it.
+
 Exact data quotas (quota.go). The tick alone would overshoot a data quota by
 what a device moves in one tick (30 MB at 52 Mbit/s and 5 s, lab 2026-09-23),
 so the kernel cuts the device off at the byte: every group with a data quota
 and a device on a counting portal has one named nft quota object seeded with
 the bytes the group has left, shared by the group's devices through the
-portal's MAC → quota map. The rule runs before the counters, so the quota
-consumes exactly what the counters count and a dropped packet is not usage.
-The map follows every grant change in the same transaction as the auth sets
-(a device is cut from its first byte). The tick keeps the books: it reads
+portal's MAC → quota map (upload) and address → quota maps (download: the
+addresses the device was seen using, from the learned pairs, its grant and,
+for a device signing in, the neighbour table). The rule runs before the
+counters, so the quota consumes exactly what the counters count and a dropped
+packet is not usage. The maps follow every grant change in the same
+transaction as the auth sets (a device is cut from its first byte). The
+fast path's download (flow offloading) is charged by the tick, not the
+kernel quota. The tick keeps the books: it reads
 the counters and the quota objects in one dump; a group the kernel cut off is
 used up (the unusable remainder under one packet, at most 256 KiB, is charged
 to its current grant so the controller sees the quota used) and its grants

@@ -145,7 +145,7 @@ func eventsOf(e *Engine, typ string) []Event {
 
 func TestConfigureRendersAndWritesDropIns(t *testing.T) {
 	_, sys, _, _ := configured(t)
-	if !sys.tables["inet perch_portal"] || !sys.tables["netdev perch_portal_acct"] {
+	if !sys.tables["inet perch_portal"] || !sys.tables["inet perch_portal_acct"] || !sys.tables["netdev perch_portal_fast"] {
 		t.Fatal("tables not created")
 	}
 	if !strings.Contains(sys.files[Fw4IncludePath], `iifname { "guest" }`) {
@@ -183,7 +183,7 @@ func TestAuthorizeTickCountAndQuota(t *testing.T) {
 	if len(res.Results) != 1 || res.Results[0].State != StatePending {
 		t.Fatalf("results %+v", res.Results)
 	}
-	if !sys.has("inet", "p3_auth", macG1) || !sys.has("netdev", "p3_up", macG1) {
+	if !sys.has("inet", "p3_auth", macG1) || !sys.has("acct", "p3_up", macG1) {
 		t.Fatal("MAC not authorised")
 	}
 	// The device shows up: active, journaled.

@@ -1,0 +1,26 @@
+table netdev perch_portal_fast
+delete table netdev perch_portal_fast
+table netdev perch_portal_fast {
+	set p3_fdown {
+		type ether_addr
+		counter
+		elements = { 02:00:00:00:20:11, 02:00:00:00:20:12 }
+	}
+	set p4_fdown {
+		type ether_addr
+		counter
+		elements = { 02:00:00:00:99:11 }
+	}
+	chain p3_egress {
+		type filter hook egress device "guest" priority -500; policy accept;
+		meta mark and 0x10000000 == 0x10000000 meta mark set meta mark and 0xefffffff return
+		meta protocol != { ip, ip6 } return
+		ether daddr @p3_fdown
+	}
+	chain p4_egress {
+		type filter hook egress device "br-trunk.110" priority -500; policy accept;
+		meta mark and 0x10000000 == 0x10000000 meta mark set meta mark and 0xefffffff return
+		meta protocol != { ip, ip6 } return
+		ether daddr @p4_fdown
+	}
+}

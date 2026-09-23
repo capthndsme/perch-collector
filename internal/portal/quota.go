@@ -2,9 +2,12 @@ package portal
 
 import (
 	"fmt"
+	"net/netip"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/capthndsme/perch-collector/internal/observe"
 )
 
 // Exact data quotas (kernel cut).
@@ -15,10 +18,12 @@ import (
 // itself: every group with a data quota that has a device on a counting
 // portal gets one named nft quota object in the counting table,
 // `over <bytes the group has left>`, and the portal's MAC → quota map
-// points each of the group's devices at it. The rule sits before the
-// counters in both directions, so the quota counts exactly what the
-// counters count (upload + download, like the group's quota) and a dropped
-// packet is not usage.
+// (upload) and address → quota maps (download: the addresses the devices
+// were seen using) point each of the group's devices at it. The rules sit
+// before the counters in both directions, so the quota counts exactly what
+// the counters count (upload + download, like the group's quota) and a
+// dropped packet is not usage. A device's new address is cut from the tick
+// that first sees it; the flowtable fast path's download only by the tick.
 //
 // The tick stays the bookkeeper: it folds the counters, notices a quota the
 // kernel reports used up, ends the grants (deauth, conntrack flush,
@@ -96,12 +101,80 @@ func (e *Engine) quotaTargetsLocked() map[int64]map[string]string {
 	return out
 }
 
+// quotaAddrTargetsLocked is the download direction's cut: per portal the
+// addresses of the MACs in targets, with the MAC's group key. An address
+// goes to the MAC the kernel last saw using it, else to a device whose
+// grant lists it; a device signing in right now (no address known yet) is
+// looked up in the neighbour table, so its cut holds from the first byte.
+func (e *Engine) quotaAddrTargetsLocked(targets map[int64]map[string]string) map[int64]map[string]string {
+	out := map[int64]map[string]string{}
+	known := map[string]bool{} // portal|MAC with an address
+	for pid := range targets {
+		out[pid] = map[string]string{}
+	}
+	for pid, owners := range e.addrOwner {
+		for _, mac := range owners {
+			known[devKey(pid, mac)] = true
+		}
+	}
+	var neigh []observe.Neighbor
+	neighRead := false
+	for _, g := range e.currentGrantsLocked() {
+		if _, ok := targets[g.PortalID][g.MAC]; ok && len(g.IPs) == 0 && g.IP == nil && !known[devKey(g.PortalID, g.MAC)] && !neighRead {
+			neighRead = true
+			neigh, _ = e.sys.Neighbors()
+		}
+	}
+	for _, g := range e.currentGrantsLocked() {
+		macs, ok := targets[g.PortalID]
+		if !ok {
+			continue
+		}
+		key, ok := macs[g.MAC]
+		if !ok {
+			continue
+		}
+		ips := append([]string(nil), g.IPs...)
+		if g.IP != nil {
+			ips = append(ips, *g.IP)
+		}
+		if p := e.portals[g.PortalID]; p != nil && len(ips) == 0 {
+			for _, n := range neigh {
+				if n.Device == p.device && NormalizeMAC(n.MAC) == g.MAC {
+					ips = append(ips, n.IP)
+				}
+			}
+		}
+		for _, ip := range ips {
+			if a, err := netip.ParseAddr(ip); err != nil || a.IsLinkLocalUnicast() {
+				continue
+			}
+			if owner, seen := e.addrOwner[g.PortalID][ip]; seen && owner != g.MAC {
+				continue
+			}
+			out[g.PortalID][ip] = key
+		}
+	}
+	for pid, owners := range e.addrOwner {
+		if _, ok := targets[pid]; !ok {
+			continue
+		}
+		for ip, mac := range owners {
+			if key, ok := targets[pid][mac]; ok {
+				out[pid][ip] = key
+			}
+		}
+	}
+	return out
+}
+
 // quotaOpsLocked works out the kernel changes that bring the quota objects
 // and maps to the wanted state: objects to create go into pre, map changes
 // and objects to delete into post (pre + element ops + post is one
 // transaction). reseed names groups whose object is replaced. It returns
-// the state the kernel holds once the transaction commits.
-func (e *Engine) quotaOpsLocked(pre, post *ElementOps, reseed map[string]bool) (map[string]*kernelQuota, map[int64]map[string]string) {
+// the state the kernel holds once the transaction commits: the objects,
+// the MAC maps and the address maps.
+func (e *Engine) quotaOpsLocked(pre, post *ElementOps, reseed map[string]bool) (map[string]*kernelQuota, map[int64]map[string]string, map[int64]map[string]string) {
 	targets := e.quotaTargetsLocked()
 	next := map[string]*kernelQuota{}
 	for _, pid := range sortedIDs(targets) {
@@ -148,18 +221,48 @@ func (e *Engine) quotaOpsLocked(pre, post *ElementOps, reseed map[string]bool) (
 			}
 		}
 	}
+	// The download direction's address maps, the same way.
+	addrTargets := e.quotaAddrTargetsLocked(targets)
+	nextAddr := map[int64]map[string]string{}
+	for pid, ips := range addrTargets {
+		nextAddr[pid] = map[string]string{}
+		for ip, key := range ips {
+			if q := next[key]; q != nil {
+				nextAddr[pid][ip] = q.Name
+			}
+		}
+	}
+	for _, pid := range sortedIDs(e.kqAddr) {
+		want, counted := nextAddr[pid]
+		if !counted {
+			continue
+		}
+		for _, ip := range sortedKeys(e.kqAddr[pid]) {
+			if want[ip] != e.kqAddr[pid][ip] {
+				post.UnmapQuotaAddr(pid, ip)
+			}
+		}
+	}
+	for _, pid := range sortedIDs(nextAddr) {
+		have := e.kqAddr[pid]
+		for _, ip := range sortedKeys(nextAddr[pid]) {
+			if name := nextAddr[pid][ip]; have[ip] != name {
+				maps.MapQuotaAddr(pid, ip, name)
+			}
+		}
+	}
 	post.Append(&maps)
 	for _, key := range sortedKeys(e.kq) {
 		if n := next[key]; n == nil || n.Name != e.kq[key].Name {
 			post.DeleteQuota(e.kq[key].Name)
 		}
 	}
-	return next, nextMap
+	return next, nextMap, nextAddr
 }
 
 // quotaSpecLocked is the full-render form of the cut: fresh objects seeded
-// with each group's remaining bytes.
-func (e *Engine) quotaSpecLocked() ([]QuotaSpec, map[int64]map[string]string, map[string]*kernelQuota) {
+// with each group's remaining bytes, the MAC maps and the address maps.
+func (e *Engine) quotaSpecLocked() ([]QuotaSpec, map[int64]map[string]string, map[int64]map[string]string, map[string]*kernelQuota) {
 	targets := e.quotaTargetsLocked()
 	objs := map[string]*kernelQuota{}
 	nextMap := map[int64]map[string]string{}
@@ -179,7 +282,16 @@ func (e *Engine) quotaSpecLocked() ([]QuotaSpec, map[int64]map[string]string, ma
 			nextMap[pid][mac] = q.Name
 		}
 	}
-	return specs, nextMap, objs
+	nextAddr := map[int64]map[string]string{}
+	for pid, ips := range e.quotaAddrTargetsLocked(targets) {
+		nextAddr[pid] = map[string]string{}
+		for ip, key := range ips {
+			if q := objs[key]; q != nil {
+				nextAddr[pid][ip] = q.Name
+			}
+		}
+	}
+	return specs, nextMap, nextAddr, objs
 }
 
 // checkKernelQuotasLocked compares the kernel's quota objects (read in the

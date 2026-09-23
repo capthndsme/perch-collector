@@ -2,6 +2,7 @@ package portal
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -31,22 +32,151 @@ import (
 //  6. offline-queued entitlements are promoted while the controller is away;
 //  7. portal.sessions every usageIntervalSeconds; snapshots when due.
 
-// readCountersLocked reads the counting table's sets and quota objects
-// (one dump).
-func (e *Engine) readCountersLocked() (map[string]SetContents, map[string]QuotaUse, error) {
-	data, err := e.sys.ListJSON("table", "netdev", TableNetdev)
+// counters is one read of the counting tables.
+type counters struct {
+	acct   map[string]SetContents // TableAcct: sets and maps
+	fast   map[string]SetContents // TableFast (nil without the egress hook)
+	quotas map[string]QuotaUse
+}
+
+// readCountersLocked reads the counting table's sets and quota objects (one
+// dump) and the fast-path table.
+func (e *Engine) readCountersLocked() (*counters, error) {
+	data, err := e.sys.ListJSON("table", "inet", TableAcct)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
+	}
+	c := &counters{}
+	if c.acct, err = ParseTableJSON(data); err != nil {
+		return nil, err
+	}
+	if c.quotas, err = ParseQuotasJSON(data); err != nil {
+		return nil, err
+	}
+	if e.enf.Egress {
+		data, err := e.sys.ListJSON("table", "netdev", TableFast)
+		if err != nil {
+			return nil, err
+		}
+		if c.fast, err = ParseTableJSON(data); err != nil {
+			return nil, err
+		}
+	}
+	return c, nil
+}
+
+// foldLegacyCountersLocked folds the per-MAC counters of the netdev
+// counting table a collector before 2026-09-24 left (p<id>_up / p<id>_down,
+// the grants' CtrUp / CtrDown baselines) before the first render replaces
+// it.
+func (e *Engine) foldLegacyCountersLocked(now int64) {
+	data, err := e.sys.ListJSON("table", "netdev", TableAcct)
+	if err != nil {
+		return
 	}
 	sets, err := ParseTableJSON(data)
 	if err != nil {
-		return nil, nil, err
+		return
 	}
-	quotas, err := ParseQuotasJSON(data)
-	if err != nil {
-		return nil, nil, err
+	for _, g := range e.currentGrantsLocked() {
+		up, okUp := sets[setName(g.PortalID, "up")].Counters[g.MAC]
+		down, okDown := sets[setName(g.PortalID, "down")].Counters[g.MAC]
+		var dUp, dDown int64
+		if okUp {
+			dUp = counterDelta(up.Bytes, g.CtrUp)
+		}
+		if okDown {
+			dDown = counterDelta(down.Bytes, g.CtrDown)
+		}
+		if dUp == 0 && dDown == 0 {
+			continue
+		}
+		g.BytesUp += dUp
+		g.BytesDown += dDown
+		t := now
+		g.LastSeenAt = &t
+		e.saveGrant(g, ClassCounter)
 	}
-	return sets, quotas, nil
+}
+
+// addrOwners reads a portal's learned `address . MAC` pairs: each address
+// goes to the MAC whose pair the traffic refreshed last (the longest time
+// left), ties to the smaller MAC.
+func addrOwners(pairs ...SetContents) map[string]string {
+	out := map[string]string{}
+	left := map[string]int64{}
+	for _, s := range pairs {
+		for _, el := range s.Elements {
+			ip, mac, ok := strings.Cut(el, " . ")
+			if !ok {
+				continue
+			}
+			mac = NormalizeMAC(mac)
+			if mac == "" {
+				continue
+			}
+			exp := s.Expires[el]
+			cur, seen := out[ip]
+			if !seen || exp > left[ip] || (exp == left[ip] && mac < cur) {
+				out[ip], left[ip] = mac, exp
+			}
+		}
+	}
+	return out
+}
+
+// foldAddrCountersLocked turns the per-address download counters into
+// per-device deltas (portal|MAC → bytes): each address's bytes since the
+// last read go to the device that used the address last.
+func (e *Engine) foldAddrCountersLocked(c *counters) map[string]int64 {
+	out := map[string]int64{}
+	seen := map[string]bool{}
+	for _, p := range e.enforcing() {
+		if !p.counting {
+			continue
+		}
+		id := p.cfg.PortalID
+		owners := addrOwners(c.acct[setName(id, "a4")], c.acct[setName(id, "a6")])
+		e.addrOwner[id] = owners
+		for _, fam := range []string{"d4", "d6"} {
+			for ip, ctr := range c.acct[setName(id, fam)].Counters {
+				k := devKey(id, ip)
+				seen[k] = true
+				d := counterDelta(ctr.Bytes, e.addrCtr[k])
+				e.addrCtr[k] = ctr.Bytes
+				if d == 0 {
+					continue
+				}
+				if mac := owners[ip]; mac != "" {
+					out[devKey(id, mac)] += d
+				}
+			}
+		}
+	}
+	changed := false
+	for k := range e.addrCtr {
+		if !seen[k] {
+			delete(e.addrCtr, k) // the address timed out: its counter is gone
+			changed = true
+		}
+	}
+	if len(seen) > 0 || changed {
+		e.saveAddrCountersLocked()
+	}
+	return out
+}
+
+// resetAddrCountersLocked: fresh tables count every address from zero.
+func (e *Engine) resetAddrCountersLocked() {
+	e.addrCtr = map[string]int64{}
+	e.saveAddrCountersLocked()
+}
+
+func (e *Engine) saveAddrCountersLocked() {
+	b, _ := json.Marshal(e.addrCtr)
+	if err := e.store.SetMeta(ClassCounter, "addrCounters", string(b)); err != nil {
+		e.log.Error("portal: saving the address counters", "err", err)
+	}
 }
 
 // currentGrants maps portal|mac to the device's current live grant (first
@@ -84,17 +214,19 @@ func (e *Engine) firstInOrder(list []*Grant) *Grant {
 func devKey(portalID int64, mac string) string { return fmt.Sprintf("%d|%s", portalID, mac) }
 
 // foldCountersLocked adds counter deltas to the current grants and returns
-// the grants that moved traffic.
-func (e *Engine) foldCountersLocked(sets map[string]SetContents, now int64, elapsedMs int64) map[int64]bool {
+// the grants that moved traffic. Upload is the MAC's counter; download is
+// its addresses' counters plus the fast path's per-MAC counter (CtrDown).
+func (e *Engine) foldCountersLocked(c *counters, now int64, elapsedMs int64) map[int64]bool {
 	moved := map[int64]bool{}
 	current := e.currentGrantsLocked()
+	byAddr := e.foldAddrCountersLocked(c)
 	for _, g := range current {
 		p := e.portals[g.PortalID]
 		if p == nil || !p.counting {
 			continue
 		}
-		up, okUp := sets[setName(g.PortalID, "up")].Counters[g.MAC]
-		down, okDown := sets[setName(g.PortalID, "down")].Counters[g.MAC]
+		up, okUp := c.acct[setName(g.PortalID, "up")].Counters[g.MAC]
+		down, okDown := c.fast[setName(g.PortalID, "fdown")].Counters[g.MAC]
 		var dUp, dDown int64
 		if okUp {
 			dUp = counterDelta(up.Bytes, g.CtrUp)
@@ -104,6 +236,7 @@ func (e *Engine) foldCountersLocked(sets map[string]SetContents, now int64, elap
 			dDown = counterDelta(down.Bytes, g.CtrDown)
 			g.CtrDown = down.Bytes
 		}
+		dDown += byAddr[devKey(g.PortalID, g.MAC)]
 		// The device's other live grants share the MAC's counters: keep
 		// their baselines in step so none of these bytes is counted twice.
 		for _, o := range e.grants {
@@ -176,7 +309,7 @@ func (e *Engine) Tick(ctx context.Context) {
 	if len(portals) > 0 && e.enf.Nft {
 		// Devices come and go (a VLAN brought up late).
 		e.refreshDevicesLocked(ctx)
-		sets, quotas, cerr := e.readCountersLocked()
+		cnt, cerr := e.readCountersLocked()
 		auth, aerr := e.readAuthLocked()
 		if isMissing(cerr) || isMissing(aerr) || e.structural {
 			if isMissing(cerr) || isMissing(aerr) {
@@ -188,9 +321,9 @@ func (e *Engine) Tick(ctx context.Context) {
 			}
 		} else if cerr == nil && aerr == nil {
 			e.reconcileSetsLocked(auth, now, ops)
-			moved := e.foldCountersLocked(sets, now, elapsed)
+			moved := e.foldCountersLocked(cnt, now, elapsed)
 			e.chargeTimeLocked(moved, elapsed)
-			e.checkKernelQuotasLocked(quotas)
+			e.checkKernelQuotasLocked(cnt.quotas)
 		}
 	}
 	e.observeNeighborsLocked(now, ops)
@@ -263,7 +396,7 @@ func (e *Engine) reconcileSetsLocked(kernel map[int64]map[string]bool, now int64
 				e.log.Warn("portal: authorisation made outside Perch undone", "portal", id, "mac", mac)
 			}
 			p := e.portals[id]
-			ops.Deauthorize(id, mac, p != nil && p.counting)
+			ops.Deauthorize(id, mac, e.countingOf(p))
 		}
 		for mac := range applied {
 			if macs[mac] {

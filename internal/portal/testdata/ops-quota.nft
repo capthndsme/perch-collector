@@ -1,4 +1,7 @@
-add quota netdev perch_portal_acct qv17_2 { over 1000 bytes }
-delete element netdev perch_portal_acct p3_quota { 02:00:00:00:20:11 }
-add element netdev perch_portal_acct p3_quota { 02:00:00:00:20:11 : "qv17_2" }
-delete quota netdev perch_portal_acct qv17_1
+add quota inet perch_portal_acct qv17_2 { over 1000 bytes }
+delete element inet perch_portal_acct p3_quota { 02:00:00:00:20:11 }
+delete element inet perch_portal_acct p3_quota4 { 192.168.20.111 }
+add element inet perch_portal_acct p3_quota { 02:00:00:00:20:11 : "qv17_2" }
+add element inet perch_portal_acct p3_quota4 { 192.168.20.111 : "qv17_2" }
+add element inet perch_portal_acct p3_quota6 { 2001:db8:20::11 : "qv17_2" }
+delete quota inet perch_portal_acct qv17_1

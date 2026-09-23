@@ -1,0 +1,187 @@
+table netdev perch_portal_acct
+delete table netdev perch_portal_acct
+table inet perch_portal_acct
+delete table inet perch_portal_acct
+table inet perch_portal_acct {
+	set local4 {
+		type ipv4_addr
+		flags interval
+		auto-merge
+		elements = { 192.168.110.1, 192.168.20.1, 203.0.113.2, 224.0.0.0/4, 255.255.255.255 }
+	}
+	set local6 {
+		type ipv6_addr
+		flags interval
+		auto-merge
+		elements = { 2001:db8::1, fe80::/10, ff00::/8 }
+	}
+	quota qg4_2 {
+		over 1000 bytes
+	}
+	quota qv17_1 {
+		over 31457280 bytes
+	}
+	set p3_ok {
+		type ether_addr
+		elements = { 02:00:00:00:20:11, 02:00:00:00:20:12 }
+	}
+	set p3_up {
+		type ether_addr
+		counter
+		elements = { 02:00:00:00:20:11, 02:00:00:00:20:12 }
+	}
+	set p3_ip4 {
+		type ipv4_addr
+		size 65535
+		flags dynamic,timeout
+		timeout 2h
+		elements = { 192.168.20.111 }
+	}
+	set p3_ip6 {
+		type ipv6_addr
+		size 65535
+		flags dynamic,timeout
+		timeout 2h
+		elements = { 2001:db8:20::11 }
+	}
+	set p3_a4 {
+		type ipv4_addr . ether_addr
+		size 65535
+		flags dynamic,timeout
+		timeout 2h
+		elements = { 192.168.20.111 . 02:00:00:00:20:11 }
+	}
+	set p3_a6 {
+		type ipv6_addr . ether_addr
+		size 65535
+		flags dynamic,timeout
+		timeout 2h
+		elements = { 2001:db8:20::11 . 02:00:00:00:20:11 }
+	}
+	set p3_d4 {
+		type ipv4_addr
+		size 65535
+		flags dynamic,timeout
+		timeout 2h
+		counter
+	}
+	set p3_d6 {
+		type ipv6_addr
+		size 65535
+		flags dynamic,timeout
+		timeout 2h
+		counter
+	}
+	map p3_quota {
+		type ether_addr : quota
+		elements = { 02:00:00:00:20:11 : "qv17_1", 02:00:00:00:20:12 : "qv17_1" }
+	}
+	map p3_quota4 {
+		type ipv4_addr : quota
+		elements = { 192.168.20.111 : "qv17_1", 192.168.20.112 : "qv17_1" }
+	}
+	map p3_quota6 {
+		type ipv6_addr : quota
+		elements = { 2001:db8:20::11 : "qv17_1" }
+	}
+	set p4_ok {
+		type ether_addr
+		elements = { 02:00:00:00:99:11 }
+	}
+	set p4_up {
+		type ether_addr
+		counter
+		elements = { 02:00:00:00:99:11 }
+	}
+	set p4_ip4 {
+		type ipv4_addr
+		size 65535
+		flags dynamic,timeout
+		timeout 2h
+	}
+	set p4_ip6 {
+		type ipv6_addr
+		size 65535
+		flags dynamic,timeout
+		timeout 2h
+	}
+	set p4_a4 {
+		type ipv4_addr . ether_addr
+		size 65535
+		flags dynamic,timeout
+		timeout 2h
+	}
+	set p4_a6 {
+		type ipv6_addr . ether_addr
+		size 65535
+		flags dynamic,timeout
+		timeout 2h
+	}
+	set p4_d4 {
+		type ipv4_addr
+		size 65535
+		flags dynamic,timeout
+		timeout 2h
+		counter
+	}
+	set p4_d6 {
+		type ipv6_addr
+		size 65535
+		flags dynamic,timeout
+		timeout 2h
+		counter
+	}
+	map p4_quota {
+		type ether_addr : quota
+		elements = { 02:00:00:00:99:11 : "qg4_2" }
+	}
+	map p4_quota4 {
+		type ipv4_addr : quota
+		elements = { 192.168.110.100 : "qg4_2" }
+	}
+	map p4_quota6 {
+		type ipv6_addr : quota
+	}
+	chain p3_up {
+		ip daddr @local4 return
+		ip6 daddr @local6 return
+		quota name ether saddr map @p3_quota drop
+		ether saddr @p3_up
+		ether saddr @p3_ok update @p3_ip4 { ip saddr } update @p3_a4 { ip saddr . ether saddr }
+		ether saddr @p3_ok update @p3_ip6 { ip6 saddr } update @p3_a6 { ip6 saddr . ether saddr }
+	}
+	chain p3_down {
+		ip saddr @local4 return
+		ip6 saddr @local6 return
+		quota name ip daddr map @p3_quota4 drop
+		quota name ip6 daddr map @p3_quota6 drop
+		ip daddr @p3_ip4 update @p3_d4 { ip daddr }
+		ip6 daddr @p3_ip6 update @p3_d6 { ip6 daddr }
+	}
+	chain p4_up {
+		ip daddr @local4 return
+		ip6 daddr @local6 return
+		quota name ether saddr map @p4_quota drop
+		ether saddr @p4_up
+		ether saddr @p4_ok update @p4_ip4 { ip saddr } update @p4_a4 { ip saddr . ether saddr }
+		ether saddr @p4_ok update @p4_ip6 { ip6 saddr } update @p4_a6 { ip6 saddr . ether saddr }
+	}
+	chain p4_down {
+		ip saddr @local4 return
+		ip6 saddr @local6 return
+		quota name ip daddr map @p4_quota4 drop
+		quota name ip6 daddr map @p4_quota6 drop
+		ip daddr @p4_ip4 update @p4_d4 { ip daddr }
+		ip6 daddr @p4_ip6 update @p4_d6 { ip6 daddr }
+	}
+	chain prerouting {
+		type filter hook prerouting priority -350; policy accept;
+		iifname "guest" jump p3_up
+		iifname "br-trunk.110" jump p4_up
+	}
+	chain postrouting {
+		type filter hook postrouting priority 350; policy accept;
+		oifname "guest" jump p3_down
+		oifname "br-trunk.110" jump p4_down
+	}
+}

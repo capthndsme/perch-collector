@@ -33,13 +33,18 @@ func TestKernelQuotaCutsExactly(t *testing.T) {
 		t.Fatal("quota probe failed on the fake kernel")
 	}
 	gid := int64(42)
+	// The device is on the link (it just signed in).
+	sys.neighbors = []observe.Neighbor{{IP: "192.168.20.111", MAC: macG1, Device: "guest", Reachable: true}}
 	authorizeQuota(t, e, c, "v:17", 1000, 0, WireGrant{GrantID: &gid, PortalID: 3, GroupKey: "v:17", MAC: macG1, Revision: 1})
-	// Cut from the first byte: the authorising transaction carries it.
+	// Cut from the first byte, both ways: the authorising transaction
+	// carries the MAC's and its address's map entries.
 	name, q := sys.quotaOf(3, macG1)
 	if q == nil || name != "qv17_1" || q.over != 1000 {
 		t.Fatalf("quota %s %+v", name, q)
 	}
-	sys.neighbors = []observe.Neighbor{{IP: "192.168.20.111", MAC: macG1, Device: "guest", Reachable: true}}
+	if n := sys.quotaOfAddr(3, "192.168.20.111"); n != "qv17_1" {
+		t.Fatalf("address not cut: %q", n)
+	}
 	sys.count("p3_up", macG1, 300)
 	sys.count("p3_down", macG1, 400)
 	e.Tick(ctx)
@@ -78,6 +83,10 @@ func TestKernelQuotaSharedGroupAndReseed(t *testing.T) {
 		{GrantID: &a, PortalID: 3, GroupKey: "v:9", MAC: macG1, Revision: 1},
 		{GrantID: &b, PortalID: 3, GroupKey: "v:9", MAC: macG2, Revision: 1},
 	}
+	sys.neighbors = []observe.Neighbor{
+		{IP: "192.168.20.111", MAC: macG1, Device: "guest", Reachable: true},
+		{IP: "192.168.20.112", MAC: macG2, Device: "guest", Reachable: true},
+	}
 	authorizeQuota(t, e, c, "v:9", 10_000_000, 1_000_000, grants...)
 	n1, q1 := sys.quotaOf(3, macG1)
 	n2, _ := sys.quotaOf(3, macG2)
@@ -85,7 +94,8 @@ func TestKernelQuotaSharedGroupAndReseed(t *testing.T) {
 		t.Fatalf("one object for the group: %s %s %+v", n1, n2, q1)
 	}
 	sys.count("p3_up", macG1, 2_000_000)
-	sys.count("p3_down", macG2, 3_000_000)
+	sys.count("p3_up", macG2, 1_000_000)
+	sys.count("p3_down", macG2, 2_000_000)
 	e.Tick(ctx)
 	if _, q := sys.quotaOf(3, macG1); q.over != 9_000_000 || q.used != 5_000_000 {
 		t.Fatalf("no re-seed without drift: %+v", q)
@@ -98,7 +108,7 @@ func TestKernelQuotaSharedGroupAndReseed(t *testing.T) {
 	if q == nil || name == n1 || q.over != 10_000_000-4_000_000-5_000_000 || q.used != 0 {
 		t.Fatalf("re-seed %s %+v", name, q)
 	}
-	if n, _ := sys.quotaOf(3, macG2); n != name {
+	if n, _ := sys.quotaOf(3, macG2); n != name || sys.quotaOfAddr(3, "192.168.20.112") != name {
 		t.Fatal("second device not repointed")
 	}
 	if len(sys.quotas) != 1 {
@@ -112,7 +122,7 @@ func TestKernelQuotaSharedGroupAndReseed(t *testing.T) {
 	if _, err := e.Deauthorize(ctx, c.deauthorize([]int64{1}, "revoked")); err != nil {
 		t.Fatal(err)
 	}
-	if n, _ := sys.quotaOf(3, macG1); n != "" {
+	if n, _ := sys.quotaOf(3, macG1); n != "" || sys.quotaOfAddr(3, "192.168.20.111") != "" {
 		t.Fatal("ended device still mapped")
 	}
 	if n, _ := sys.quotaOf(3, macG2); n != name {
@@ -130,7 +140,9 @@ func TestKernelQuotaSurvivesRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	gid := int64(7)
+	sys.neighbors = []observe.Neighbor{{IP: "192.168.20.111", MAC: macG1, Device: "guest", Reachable: true}}
 	authorizeQuota(t, e, c, "v:7", 100_000, 0, WireGrant{GrantID: &gid, PortalID: 3, GroupKey: "v:7", MAC: macG1, Revision: 1})
+	sys.count("p3_up", macG1, 0) // a request out: the kernel learns the address
 	sys.count("p3_down", macG1, 30_000)
 	e.Tick(ctx)
 	// Traffic after the last tick, then the collector stops (the tables stay).
@@ -145,6 +157,10 @@ func TestKernelQuotaSurvivesRestart(t *testing.T) {
 	_, q := sys.quotaOf(3, macG1)
 	if q == nil || q.over != 50_000 || q.used != 0 {
 		t.Fatalf("not seeded with the remaining bytes: %+v", q)
+	}
+	// The learned address came along: download counts and cuts at once.
+	if !sys.has("acct", "p3_a4", "192.168.20.111 . "+macG1) || sys.quotaOfAddr(3, "192.168.20.111") == "" {
+		t.Fatal("learned address not carried over the re-render")
 	}
 	// And it cuts there.
 	sys.count("p3_down", macG1, 49_000)
@@ -209,17 +225,21 @@ func TestRenderedRulesetNftCheck(t *testing.T) {
 	spec := goldenQuotaSpec()
 	dir := t.TempDir()
 	full := filepath.Join(dir, "full.nft")
-	if err := os.WriteFile(full, []byte(RenderInet(spec)+RenderNetdev(spec)), 0o644); err != nil {
+	if err := os.WriteFile(full, []byte(RenderInet(spec)+RenderAcct(spec)+RenderFast(spec)), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	var ops ElementOps
 	ops.AddQuota("qv17_2", 1000)
-	ops.Authorize(3, "02:00:00:00:20:13", true)
+	ops.Authorize(3, "02:00:00:00:20:13", Counting{Acct: true, Fast: true})
 	ops.UnmapQuota(3, "02:00:00:00:20:11")
 	ops.UnmapQuota(3, "02:00:00:00:20:12")
+	ops.UnmapQuotaAddr(3, "192.168.20.111")
+	ops.UnmapQuotaAddr(3, "192.168.20.112")
+	ops.UnmapQuotaAddr(3, "2001:db8:20::11")
 	ops.MapQuota(3, "02:00:00:00:20:11", "qv17_2")
 	ops.MapQuota(3, "02:00:00:00:20:12", "qv17_2")
 	ops.MapQuota(3, "02:00:00:00:20:13", "qv17_2")
+	ops.MapQuotaAddr(3, "192.168.20.111", "qv17_2")
 	ops.DeleteQuota("qv17_1")
 	delta := filepath.Join(dir, "ops.nft")
 	if err := os.WriteFile(delta, []byte(ops.Script()), 0o644); err != nil {
@@ -234,8 +254,13 @@ func TestRenderedRulesetNftCheck(t *testing.T) {
 		nft + " -f " + full,
 		nft + " -c -f " + delta,
 		nft + " -f " + delta,
-		nft + " list map netdev perch_portal_acct p3_quota",
-		"! " + nft + " list quota netdev perch_portal_acct qv17_1 2>/dev/null",
+		nft + " list map inet perch_portal_acct p3_quota",
+		nft + " list map inet perch_portal_acct p3_quota4",
+		"! " + nft + " list quota inet perch_portal_acct qv17_1 2>/dev/null",
+		// A second full render replaces everything (and the old netdev table).
+		"nft add table netdev perch_portal_acct",
+		nft + " -f " + full,
+		"! " + nft + " list table netdev perch_portal_acct 2>/dev/null",
 	}, "\n")
 	out, err := exec.Command("unshare", "-rn", "sh", "-c", script).CombinedOutput()
 	if err != nil {
