@@ -24,6 +24,14 @@ var Siblings = []Sibling{
 	{Package: "perch-qos", Config: "perch-qos"},
 }
 
+func siblingPackages() []string {
+	out := make([]string, 0, len(Siblings))
+	for _, s := range Siblings {
+		out = append(out, s.Package)
+	}
+	return out
+}
+
 // Reasons of a sibling's allowlist state (gateway.capabilities siblingConfigs).
 const (
 	SiblingListed       = "listed"        // in managed_config anyway

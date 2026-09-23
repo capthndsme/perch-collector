@@ -119,7 +119,9 @@ func (p *Plane) Capabilities(ctx context.Context, challenge string) *Capabilitie
 	cancel()
 	db := p.packageDB()
 	c.PackageManager = strPtr(db.Manager())
-	if w, err := db.Watched(); err == nil {
+	// The kit's watch list plus the sibling packages (perch-qos is not in
+	// the kit's list): the controller shows "Install on gateway" by them.
+	if w, err := db.Watched(siblingPackages()...); err == nil {
 		c.Packages = w
 	}
 	if p.Access() != AccessNone {

@@ -57,6 +57,9 @@ func TestSiblingsJoinTheAllowlistWhenInstalled(t *testing.T) {
 	if !reflect.DeepEqual(caps.AllowedConfigs, []string{"dhcp", "firewall", "network", "perch-qos", "sqm"}) {
 		t.Fatalf("%v", caps.AllowedConfigs)
 	}
+	if _, ok := caps.Packages["perch-qos"]; !ok {
+		t.Fatalf("perch-qos not in the reported packages: %v", caps.Packages)
+	}
 	if s := siblingByConfig(t, caps.SiblingConfigs, "sqm"); !s.Allowed || !s.Installed || s.Reason != SiblingInstalled || s.Package != "sqm-scripts" {
 		t.Fatalf("%+v", s)
 	}
