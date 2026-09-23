@@ -75,7 +75,7 @@ define Package/perch-collector
   SUBMENU:=Network Monitoring
   TITLE:=Perch Network Collector
   URL:=https://github.com/capthndsme/perch-collector
-  DEPENDS:=$(GO_ARCH_DEPENDS) +libpcap
+  DEPENDS:=$(GO_ARCH_DEPENDS) +libpcap +kmod-nf-conntrack-netlink
 endef
 
 define Package/perch-collector/description

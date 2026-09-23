@@ -78,6 +78,7 @@ start_service() {
 	local top_peers top_lan top_services top_dest top_unnamed flows idle partial
 	local instance_id server_url announce_interval announce_key announce_insecure
 	local transport ca_file gateway_stats wan_interfaces ports dhcp_leases dhcp_leases_refresh
+	local observe observe_parts observe_refresh conntrack_flush gateway_backup address_cache
 	local uci_dirty=0
 
 	config_load "$CONF"
@@ -153,6 +154,12 @@ start_service() {
 	config_get ports main ports 'auto'
 	config_get dhcp_leases main dhcp_leases 'auto'
 	config_get dhcp_leases_refresh main dhcp_leases_refresh '600'
+	config_get observe main observe 'auto'
+	config_list_foreach main observe_part append_list observe_parts
+	config_get observe_refresh main observe_refresh '600'
+	config_get conntrack_flush main conntrack_flush 'auto'
+	config_get gateway_backup main gateway_backup 'redacted'
+	config_get address_cache main controller_address_cache '/etc/perch-collector/controller-address'
 
 	procd_open_instance
 	# No config file: everything comes from the environment below.
@@ -186,7 +193,13 @@ start_service() {
 		PERCH_COLLECTOR_WAN_INTERFACES="$wan_interfaces" \
 		PERCH_COLLECTOR_PORTS="$ports" \
 		PERCH_COLLECTOR_DHCP_LEASES="$dhcp_leases" \
-		PERCH_COLLECTOR_DHCP_LEASES_REFRESH="$dhcp_leases_refresh"
+		PERCH_COLLECTOR_DHCP_LEASES_REFRESH="$dhcp_leases_refresh" \
+		PERCH_COLLECTOR_OBSERVE="$observe" \
+		PERCH_COLLECTOR_OBSERVE_PARTS="$observe_parts" \
+		PERCH_COLLECTOR_OBSERVE_REFRESH="$observe_refresh" \
+		PERCH_COLLECTOR_CONNTRACK_FLUSH="$conntrack_flush" \
+		PERCH_COLLECTOR_GATEWAY_BACKUP="$gateway_backup" \
+		PERCH_COLLECTOR_CONTROLLER_ADDRESS_CACHE="$address_cache"
 	procd_set_param respawn 3600 5 0
 	procd_set_param stdout 1
 	procd_set_param stderr 1

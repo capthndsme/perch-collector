@@ -90,7 +90,8 @@ the router it adds the router's own health and its Ethernet ports
 
 ```
 perch-collector/
-├── main.go                    # Entry point, `ports` subcommand, wiring, gateway/subnet resolution, transport
+├── main.go                    # Entry point, `ports`/`dhcp` subcommands, wiring, gateway/subnet resolution, transport
+├── main_gateway.go            # observation + runtime actions wiring, `observe`/`conntrack-flush`/`backup` subcommands
 ├── collector.example.yaml     # Configuration template (copy to collector.yaml)
 ├── internal/
 │   ├── config/
@@ -108,9 +109,17 @@ perch-collector/
 │   │   ├── announce.go        # HTTP announce (transport poll)
 │   │   └── instance.go        # Stable instance id resolution
 │   ├── controller/
-│   │   └── controller.go      # WebSocket session to the controller (transport websocket)
+│   │   ├── controller.go      # WebSocket session to the controller (transport websocket)
+│   │   ├── gateway.go         # observe section of a push, gateway.observe, net.conntrack_flush, gateway.backup
+│   │   └── lastgood.go        # dialer with the last good controller address
 │   ├── gateway/
 │   │   └── gateway.go         # Router health from /proc (conntrack, TCP, load, memory, WAN) + ports from /sys
+│   ├── observe/               # Observation channel: dhcp, neighbors, interfaces, upnp, mwan3, resolver, system
+│   │   ├── observer.go        # parts, Section, per-part read intervals and fingerprints, Pacer
+│   │   └── env.go, uci.go     # fixture-tree root, uci/ubus runner, `uci show` parser
+│   ├── gatewayops/
+│   │   ├── conntrack.go       # net.conntrack_flush over ctnetlink
+│   │   └── backup.go          # gateway.backup: sysupgrade -b + redaction
 │   └── flusher/
 │       └── flusher.go         # Periodic JSON file writer
 ├── README.md
@@ -184,6 +193,47 @@ ports read with the default-route WAN list, prints the JSON and exits, before
 logging, configuration, capture, the listener or any connection. The daemon
 itself takes flags only and refuses a leftover argument before capture
 starts, so a subcommand typed after a flag cannot start a second collector.
+
+## The observation channel
+
+On the router the collector reports runtime state that is not traffic
+(gateway plan 2 section 3; wire format in CONFIG.md, "The observation
+channel"). `main` builds one `observe.Observer` with a reader per part that is
+on (`dhcp_leases`, `observe`, `observe_parts`); the interfaces reader is
+shared, so DHCP leases and neighbours are tagged with their network.
+
+```
+push (every metricsIntervalSeconds)
+  for each part the Observer has:
+    Observer.Read(part)          cached per part (neighbours 60 s, interfaces 5 s,
+                                 upnp/mwan3 15 s, resolver/system 60 s; dhcp watches
+                                 its files); value + fingerprint without uptimes
+    Pacer.Due(session, part, fp) first in the session, changed (neighbours: ≥ 60 s
+                                 after the last send), or refresh due
+  → observe {full?, <due parts>} in collector.push; Pacer.Sent after the write
+gateway.observe {parts?}         Observer.Section(parts, fresh) + collectedAt
+GET /api/v1/summary              Observer.Section(all, cached) for polled collectors
+```
+
+Readers only read: files under `Env.Root` (a fixture tree in tests), the
+`uci` and `ubus` CLIs through `Env.Run`, rtnetlink for the neighbour table,
+`/proc` for processes and sockets. A part that cannot be read is absent from
+the push (the controller keeps its data), never an empty report.
+
+The runtime actions sit beside it in `internal/gatewayops`: the conntrack
+flush dumps the table over ctnetlink, deletes matching flows by their
+original tuple and skips the collector's own controller connection (its
+endpoints come from the controller dialer); the backup runs `sysupgrade -b`
+into a temporary directory and rewrites the tar.gz with secrets redacted.
+Both run one at a time. Capabilities, dispatch and the observe section live
+in `internal/controller/gateway.go`, apart from `controller.go`, so the
+config plane's hello fields and requests stay separate.
+
+`internal/controller/lastgood.go` replaces the kit HTTP client's dial
+function: it resolves the controller's name itself, dials each address, and
+falls back to the address of the last accepted session when resolution
+fails. The TLS server name and Host header come from the URL, so they stay
+the name.
 
 ## Graceful Shutdown
 
