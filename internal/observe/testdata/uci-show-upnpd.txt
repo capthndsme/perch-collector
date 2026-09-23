@@ -1,0 +1,6 @@
+upnpd.config=upnpd
+upnpd.config.enabled='1'
+upnpd.config.internal_iface='lan'
+upnpd.config.upnp_lease_file='/var/run/miniupnpd.leases'
+upnpd.@perm_rule[0]=perm_rule
+upnpd.@perm_rule[0].action='allow'

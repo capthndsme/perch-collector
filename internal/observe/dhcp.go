@@ -1,14 +1,18 @@
 // Package observe reports runtime state of the router the collector runs on
-// that is not traffic: today the DHCP leases and the static DHCP hosts, the
-// `observe.dhcp` part of the observation channel (docs/collector-agent.md
-// section 4.3 in the controller). The controller names devices from it, so a
-// collector on the router gives hostnames with no transport to configure.
+// that is not traffic: the observation channel of the managed gateway
+// (gateway plan 2 section 3; docs/collector-agent.md section 4.3 in the
+// controller). Parts: DHCP leases and static hosts (`dhcp`), the ARP/NDP
+// table (`neighbors`), netifd's interfaces with their default routes
+// (`interfaces`), miniupnpd's mappings (`upnp`), mwan3 config and live state
+// (`mwan3`), who answers DNS (`resolver`) and what the router is
+// (`system`). All of it is read-only runtime state, never config.
 //
-// Everything is read locally with the system's own tools: the dnsmasq lease
-// files (their paths from UCI, never assumed), `uci show dhcp` for the static
-// hosts, and odhcpd's leases over the `ubus` CLI when odhcpd runs. Nothing
-// depends on dnsmasq's DNS port, so a router whose DNS belongs to another
-// resolver (dnsmasq on port 54 or 0 behind AdGuard Home) reports the same.
+// Everything is read locally with the system's own tools: files (their
+// paths from UCI, never assumed), `uci show`, the `ubus` CLI (never a
+// hand-rolled ubus client), rtnetlink for the neighbour table and /proc.
+// Nothing depends on dnsmasq's DNS port, so a router whose DNS belongs to
+// another resolver (dnsmasq on port 54 or 0 behind AdGuard Home) reports
+// the same.
 package observe
 
 import (
@@ -35,6 +39,7 @@ const (
 	MaxLeases4 = 4096
 	MaxLeases6 = 4096
 	MaxHosts   = 1024
+	MaxPools   = 64
 	// MaxText is the longest hostname, client id or DUID kept (a DNS name's
 	// limit); longer ones are dropped.
 	MaxText = 253
@@ -50,13 +55,6 @@ const (
 // (the OpenWrt init script's default).
 const DefaultLeaseFile = "/tmp/dhcp.leases"
 
-// Section is the `observe` object of a push and of GET /api/v1/summary: one
-// optional part per kind of observation. An absent part is not reported
-// (the controller keeps what it has); a present one replaces it.
-type Section struct {
-	DHCP *DHCP `json:"dhcp,omitempty"`
-}
-
 // DHCP is the `dhcp` part of a push's `observe` section. It is a full
 // snapshot: every list is present, [] when empty, and replaces what the
 // controller holds for this router.
@@ -64,6 +62,82 @@ type DHCP struct {
 	Leases4 []Lease4     `json:"leases4"`
 	Leases6 []Lease6     `json:"leases6"`
 	Hosts   []StaticHost `json:"hosts"`
+	// Pools are the UCI `dhcp` sections (one per served network), so the
+	// controller knows each network's lease time: a renewal is a sighting
+	// only when leases are short. Added 2026-09-23 (gateway plan 2 §3).
+	Pools []Pool `json:"pools,omitempty"`
+}
+
+// Pool is one UCI `config dhcp` section.
+type Pool struct {
+	// Network is the section's `interface` (the logical network), else its name.
+	Network string `json:"network"`
+	// Ignore: `ignore '1'`, DHCP is not served on this network.
+	Ignore bool `json:"ignore"`
+	// LeaseTime in seconds; 0 = infinite. OpenWrt's default (12 h) when unset.
+	LeaseTime int64 `json:"leaseTime"`
+	Start     int   `json:"start,omitempty"`
+	Limit     int   `json:"limit,omitempty"`
+	// Section is the UCI section name when it is not anonymous.
+	Section string `json:"section,omitempty"`
+}
+
+// DefaultLeaseTime is OpenWrt's lease time for a pool that names none.
+const DefaultLeaseTime = 12 * 3600
+
+// poolFromUCI reads a `config dhcp` section.
+func poolFromUCI(s UCISection) (Pool, bool) {
+	p := Pool{Network: cleanName(s.First("interface")), Ignore: s.Bool("ignore", false), LeaseTime: DefaultLeaseTime}
+	if p.Network == "" && !s.Anonymous() {
+		p.Network = cleanName(s.Name)
+	}
+	if p.Network == "" {
+		return Pool{}, false
+	}
+	if !s.Anonymous() {
+		p.Section = cleanName(s.Name)
+	}
+	if v := s.First("leasetime"); v != "" {
+		if secs, ok := ParseLeaseTime(v); ok {
+			p.LeaseTime = secs
+		}
+	}
+	if n, err := strconv.Atoi(s.First("start")); err == nil && n >= 0 {
+		p.Start = n
+	}
+	if n, err := strconv.Atoi(s.First("limit")); err == nil && n >= 0 {
+		p.Limit = n
+	}
+	return p, true
+}
+
+// ParseLeaseTime reads an OpenWrt lease time: "infinite" (0), seconds, or a
+// number with a unit s, m, h, d or w ("12h", "720m").
+func ParseLeaseTime(v string) (int64, bool) {
+	v = strings.ToLower(strings.TrimSpace(v))
+	if v == "infinite" {
+		return 0, true
+	}
+	unit := int64(1)
+	if n := len(v); n > 0 {
+		switch v[n-1] {
+		case 's':
+			v = v[:n-1]
+		case 'm':
+			unit, v = 60, v[:n-1]
+		case 'h':
+			unit, v = 3600, v[:n-1]
+		case 'd':
+			unit, v = 86400, v[:n-1]
+		case 'w':
+			unit, v = 7*86400, v[:n-1]
+		}
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n <= 0 || n > 1<<40 {
+		return 0, false
+	}
+	return n * unit, true
 }
 
 // Lease4 is one IPv4 lease. Expires is a Unix time, 0 = infinite.
@@ -74,6 +148,9 @@ type Lease4 struct {
 	Expires  int64  `json:"expires"`
 	ClientID string `json:"clientId,omitempty"`
 	Source   string `json:"source"`
+	// Network is the logical network whose subnet holds IP, when the
+	// observation knows the router's interfaces (added 2026-09-23).
+	Network string `json:"network,omitempty"`
 }
 
 // Lease6 is one DHCPv6 lease (an IA with its addresses). ValidUntil is a
@@ -128,6 +205,9 @@ type Reader struct {
 	Now func() time.Time
 	// Recheck overrides DefaultRecheck.
 	Recheck time.Duration
+	// Networks names the router's subnets, to tag each IPv4 lease with its
+	// network (nil = no tagging).
+	Networks func() []Subnet
 
 	mu        sync.Mutex
 	uci       *uciDHCP // last good `uci show dhcp`, nil before the first
@@ -141,6 +221,7 @@ type Reader struct {
 	odhcpdKey string
 	built     *DHCP
 	fp        string
+	netsKey   string
 }
 
 func (r *Reader) now() time.Time {
@@ -240,13 +321,25 @@ func (r *Reader) Read() (*DHCP, string) {
 			now := r.now()
 			r.odhcpdAt, r.odhcpdKey = now, key
 			var v6 []Lease6
-			if out, err := r.run("ubus", "call", "dhcp", "ipv6leases"); err == nil {
-				v6 = ParseOdhcpdLeases6(out, now)
-			}
 			var v4 []Lease4
+			out6, err6 := r.run("ubus", "call", "dhcp", "ipv6leases")
+			if err6 == nil {
+				v6 = ParseOdhcpdLeases6(out6, now)
+			}
 			if r.uci.odhcpdMainDHCP {
 				if out, err := r.run("ubus", "call", "dhcp", "ipv4leases"); err == nil {
 					v4 = ParseOdhcpdLeases4(out, now)
+				}
+			}
+			if err6 != nil && r.uci.odhcpdLeaseFile != "" {
+				// No ubus answer (odhcpd without its ubus object, or ubus
+				// down): odhcpd's own state file.
+				if data, err := os.ReadFile(r.path(r.uci.odhcpdLeaseFile)); err == nil {
+					a, b := ParseOdhcpdStateFile(data)
+					v6 = b
+					if r.uci.odhcpdMainDHCP {
+						v4 = a
+					}
 				}
 			}
 			if !equalJSON(v6, r.odhcpd6) || !equalJSON(v4, r.odhcpd4) {
@@ -259,14 +352,26 @@ func (r *Reader) Read() (*DHCP, string) {
 		changed = true
 	}
 
+	var nets []Subnet
+	if r.Networks != nil {
+		nets = r.Networks()
+		if k := subnetsKey(nets); k != r.netsKey {
+			r.netsKey = k
+			changed = true
+		}
+	}
+
 	if changed || r.built == nil {
 		d := &DHCP{
 			Leases4: capList(dedupe4(append(append([]Lease4{}, r.leases4...), r.odhcpd4...)), MaxLeases4),
 			Leases6: capList(dedupe6(append(append([]Lease6{}, r.leases6d...), r.odhcpd6...)), MaxLeases6),
 			Hosts:   capList(r.uci.hosts, MaxHosts),
+			Pools:   capList(r.uci.pools, MaxPools),
 		}
-		if d.Hosts == nil {
-			d.Hosts = []StaticHost{}
+		if nets != nil {
+			for i := range d.Leases4 {
+				d.Leases4[i].Network = networkOf(nets, d.Leases4[i].IP)
+			}
 		}
 		b, _ := json.Marshal(d)
 		sum := sha256.Sum256(b)
@@ -587,6 +692,68 @@ func ParseOdhcpdLeases4(data []byte, now time.Time) []Lease4 {
 	return out
 }
 
+// ParseOdhcpdStateFile reads odhcpd's lease state file
+// (`dhcp.odhcpd.leasefile`, e.g. /tmp/hosts/odhcpd). Its lease lines are
+// "# <ifname> <duid|mac> <iaid-hex|ipv4> <hostname|-> <valid-until> <assigned-hex> <prefix-len> <addr>/<len>...":
+// valid-until is a Unix time, -1 = infinite, 0 = expired (skipped). The
+// hosts-format lines after them repeat the names and are ignored.
+func ParseOdhcpdStateFile(data []byte) ([]Lease4, []Lease6) {
+	var v4 []Lease4
+	var v6 []Lease6
+	sc := bufio.NewScanner(bytes.NewReader(data))
+	sc.Buffer(make([]byte, 4096), 64*1024)
+	for sc.Scan() {
+		f := strings.Fields(sc.Text())
+		if len(f) < 9 || f[0] != "#" {
+			continue
+		}
+		dev, id, iaid, host := cleanName(f[1]), f[2], f[3], f[4]
+		if host == "-" {
+			host = ""
+		}
+		host = cleanName(strings.TrimPrefix(host, "broken\\x20"))
+		until, err := strconv.ParseInt(f[5], 10, 64)
+		if err != nil || until == 0 || until < -1 {
+			continue
+		}
+		if until == -1 {
+			until = 0
+		}
+		addrs := f[8:]
+		if iaid == "ipv4" {
+			mac := NormalizeMAC(id)
+			if mac == "" {
+				continue
+			}
+			for _, a := range addrs {
+				if ip := cleanIP(a, false); ip != "" {
+					v4 = append(v4, Lease4{MAC: mac, IP: ip, Hostname: host, Expires: until, Source: SourceOdhcpd})
+				}
+			}
+			continue
+		}
+		duid := cleanHex(id)
+		if duid == "" {
+			continue
+		}
+		l := Lease6{DUID: strings.ReplaceAll(duid, ":", ""), Hostname: host, ValidUntil: until, Device: dev,
+			Source: SourceOdhcpd, Addresses: []string{}}
+		if n, err := strconv.ParseUint(iaid, 16, 32); err == nil {
+			v := uint32(n)
+			l.IAID = &v
+		}
+		for _, a := range addrs {
+			if ip := cleanIP(a, true); ip != "" && len(l.Addresses) < 16 {
+				l.Addresses = append(l.Addresses, ip)
+			}
+		}
+		if len(l.Addresses) > 0 {
+			v6 = append(v6, l)
+		}
+	}
+	return v4, v6
+}
+
 // ── UCI ──────────────────────────────────────────────────────────────────
 
 // uciDHCP is what the observation needs from `uci show dhcp`.
@@ -598,6 +765,7 @@ type uciDHCP struct {
 	odhcpdMainDHCP    bool
 	odhcpdLeaseFile   string
 	hosts             []StaticHost
+	pools             []Pool
 }
 
 // leaseFiles are the dnsmasq lease files to read: each dnsmasq section's
@@ -625,117 +793,46 @@ func (u *uciDHCP) leaseFiles() []string {
 	return out
 }
 
-type uciSection struct {
-	name    string
-	typ     string
-	options map[string][]string
-}
-
-// parseUCIShow reads `uci show dhcp` output ("dhcp.<section>=<type>",
-// "dhcp.<section>.<option>=<value>", list values as several quoted words).
+// parseUCIShow reads `uci show dhcp` into what the observation needs.
 func parseUCIShow(data []byte) uciDHCP {
-	var order []string
-	sections := map[string]*uciSection{}
-	sc := bufio.NewScanner(bytes.NewReader(data))
-	sc.Buffer(make([]byte, 4096), 256*1024)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		key, value, ok := strings.Cut(line, "=")
-		if !ok || !strings.HasPrefix(key, "dhcp.") {
-			continue
-		}
-		parts := strings.SplitN(strings.TrimPrefix(key, "dhcp."), ".", 2)
-		name := parts[0]
-		s := sections[name]
-		if s == nil {
-			s = &uciSection{name: name, options: map[string][]string{}}
-			sections[name] = s
-			order = append(order, name)
-		}
-		words := uciWords(value)
-		if len(parts) == 1 {
-			if len(words) > 0 {
-				s.typ = words[0]
-			}
-			continue
-		}
-		s.options[parts[1]] = words
-	}
-
 	var u uciDHCP
-	for _, name := range order {
-		s := sections[name]
-		first := func(opt string) string {
-			if v := s.options[opt]; len(v) > 0 {
-				return strings.TrimSpace(v[0])
-			}
-			return ""
-		}
-		switch s.typ {
+	for _, s := range ParseUCIShow("dhcp", data) {
+		switch s.Type {
 		case "dnsmasq":
 			u.dnsmasqSections = true
-			u.dnsmasqLeaseFiles = append(u.dnsmasqLeaseFiles, first("leasefile"))
+			u.dnsmasqLeaseFiles = append(u.dnsmasqLeaseFiles, s.First("leasefile"))
 		case "odhcpd":
 			u.odhcpd = true
-			u.odhcpdMainDHCP = first("maindhcp") == "1"
-			u.odhcpdLeaseFile = first("leasefile")
+			u.odhcpdMainDHCP = s.First("maindhcp") == "1"
+			u.odhcpdLeaseFile = s.First("leasefile")
+		case "dhcp":
+			if p, ok := poolFromUCI(s); ok {
+				u.pools = append(u.pools, p)
+			}
 		case "host":
-			if first("enabled") == "0" {
+			if s.First("enabled") == "0" {
 				continue
 			}
-			h := StaticHost{Name: cleanName(first("name")), MACs: []string{}}
+			h := StaticHost{Name: cleanName(s.First("name")), MACs: []string{}}
 			if h.Name == "" {
 				continue
 			}
-			for _, word := range s.options["mac"] {
+			for _, word := range s.Options["mac"] {
 				for _, m := range strings.FieldsFunc(word, func(r rune) bool { return r == ' ' || r == ',' }) {
 					if mac := NormalizeMAC(m); mac != "" && len(h.MACs) < 16 {
 						h.MACs = append(h.MACs, mac)
 					}
 				}
 			}
-			h.IP = cleanIP(first("ip"), false)
+			h.IP = cleanIP(s.First("ip"), false)
 			if len(h.MACs) == 0 && h.IP == "" {
 				continue
 			}
-			if !strings.HasPrefix(name, "@") {
-				h.Section = cleanName(name)
+			if !s.Anonymous() {
+				h.Section = cleanName(s.Name)
 			}
 			u.hosts = append(u.hosts, h)
 		}
 	}
 	return u
-}
-
-// uciWords splits a `uci show` value into its words: 'quoted' runs, with
-// '\” as an embedded quote, separated by spaces.
-func uciWords(s string) []string {
-	var out []string
-	var cur strings.Builder
-	inQuote, any := false, false
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case c == '\'':
-			inQuote = !inQuote
-			any = true
-		case c == '\\' && !inQuote && i+1 < len(s):
-			i++
-			cur.WriteByte(s[i])
-			any = true
-		case c == ' ' && !inQuote:
-			if any {
-				out = append(out, cur.String())
-				cur.Reset()
-				any = false
-			}
-		default:
-			cur.WriteByte(c)
-			any = true
-		}
-	}
-	if any {
-		out = append(out, cur.String())
-	}
-	return out
 }

@@ -1,0 +1,6 @@
+firewall.@defaults[0]=defaults
+firewall.@defaults[0].syn_flood='1'
+firewall.@defaults[0].flow_offloading='1'
+firewall.@defaults[0].flow_offloading_hw='1'
+firewall.@zone[0]=zone
+firewall.@zone[0].name='lan'

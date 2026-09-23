@@ -1,0 +1,12 @@
+{
+	"interfaces": {
+		"wan": { "age": 0, "online": 0, "offline": 0, "uptime": 246194, "score": 0, "lost": 0, "turn": 0,
+			"status": "notracking", "enabled": true, "running": false, "up": true, "track_ip": [] },
+		"wan2": { "age": 0, "online": 0, "offline": 0, "uptime": 666570, "score": 0, "lost": 0, "turn": 0,
+			"status": "notracking", "enabled": true, "running": false, "up": true, "track_ip": [] },
+		"lte": { "age": 0, "online": 0, "offline": 0, "uptime": 0, "score": 0, "lost": 0, "turn": 0,
+			"status": "notracking", "enabled": true, "running": false, "up": false, "track_ip": [] }
+	},
+	"connected": { "ipv4": [], "ipv6": [] },
+	"policies": { "ipv4": {}, "ipv6": {} }
+}
