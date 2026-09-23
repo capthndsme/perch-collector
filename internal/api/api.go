@@ -13,6 +13,7 @@ import (
 	"github.com/capthndsme/perch-collector/internal/aggregator"
 	"github.com/capthndsme/perch-collector/internal/classifier"
 	"github.com/capthndsme/perch-collector/internal/gateway"
+	"github.com/capthndsme/perch-collector/internal/observe"
 )
 
 // Server is the HTTP JSON API server.
@@ -38,6 +39,9 @@ type Server struct {
 	// gatewayStats fills the top-level `gateway` of GET /api/v1/summary; nil
 	// when gateway stats are off. Set once before ListenAndServe.
 	gatewayStats func() *gateway.Stats
+	// dhcp fills the summary's `observe.dhcp`; nil when the DHCP
+	// observation is off. Set once before ListenAndServe.
+	dhcp func() (*observe.DHCP, string)
 }
 
 // devicesResponse is the JSON shape for GET /api/v1/devices.
@@ -58,7 +62,10 @@ type deviceResponse struct {
 type summaryResponse struct {
 	Summary aggregator.Summary `json:"summary"`
 	Gateway *gateway.Stats     `json:"gateway,omitempty"`
-	Meta    meta               `json:"meta"`
+	// Observe carries observe.dhcp on every summary (a poller has no
+	// session to keep a fingerprint in; the controller skips unchanged ones).
+	Observe *observe.Section `json:"observe,omitempty"`
+	Meta    meta             `json:"meta"`
 }
 
 // protocolsResponse is the JSON shape for GET /api/v1/protocols: every
@@ -206,6 +213,12 @@ func (s *Server) SetGatewayStats(fn func() *gateway.Stats) {
 	s.gatewayStats = fn
 }
 
+// SetDHCP registers the reader behind the summary's `observe.dhcp`. Call
+// before ListenAndServe; nil turns it off.
+func (s *Server) SetDHCP(fn func() (*observe.DHCP, string)) {
+	s.dhcp = fn
+}
+
 // SetProtocolCategories replaces the list served by GET /api/v1/protocols.
 // Call before ListenAndServe; nil is stored as an empty list.
 func (s *Server) SetProtocolCategories(list []classifier.ProtocolCategory) {
@@ -228,6 +241,11 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 	resp := summaryResponse{Summary: s.agg.GetSummary(), Meta: s.makeMeta()}
 	if s.gatewayStats != nil {
 		resp.Gateway = s.gatewayStats()
+	}
+	if s.dhcp != nil {
+		if d, _ := s.dhcp(); d != nil {
+			resp.Observe = &observe.Section{DHCP: d}
+		}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

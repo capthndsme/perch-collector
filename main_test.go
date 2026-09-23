@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/capthndsme/perch-agentkit/hoststat"
+
+	"github.com/capthndsme/perch-collector/internal/observe"
 )
 
 // writeTree creates files (path → content) under a temporary root.
@@ -233,4 +235,30 @@ func TestPortsSubcommandExitsEarly(t *testing.T) {
 		}
 		noConnection()
 	})
+}
+
+// perch-collector dhcp prints the observation as JSON from the lease file UCI
+// names, and refuses arguments.
+func TestDHCPCommand(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"var/dnsmasq.leases": "0 02:00:00:00:10:21 192.168.1.21 laptop *\n",
+	})
+	uci := func(_ context.Context, name string, _ ...string) ([]byte, error) {
+		if name == "uci" {
+			return []byte("dhcp.@dnsmasq[0]=dnsmasq\ndhcp.@dnsmasq[0].leasefile='/var/dnsmasq.leases'\n"), nil
+		}
+		return nil, errors.New("not found")
+	}
+	var stdout, stderr bytes.Buffer
+	if code := dhcpCommand(nil, &stdout, &stderr, &observe.Reader{Root: root, Run: uci}); code != 0 || stderr.Len() != 0 {
+		t.Fatalf("exit %d: %s", code, stderr.String())
+	}
+	var d observe.DHCP
+	if err := json.Unmarshal(stdout.Bytes(), &d); err != nil || len(d.Leases4) != 1 || d.Leases4[0].Hostname != "laptop" {
+		t.Fatalf("output %s (%v)", stdout.String(), err)
+	}
+	stdout.Reset()
+	if code := dhcpCommand([]string{"now"}, &stdout, &stderr, &observe.Reader{Root: root, Run: uci}); code != 2 || stdout.Len() != 0 {
+		t.Fatalf("an argument must be refused, exit %d", code)
+	}
 }

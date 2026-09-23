@@ -28,6 +28,7 @@ import (
 	"github.com/capthndsme/perch-collector/internal/flusher"
 	"github.com/capthndsme/perch-collector/internal/gateway"
 	"github.com/capthndsme/perch-collector/internal/netutil"
+	"github.com/capthndsme/perch-collector/internal/observe"
 )
 
 // version is stamped at build time: -ldflags "-X main.version=1.2.3".
@@ -38,6 +39,9 @@ func main() {
 	// no configuration, no capture, no listener, no network.
 	if len(os.Args) > 1 && os.Args[1] == "ports" {
 		os.Exit(portsCommand(os.Args[2:], os.Stdout, os.Stderr, hoststat.FS{}))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "dhcp" {
+		os.Exit(dhcpCommand(os.Args[2:], os.Stdout, os.Stderr, &observe.Reader{}))
 	}
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
@@ -176,6 +180,17 @@ func main() {
 		log.Printf("config: ports on has no effect with gateway stats off: the ports travel in the gateway report")
 	}
 
+	// The DHCP observation: leases and static hosts, so the controller can
+	// name devices with nothing to set up (dhcp_leases auto = OpenWrt).
+	var dhcp func() (*observe.DHCP, string)
+	if cfg.DHCPLeasesEnabled(gateway.OnOpenWrt(hoststat.FS{})) {
+		reader := &observe.Reader{}
+		dhcp = reader.Read
+		d, _ := reader.Read()
+		log.Printf("dhcp: reporting leases and static hosts (%d IPv4 leases, %d DHCPv6, %d static hosts now; resent every %ds unchanged)",
+			len(d.Leases4), len(d.Leases6), len(d.Hosts), cfg.DHCPLeasesRefresh)
+	}
+
 	// Build the announcer or the controller client (when the daemon has a
 	// server) before the API server starts, so its status can be part of
 	// every meta block without racing the first request. Either is only
@@ -187,7 +202,7 @@ func main() {
 	)
 	switch transport {
 	case config.TransportWebSocket:
-		ctl = buildController(cfg, agg, cls, gatewayStats)
+		ctl = buildController(cfg, agg, cls, gatewayStats, dhcp)
 	case config.TransportPoll:
 		ann = buildAnnouncer(cfg)
 	}
@@ -202,6 +217,9 @@ func main() {
 	}
 	if gatewayStats != nil {
 		apiServer.SetGatewayStats(gatewayStats)
+	}
+	if dhcp != nil {
+		apiServer.SetDHCP(dhcp)
 	}
 	switch {
 	case ctl != nil:
@@ -314,7 +332,7 @@ func buildAnnouncer(cfg config.Config) *announce.Announcer {
 
 // buildController prepares the WebSocket client (transport websocket). The
 // socket carries everything the controller would otherwise poll.
-func buildController(cfg config.Config, agg *aggregator.Aggregator, cls classifier.Classifier, gatewayStats func() *gateway.Stats) *controller.Client {
+func buildController(cfg config.Config, agg *aggregator.Aggregator, cls classifier.Classifier, gatewayStats func() *gateway.Stats, dhcp func() (*observe.DHCP, string)) *controller.Client {
 	instanceID := resolveInstanceID(cfg)
 	if instanceID == "" {
 		log.Fatalf("controller: no usable instance id; cannot connect to %s", cfg.ServerURL)
@@ -323,6 +341,7 @@ func buildController(cfg config.Config, agg *aggregator.Aggregator, cls classifi
 		Summary: agg.GetSummary,
 		Devices: func() []aggregator.DeviceStats { return agg.Snapshot(time.Time{}) },
 		Gateway: gatewayStats,
+		DHCP:    dhcp,
 	}
 	if lister, ok := cls.(classifier.CategoryLister); ok {
 		categories := lister.ProtocolCategories()
@@ -340,6 +359,7 @@ func buildController(cfg config.Config, agg *aggregator.Aggregator, cls classifi
 		TLS:              link.TLSOptions{Insecure: cfg.AnnounceTLSInsecure, CAFile: cfg.ServerCAFile},
 		System:           controller.SystemInfo(hoststat.FS{}, runtime.GOARCH),
 		Source:           source,
+		DHCPRefresh:      time.Duration(cfg.DHCPLeasesRefresh) * time.Second,
 	})
 	if err != nil {
 		log.Fatalf("controller: %v", err)
@@ -407,6 +427,7 @@ func usage() {
 		"Usage:\n"+
 		"  perch-collector [flags]   run the collector (every setting: CONFIG.md)\n"+
 		"  perch-collector ports     print the Ethernet ports the Gateway agent reports, as JSON\n"+
+		"  perch-collector dhcp      print the DHCP leases and static hosts it reports, as JSON\n"+
 		"  perch-collector version   print the version\n\n"+
 		"Flags:\n", version)
 	flag.PrintDefaults()
@@ -512,4 +533,34 @@ func resolveLocalSubnets(cfg config.Config) []*net.IPNet {
 		}
 	}
 	return merged
+}
+
+const dhcpUsage = `usage: perch-collector dhcp
+
+Prints the DHCP observation the collector sends its controller (the
+observe.dhcp section of a push) as JSON, and exits: the dnsmasq leases from
+the lease files UCI names, odhcpd's leases over ubus when odhcpd is
+configured, and the static hosts of UCI dhcp. No configuration, no capture,
+no listener, no network; dhcp_leases does not apply.
+`
+
+// dhcpCommand is `perch-collector dhcp`, for a read-only look at a router.
+func dhcpCommand(args []string, stdout, stderr io.Writer, r *observe.Reader) int {
+	if len(args) > 0 {
+		switch args[0] {
+		case "-h", "-help", "--help", "help":
+			fmt.Fprint(stdout, dhcpUsage)
+			return 0
+		}
+		fmt.Fprintf(stderr, "unexpected argument %q\n\n%s", args[0], dhcpUsage)
+		return 2
+	}
+	d, _ := r.Read()
+	enc := json.NewEncoder(stdout)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(d); err != nil {
+		fmt.Fprintf(stderr, "perch-collector dhcp: %v\n", err)
+		return 1
+	}
+	return 0
 }

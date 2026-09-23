@@ -25,6 +25,7 @@ Perch Network Gateway agent. Which means Perch can now have gateway related sett
 - **Talks to the controller over its own socket** — dials the controller, authenticates with its API key and pushes on the schedule the controller sets (JSON-RPC 2.0 over WebSocket, compressed); nothing has to reach the collector. Or announces itself over HTTP and is polled
 - **Gateway stats** — on the router: conntrack fill, established TCP, load, memory and per-interface WAN counters, read from `/proc`, so the controller needs no node_exporter
 - **The Gateway agent's ports** — on the router: every Ethernet port with its live link state (carrier, speed, duplex, link flaps), read from `/sys`, for the controller's infrastructure view
+- **DHCP leases and static hosts** — on the router: the dnsmasq/odhcpd leases and the static hosts of `/etc/config/dhcp`, sent when they change, so the controller names devices with nothing to configure on its side
 - **No ASN database** — peer enrichment (ASN, rDNS) is left to the controller
 - **JSON HTTP API** — live device stats, `?since=` windows, protocol → category list
 - **Periodic disk flush** — optional JSON snapshots to disk
@@ -140,6 +141,10 @@ sudo ./out/perch-collector -interface br-lan -listen 127.0.0.1:9800
 # reads /sys and the routing table only, so it is safe next to a running
 # collector (see "The Gateway agent's ports")
 ./out/perch-collector ports
+
+# Print the DHCP leases and static hosts as the collector reports them
+# (observe.dhcp, CONFIG.md), and exit
+./out/perch-collector dhcp
 ```
 
 ## Install as systemd Service

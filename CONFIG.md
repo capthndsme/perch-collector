@@ -205,6 +205,17 @@ wan_interfaces: []
 # gateway report, so there are no ports either way.
 # Default: "auto"
 ports: auto
+
+# Report the router's DHCP leases and static DHCP hosts (observe.dhcp, below)
+# so the controller names devices with no transport of its own to the router:
+# "auto" = on under OpenWrt, "on", "off". Independent of gateway_stats.
+# Default: "auto"
+dhcp_leases: auto
+
+# Seconds between resends of unchanged leases (a change goes out with the next
+# push). Clamped to 60..3600.
+# Default: 600
+dhcp_leases_refresh: 600
 ```
 
 ## Environment Variables
@@ -243,6 +254,8 @@ Configuration values can also be set via environment variables. They take the hi
 | `PERCH_COLLECTOR_GATEWAY_STATS` | `gateway_stats` (`auto`, `on`, `off`) |
 | `PERCH_COLLECTOR_WAN_INTERFACES` | `wan_interfaces` (comma-separated) |
 | `PERCH_COLLECTOR_PORTS` | `ports` (`auto`, `on`, `off`) |
+| `PERCH_COLLECTOR_DHCP_LEASES` | `dhcp_leases` (`auto`, `on`, `off`) |
+| `PERCH_COLLECTOR_DHCP_LEASES_REFRESH` | `dhcp_leases_refresh` (seconds) |
 
 The names before the rename, `GOCOLLECTOR_<NAME>`, are still read when
 `PERCH_COLLECTOR_<NAME>` is unset; the daemon logs one deprecation line per
@@ -551,6 +564,47 @@ reads a missing key as "not reported", never as "no ports". `on` behaves like
 `auto`; `1` and `0` (UCI) mean on and off. `perch-collector ports` prints the
 array once and exits without reading this configuration (README, "The
 Gateway agent's ports").
+
+### DHCP leases and static hosts (`observe.dhcp`)
+
+With `dhcp_leases` on (the default on OpenWrt), the collector reports what the
+router's DHCP servers handed out, so the controller can show device names
+without an SSH or LXC transport to the router (Settings → Hostname
+enrichment then says "provided by the gateway agent"):
+
+```json
+"observe":{"dhcp":{
+  "leases4":[{"mac":"02:00:00:00:10:21","ip":"192.168.1.21","hostname":"laptop",
+              "expires":1790000000,"clientId":"01:02:00:00:00:10:21","source":"dnsmasq"}],
+  "leases6":[{"duid":"000100012abcdef0020000001021","iaid":12345,"addresses":["fd00::21"],
+              "hostname":"laptop","validUntil":1790003600,"source":"dnsmasq"}],
+  "hosts":[{"name":"nas","macs":["02:00:00:00:10:30"],"ip":"192.168.1.30"}]}}
+```
+
+- **Sources.** `uci show dhcp` names the dnsmasq lease files
+  (`dhcp.@dnsmasq[*].leasefile`, `/tmp/dhcp.leases` for a section without
+  one); both IPv4 and dnsmasq's DHCPv6 lines are read. When an `odhcpd`
+  section exists, `ubus call dhcp ipv6leases` (and `ipv4leases` with
+  `maindhcp '1'`) adds odhcpd's leases. `hosts` are the named `host`
+  sections of `/etc/config/dhcp` (disabled ones skipped). Nothing depends on
+  dnsmasq's DNS port: a router whose port 53 belongs to another resolver
+  (dnsmasq on `port '54'` or `'0'`) reports the same.
+- **Cost.** Each push stats the lease files and `/etc/config/dhcp`; a file is
+  re-read only when its size or mtime changed, `uci` runs again only when
+  `/etc/config/dhcp` changed, and odhcpd is asked at most once a minute.
+- **When it is sent.** The section rides in `collector.push` only when its
+  fingerprint changed, in the first push of every session, and every
+  `dhcp_leases_refresh` seconds; `GET /api/v1/summary` carries it on every
+  call. An absent `observe` means "nothing new", never "no leases"; the
+  lists are `[]` when empty.
+- **Cleaning.** dnsmasq's `*` (no name) becomes no `hostname`, control
+  characters are dropped, names over 253 bytes are dropped, non-Ethernet
+  hardware addresses are skipped, duplicate leases for one MAC and address
+  collapse to the one expiring last. `expires` / `validUntil` 0 = infinite.
+  At most 4096 leases of each family and 1024 hosts.
+
+`perch-collector dhcp` prints the section once and exits, without reading
+this configuration.
 
 ## Packaged deployments
 

@@ -195,3 +195,10 @@ wan_interfaces: []
 # on; on is the same; off leaves them out. Without gateway stats there is no
 # gateway report and so no ports. `perch-collector ports` prints them once.
 ports: auto
+
+# The router's DHCP leases and static DHCP hosts (observe.dhcp), so the
+# controller names devices with nothing to set up on its side. auto = on
+# under OpenWrt; on / off force it. Unchanged leases are resent every
+# dhcp_leases_refresh seconds (60-3600). `perch-collector dhcp` prints them.
+dhcp_leases: auto
+dhcp_leases_refresh: 600

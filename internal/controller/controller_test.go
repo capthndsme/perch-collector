@@ -22,6 +22,7 @@ import (
 	"github.com/capthndsme/perch-collector/internal/aggregator"
 	"github.com/capthndsme/perch-collector/internal/classifier"
 	"github.com/capthndsme/perch-collector/internal/gateway"
+	"github.com/capthndsme/perch-collector/internal/observe"
 )
 
 var quiet = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -560,5 +561,88 @@ func TestPushCarriesGatewayPorts(t *testing.T) {
 				t.Fatalf("gateway.ports = %s (present %v)\nwant %s", ports, ok, tc.ports)
 			}
 		})
+	}
+}
+
+// collector.push carries observe.dhcp in the first push of a session, then
+// only when its fingerprint changes or the refresh is due; the hello
+// announces the capability. Without a DHCP source there is no observe key
+// and no capability.
+func TestPushCarriesDHCPObservation(t *testing.T) {
+	var mu sync.Mutex
+	fp := "a"
+	obs := &observe.DHCP{
+		Leases4: []observe.Lease4{{MAC: "02:00:00:00:10:21", IP: "192.168.1.21", Hostname: "laptop", Expires: 0, Source: observe.SourceDnsmasq}},
+		Leases6: []observe.Lease6{},
+		Hosts:   []observe.StaticHost{},
+	}
+	source := func() (*observe.DHCP, string) {
+		mu.Lock()
+		defer mu.Unlock()
+		return obs, fp
+	}
+	type seen struct {
+		caps    string
+		observe []string // raw observe per push, "" = absent
+	}
+	result := make(chan seen, 1)
+	fc := &fakeController{t: t}
+	fc.session = func(ctx context.Context, c *websocket.Conn, frames <-chan []byte, hello rpc.Message) {
+		var s seen
+		var hp map[string]json.RawMessage
+		json.Unmarshal(hello.Params, &hp)
+		s.caps = string(hp["capabilities"])
+		answerHello(ctx, c, hello, "adopted")
+		send(ctx, c, `{"jsonrpc":"2.0","method":"agent.configure","params":{"metricsIntervalSeconds":0.1,"lifecycle":"adopted"}}`)
+		for i := 0; i < 5; i++ {
+			m, _ := next(t, frames, pushFrame, 2*time.Second)
+			var p map[string]json.RawMessage
+			json.Unmarshal(m.Params, &p)
+			s.observe = append(s.observe, string(p["observe"]))
+			if i == 2 {
+				mu.Lock()
+				fp = "b" // a lease changed
+				mu.Unlock()
+			}
+		}
+		result <- s
+		c.Close(4002, "done")
+	}
+	srv := httptest.NewServer(fc)
+	defer srv.Close()
+	_, _, stop := newTestClient(t, srv, func(o *Options) {
+		o.Source.DHCP = source
+		o.DHCPRefresh = time.Hour
+	})
+	defer stop()
+	var s seen
+	select {
+	case s = <-result:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no pushes")
+	}
+	if s.caps != `["gateway_stats","observe.dhcp"]` {
+		t.Errorf("capabilities %s", s.caps)
+	}
+	want := `{"dhcp":{"leases4":[{"mac":"02:00:00:00:10:21","ip":"192.168.1.21","hostname":"laptop","expires":0,"source":"dnsmasq"}],"leases6":[],"hosts":[]}}`
+	if s.observe[0] != want {
+		t.Errorf("first push observe = %s\nwant %s", s.observe[0], want)
+	}
+	if s.observe[1] != "" || s.observe[2] != "" {
+		t.Errorf("unchanged observation resent: %v", s.observe[1:3])
+	}
+	// The change lands in push 4 (index 3) at the latest; after it, quiet again.
+	if s.observe[3] == "" && s.observe[4] == "" {
+		t.Errorf("changed observation never sent: %v", s.observe)
+	}
+	if s.observe[3] != "" && s.observe[4] != "" {
+		t.Errorf("changed observation sent twice: %v", s.observe)
+	}
+}
+
+func TestHelloWithoutDHCP(t *testing.T) {
+	p := firstPush(t, nil)
+	if _, ok := p["observe"]; ok {
+		t.Fatalf("observe = %s without a DHCP source", p["observe"])
 	}
 }

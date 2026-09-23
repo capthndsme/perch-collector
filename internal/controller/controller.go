@@ -31,6 +31,7 @@ import (
 	"github.com/capthndsme/perch-collector/internal/announce"
 	"github.com/capthndsme/perch-collector/internal/classifier"
 	"github.com/capthndsme/perch-collector/internal/gateway"
+	"github.com/capthndsme/perch-collector/internal/observe"
 )
 
 // Protocol constants.
@@ -43,7 +44,12 @@ const (
 	InstanceHeader = "X-Perch-Instance-Id"
 	// CapabilityGatewayStats is announced when pushes carry gateway stats.
 	CapabilityGatewayStats = "gateway_stats"
+	// CapabilityObserveDHCP is announced when pushes carry observe.dhcp.
+	CapabilityObserveDHCP = "observe.dhcp"
 )
+
+// DefaultDHCPRefresh is how often the DHCP observation is resent unchanged.
+const DefaultDHCPRefresh = 10 * time.Minute
 
 // Reconnect waits (section 3.3).
 const (
@@ -86,6 +92,10 @@ type Source struct {
 	Gateway func() *gateway.Stats
 	// Protocols is the classifier's protocol → category table (nil = none).
 	Protocols func() []classifier.ProtocolCategory
+	// DHCP returns the router's DHCP observation and its fingerprint; nil
+	// when the observation is off. A push carries it when the fingerprint
+	// differs from the last one sent in this session, and every DHCPRefresh.
+	DHCP func() (*observe.DHCP, string)
 }
 
 // System describes the host in the hello (display only).
@@ -114,6 +124,8 @@ type Options struct {
 	TLS    link.TLSOptions
 	System *System
 	Source Source
+	// DHCPRefresh resends an unchanged DHCP observation; 0 = DefaultDHCPRefresh.
+	DHCPRefresh time.Duration
 
 	// HTTPClient performs the handshake (tests); nil = link.NewHTTPClient(TLS).
 	HTTPClient *http.Client
@@ -162,6 +174,10 @@ type Client struct {
 	name        string
 	interval    time.Duration
 	configured  bool
+	// The DHCP observation last sent, per session (dhcpGen).
+	dhcpGen    uint64
+	dhcpFP     string
+	dhcpSentAt time.Time
 	// gen counts sessions. A session's goroutines may still report (a hello
 	// answered just before the close) after Run has moved on; anything they
 	// report for an older generation is dropped.
@@ -314,6 +330,9 @@ func (c *Client) hello() helloParams {
 	if c.o.Source.Gateway != nil {
 		p.Capabilities = append(p.Capabilities, CapabilityGatewayStats)
 	}
+	if c.o.Source.DHCP != nil {
+		p.Capabilities = append(p.Capabilities, CapabilityObserveDHCP)
+	}
 	return p
 }
 
@@ -387,7 +406,7 @@ func (c *Client) onOpen(gen uint64, configs chan link.Schedule, note *helloNote)
 		c.helloAccepted(gen, res)
 		link.RunPusher(ctx, link.PushOptions{
 			Configs: configs,
-			Push:    func(_ context.Context, seq uint64) { c.push(s, seq) },
+			Push:    func(_ context.Context, seq uint64) { c.push(s, seq, gen) },
 			MinGap:  c.o.minGap,
 			Log:     c.log,
 		})
@@ -437,6 +456,12 @@ type pushParams struct {
 	Meta        pushMeta                 `json:"meta"`
 	Devices     []aggregator.DeviceStats `json:"devices"`
 	Gateway     *gateway.Stats           `json:"gateway,omitempty"`
+	// Observe is runtime state of the router beside the traffic
+	// (docs/collector-agent.md section 4.3). Absent = nothing to report in
+	// this push; the controller keeps what it has.
+	// A part is present only in the pushes that carry it: when it changed,
+	// at the start of a session, and every refresh.
+	Observe *observe.Section `json:"observe,omitempty"`
 }
 
 type pushMeta struct {
@@ -444,7 +469,7 @@ type pushMeta struct {
 	Version          string `json:"version"`
 }
 
-func (c *Client) push(s *link.Session, seq uint64) {
+func (c *Client) push(s *link.Session, seq uint64, gen uint64) {
 	p := pushParams{
 		Seq:         seq,
 		CollectedAt: time.Now().UTC().Format(time.RFC3339),
@@ -458,6 +483,13 @@ func (c *Client) push(s *link.Session, seq uint64) {
 	if c.o.Source.Gateway != nil {
 		p.Gateway = c.o.Source.Gateway()
 	}
+	dhcpFP := ""
+	if c.o.Source.DHCP != nil {
+		if d, fp := c.o.Source.DHCP(); d != nil && c.dhcpDue(gen, fp) {
+			p.Observe = &observe.Section{DHCP: d}
+			dhcpFP = fp
+		}
+	}
 	b, err := json.Marshal(p)
 	if err != nil {
 		c.log.Error("encoding a push", "err", err)
@@ -467,9 +499,31 @@ func (c *Client) push(s *link.Session, seq uint64) {
 		c.log.Debug("push not sent", "seq", seq, "err", err)
 		return
 	}
+	if dhcpFP != "" {
+		c.dhcpSent(gen, dhcpFP)
+	}
 	if seq == 1 {
 		log.Printf("controller: first push of this session: %d devices, %d KiB before compression", len(p.Devices), len(b)/1024)
 	}
+}
+
+// dhcpDue reports whether a push of session gen should carry the DHCP
+// observation with fingerprint fp: first in the session, changed, or the
+// refresh is due.
+func (c *Client) dhcpDue(gen uint64, fp string) bool {
+	refresh := c.o.DHCPRefresh
+	if refresh <= 0 {
+		refresh = DefaultDHCPRefresh
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.dhcpGen != gen || c.dhcpFP != fp || time.Since(c.dhcpSentAt) >= refresh
+}
+
+func (c *Client) dhcpSent(gen uint64, fp string) {
+	c.mu.Lock()
+	c.dhcpGen, c.dhcpFP, c.dhcpSentAt = gen, fp, time.Now()
+	c.mu.Unlock()
 }
 
 type statusResult struct {

@@ -570,3 +570,48 @@ func TestPortsPrecedence(t *testing.T) {
 		t.Fatal("PERCH_COLLECTOR_PORTS=maybe accepted")
 	}
 }
+
+// dhcp_leases: auto | on | off like gateway_stats, auto = on under OpenWrt;
+// dhcp_leases_refresh defaults to 600 s and is clamped to 60..3600.
+func TestDHCPLeasesSetting(t *testing.T) {
+	cfg := Defaults()
+	if err := cfg.Validate(); err != nil || cfg.DHCPLeases != "auto" || cfg.DHCPLeasesRefresh != DHCPLeasesRefreshDefault {
+		t.Fatalf("defaults: %q %d %v", cfg.DHCPLeases, cfg.DHCPLeasesRefresh, err)
+	}
+	for in, want := range map[string]string{"": "auto", "on": "on", "1": "on", "off": "off", "0": "off"} {
+		cfg := Defaults()
+		cfg.DHCPLeases = in
+		if err := cfg.Validate(); err != nil || cfg.DHCPLeases != want {
+			t.Errorf("%q -> %q %v, want %q", in, cfg.DHCPLeases, err, want)
+		}
+	}
+	cfg = Defaults()
+	cfg.DHCPLeases = "maybe"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "dhcp_leases") {
+		t.Errorf("dhcp_leases maybe: %v", err)
+	}
+	for in, want := range map[int]int{0: 600, 5: 60, 60: 60, 900: 900, 99999: 3600} {
+		cfg := Defaults()
+		cfg.DHCPLeasesRefresh = in
+		if err := cfg.Validate(); err != nil || cfg.DHCPLeasesRefresh != want {
+			t.Errorf("refresh %d -> %d, want %d", in, cfg.DHCPLeasesRefresh, want)
+		}
+	}
+	for _, tc := range []struct {
+		setting string
+		openwrt bool
+		want    bool
+	}{
+		{"auto", true, true}, {"auto", false, false}, {"on", false, true}, {"off", true, false},
+	} {
+		if got := (Config{DHCPLeases: tc.setting}).DHCPLeasesEnabled(tc.openwrt); got != tc.want {
+			t.Errorf("%s on OpenWrt=%v: %v", tc.setting, tc.openwrt, got)
+		}
+	}
+	t.Setenv("PERCH_COLLECTOR_DHCP_LEASES", "off")
+	t.Setenv("PERCH_COLLECTOR_DHCP_LEASES_REFRESH", "120")
+	cfg, err := load(filepath.Join(t.TempDir(), "absent.yaml"), cliOverrides{})
+	if err != nil || cfg.DHCPLeases != "off" || cfg.DHCPLeasesRefresh != 120 {
+		t.Errorf("from the environment: %q %d %v", cfg.DHCPLeases, cfg.DHCPLeasesRefresh, err)
+	}
+}

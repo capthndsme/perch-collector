@@ -11,6 +11,7 @@ import (
 
 	"github.com/capthndsme/perch-collector/internal/aggregator"
 	"github.com/capthndsme/perch-collector/internal/gateway"
+	"github.com/capthndsme/perch-collector/internal/observe"
 )
 
 func newTestServer() *Server {
@@ -199,5 +200,24 @@ func TestSummaryGatewayPorts(t *testing.T) {
 				t.Fatalf("gateway.ports = %s (present %v)\nwant %s", raw, ok, tc.want)
 			}
 		})
+	}
+}
+
+// GET /api/v1/summary carries observe.dhcp when the observation is on, and
+// no observe key when it is off.
+func TestSummaryObserveDHCP(t *testing.T) {
+	s := newTestServer()
+	if body := get(t, s, "/api/v1/summary"); body["observe"] != nil {
+		t.Fatalf("observe = %v with the observation off", body["observe"])
+	}
+	s.SetDHCP(func() (*observe.DHCP, string) {
+		return &observe.DHCP{Leases4: []observe.Lease4{{MAC: "02:00:00:00:10:21", IP: "192.168.1.21", Hostname: "laptop", Source: "dnsmasq"}},
+			Leases6: []observe.Lease6{}, Hosts: []observe.StaticHost{}}, "fp"
+	})
+	body := get(t, s, "/api/v1/summary")
+	o, _ := body["observe"].(map[string]any)
+	d, _ := o["dhcp"].(map[string]any)
+	if l, _ := d["leases4"].([]any); len(l) != 1 {
+		t.Fatalf("observe = %v", body["observe"])
 	}
 }

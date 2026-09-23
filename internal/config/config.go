@@ -180,6 +180,18 @@ type Config struct {
 	// stats off there are none either way (see PortsEnabled).
 	Ports string `yaml:"ports"`
 
+	// DHCPLeases reports the router's DHCP leases and static DHCP hosts
+	// (observe.dhcp) so the controller can name devices without a transport
+	// of its own to the router. "auto" (the default) is on when the
+	// collector runs on OpenWrt; "on" and "off" force it. Independent of
+	// gateway_stats.
+	DHCPLeases string `yaml:"dhcp_leases"`
+
+	// DHCPLeasesRefresh is how often, in seconds, the leases are sent even
+	// though nothing changed (a change is sent with the next push).
+	// Clamped to DHCPLeasesRefreshMin..DHCPLeasesRefreshMax.
+	DHCPLeasesRefresh int `yaml:"dhcp_leases_refresh"`
+
 	// Deprecated lists the pre-rename GOCOLLECTOR_* variables that supplied
 	// a value, so main can say once that each has a new name. Never YAML.
 	Deprecated []string `yaml:"-"`
@@ -204,6 +216,16 @@ const (
 	PortsAuto = "auto"
 	PortsOn   = "on"
 	PortsOff  = "off"
+)
+
+// DHCPLeases values are GatewayStats's: auto, on, off.
+
+// DHCP lease refresh bounds and default, in seconds. The controller treats a
+// router that has not sent its leases for twice the maximum as gone.
+const (
+	DHCPLeasesRefreshMin     = 60
+	DHCPLeasesRefreshMax     = 3600
+	DHCPLeasesRefreshDefault = 600
 )
 
 // Announce interval bounds. The lower bound keeps a misconfigured collector
@@ -260,6 +282,8 @@ func Defaults() Config {
 		GatewayStats:                GatewayStatsAuto,
 		WANInterfaces:               nil,
 		Ports:                       PortsAuto,
+		DHCPLeases:                  GatewayStatsAuto,
+		DHCPLeasesRefresh:           DHCPLeasesRefreshDefault,
 	}
 }
 
@@ -360,6 +384,8 @@ func load(configPath string, cli cliOverrides) (Config, error) {
 		cfg.WANInterfaces = list
 	}
 	env.str("PORTS", &cfg.Ports)
+	env.str("DHCP_LEASES", &cfg.DHCPLeases)
+	env.integer("DHCP_LEASES_REFRESH", func(n int) { cfg.DHCPLeasesRefresh = n })
 	cfg.Deprecated = env.deprecated
 	if env.err != nil {
 		return cfg, env.err
@@ -519,6 +545,20 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("ports must be auto, on or off, got %q", c.Ports)
 	}
 	c.Ports = ports
+	dl, ok := normalizeAutoOnOff(c.DHCPLeases)
+	if !ok {
+		return fmt.Errorf("dhcp_leases must be auto, on or off, got %q", c.DHCPLeases)
+	}
+	c.DHCPLeases = dl
+	if c.DHCPLeasesRefresh == 0 {
+		c.DHCPLeasesRefresh = DHCPLeasesRefreshDefault
+	}
+	if c.DHCPLeasesRefresh < DHCPLeasesRefreshMin {
+		c.DHCPLeasesRefresh = DHCPLeasesRefreshMin
+	}
+	if c.DHCPLeasesRefresh > DHCPLeasesRefreshMax {
+		c.DHCPLeasesRefresh = DHCPLeasesRefreshMax
+	}
 
 	// Clamped unconditionally so the value in the struct is always the value
 	// the daemon would actually use.
@@ -569,6 +609,17 @@ func (c Config) PortsEnabled(gatewayStats bool) bool {
 	return gatewayStats && c.Ports != PortsOff
 }
 
+// DHCPLeasesEnabled resolves DHCPLeases; onOpenWrt is what "auto" becomes.
+func (c Config) DHCPLeasesEnabled(onOpenWrt bool) bool {
+	switch c.DHCPLeases {
+	case GatewayStatsOn:
+		return true
+	case GatewayStatsOff:
+		return false
+	}
+	return onOpenWrt
+}
+
 // InstanceIDPath is the file the instance id is resolved from and persisted
 // to: InstanceIDFile, except that the default path yields to the pre-rename
 // LegacyInstanceIDFile while only that one exists, so a bare-metal upgrade
@@ -590,7 +641,8 @@ func instanceIDPath(configured, def, legacy string) string {
 	return def
 }
 
-// normalizeAutoOnOff reads an auto/on/off switch (gateway_stats, ports):
+// normalizeAutoOnOff reads an auto/on/off switch (gateway_stats, ports,
+// dhcp_leases):
 // empty is auto, and the usual boolean spellings (UCI's '1' and '0'
 // included) are on and off.
 func normalizeAutoOnOff(v string) (string, bool) {

@@ -1,0 +1,26 @@
+{
+	"device": {
+		"br-lan": {
+			"leases": [
+				{
+					"duid": "00030001020000001041",
+					"iaid": 1,
+					"hostname": "desktop",
+					"accept-reconf": false,
+					"assigned": 4660,
+					"flags": [ "bound" ],
+					"ipv6-addr": [ { "address": "fd00::41", "preferred-lifetime": 3000, "valid-lifetime": 3600 } ],
+					"valid": 3600
+				},
+				{
+					"duid": "0004deadbeef",
+					"iaid": 2,
+					"hostname": "",
+					"flags": [ "bound" ],
+					"ipv6-addr": [ { "address": "fd00::42/128" } ],
+					"valid": 4294967295
+				}
+			]
+		}
+	}
+}
