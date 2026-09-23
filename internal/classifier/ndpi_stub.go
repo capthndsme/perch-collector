@@ -40,3 +40,22 @@ func (c *NDPIClassifier) ProtocolCategories() []ProtocolCategory { return nil }
 // NDPIAvailable signals at compile time whether the binary was built
 // with `-tags ndpi`. False here; the cgo file defines it as true.
 const NDPIAvailable = false
+
+// NDPIModule is the no-op shape of a shared detection module.
+type NDPIModule struct{}
+
+// NewNDPIModule always errors out in stub builds.
+func NewNDPIModule() (*NDPIModule, error) {
+	return nil, errors.New("nDPI support not compiled in (build with `-tags ndpi`)")
+}
+
+// NewClassifier is unreachable in stub builds.
+func (s *NDPIModule) NewClassifier(maxFlows, idleSeconds int) (*NDPIClassifier, error) {
+	return nil, errors.New("nDPI support not compiled in")
+}
+
+// Close is a no-op in stub builds.
+func (s *NDPIModule) Close() {}
+
+// NDPIVersion is empty in stub builds.
+func NDPIVersion() string { return "" }

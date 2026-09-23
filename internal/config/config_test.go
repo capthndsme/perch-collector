@@ -666,6 +666,18 @@ func TestCaptureNetworksSettings(t *testing.T) {
 	if cfg.MultiCapture() || !cfg.RoutedLANEnabled() {
 		t.Errorf("explicit routed_lan on a single interface")
 	}
+	if cfg.NDPIModule != NDPIModuleShared {
+		t.Errorf("ndpi_module default %q", cfg.NDPIModule)
+	}
+	t.Setenv("PERCH_COLLECTOR_NDPI_MODULE", "per-network")
+	if cfg, err = load(filepath.Join(t.TempDir(), "none.yaml"), cliOverrides{}); err != nil || cfg.NDPIModule != NDPIModulePerNetwork {
+		t.Errorf("ndpi_module per-network: %v %q", err, cfg.NDPIModule)
+	}
+	t.Setenv("PERCH_COLLECTOR_NDPI_MODULE", "both")
+	if _, err := load(filepath.Join(t.TempDir(), "none.yaml"), cliOverrides{}); err == nil {
+		t.Errorf("bad ndpi_module accepted")
+	}
+	t.Setenv("PERCH_COLLECTOR_NDPI_MODULE", "")
 	t.Setenv("PERCH_COLLECTOR_ROUTED_LAN", "sometimes")
 	if _, err := load(filepath.Join(t.TempDir(), "none.yaml"), cliOverrides{}); err == nil {
 		t.Errorf("bad routed_lan accepted")

@@ -185,15 +185,15 @@ func TestNDPIClassifyTLSClientHelloSNI(t *testing.T) {
 	}
 }
 
-// flowState reports, under c.mu, whether the flow is finalised and
+// flowState reports, under the module lock, whether the flow is finalised and
 // whether native nDPI state is still attached to it.
 func (c *NDPIClassifier) flowState(key flow.Key) (done, native bool) {
 	e, created := c.table.GetOrCreate(key)
 	if created {
 		panic("flowState: unknown flow")
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.m.mu.Lock()
+	defer c.m.mu.Unlock()
 	return e.Done, e.UserData != nil
 }
 
@@ -422,4 +422,53 @@ func dnsQuery(name string) []byte {
 		q = append(q, label...)
 	}
 	return append(q, 0x00, 0x00, 0x01, 0x00, 0x01)
+}
+
+// Two captures on one shared module: each classifier has its own flow
+// table, so the same routed flow seen on both is a separate flow in each,
+// both learn the name, and closing one leaves the other (and the module)
+// working until the last reference goes.
+func TestNDPISharedModule(t *testing.T) {
+	mod, err := NewNDPIModule()
+	if err != nil {
+		t.Skipf("nDPI unavailable: %v", err)
+	}
+	a, err := mod.NewClassifier(1000, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := mod.NewClassifier(1000, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mod.Close()
+	if a.m != b.m {
+		t.Fatal("the classifiers do not share the module")
+	}
+	client, server := []byte{192, 168, 1, 10}, []byte{192, 168, 30, 40}
+	hello := ipv4TCP(client, server, 51000, 443, tcpPSH|tcpACK, 1000, tlsClientHello("nas.example.com"))
+	for _, c := range []*NDPIClassifier{a, b} {
+		r := c.Classify(client, server, 51000, 443, ProtoTCP, hello)
+		if r.ServerName != "nas.example.com" || !r.ToServer {
+			t.Fatalf("shared module: %+v", r)
+		}
+		if c.FlowCount() != 1 {
+			t.Errorf("flow count %d, want 1 per table", c.FlowCount())
+		}
+	}
+	a.Close()
+	if b.m.mod == nil {
+		t.Fatal("closing one classifier tore the shared module down")
+	}
+	r := b.Classify(server, client, 443, 51000, ProtoTCP, ipv4TCP(server, client, 443, 51000, tcpACK, 7000, nil))
+	if r.ServerName != "nas.example.com" {
+		t.Errorf("after the other closed: %+v", r)
+	}
+	b.Close()
+	if b.m.mod != nil || b.m.refs != 0 {
+		t.Errorf("module still alive after the last close (refs %d)", b.m.refs)
+	}
+	if _, err := mod.NewClassifier(10, 1); err == nil {
+		t.Errorf("a classifier on a closed module")
+	}
 }

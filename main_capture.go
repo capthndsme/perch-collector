@@ -39,6 +39,9 @@ type captureSet struct {
 	// singleCls is the single engine's classifier.
 	singleCls classifier.Classifier
 
+	// module is the nDPI module the captures share (ndpi_module shared).
+	module *classifier.NDPIModule
+
 	cancel context.CancelFunc
 	done   chan struct{}
 	kick   chan struct{}
@@ -166,9 +169,26 @@ func startCapture(cfg config.Config, agg *aggregator.Aggregator, configuredMACs 
 	} else {
 		log.Printf("scope: routed_lan off: everything through the router counts as WAN")
 	}
+	// ndpi_module shared: one detection module for every capture, each
+	// capture with a classifier and flow table of its own.
+	if cfg.ClassificationMode == "ndpi" && cfg.NDPIModule == config.NDPIModuleShared {
+		classifier.SetNDPIPartialExtraPackets(cfg.NDPIPartialExtraPackets)
+		if m, err := classifier.NewNDPIModule(); err == nil {
+			cs.module = m
+			log.Printf("classifier: nDPI %s, one module shared by the captures (ndpi_module shared), a flow table each", classifier.NDPIVersion())
+		}
+	}
+	perEngine := func(flows int, quiet bool) classifier.Classifier {
+		if cs.module != nil {
+			if c, err := cs.module.NewClassifier(flows, cfg.NDPIFlowIdleSeconds); err == nil {
+				return c
+			}
+		}
+		return newClassifier(cfg, flows, quiet)
+	}
 	// The category table is a property of the classifier build: read it
 	// once from a classifier of its own.
-	probe := newClassifier(cfg, ndpiFlowsFloor, false)
+	probe := perEngine(ndpiFlowsFloor, false)
 	if lister, ok := probe.(classifier.CategoryLister); ok {
 		cs.categories = lister.ProtocolCategories()
 	}
@@ -204,14 +224,18 @@ func startCapture(cfg config.Config, agg *aggregator.Aggregator, configuredMACs 
 		},
 		Open: func(t netcap.Target, n int) (netcap.Engine, error) {
 			flows := flowsPerEngine(cfg.NDPIMaxFlows, n)
-			cls := newClassifier(cfg, flows, true)
+			cls := perEngine(flows, true)
 			e, err := capture.NewForNetwork(t.Device, t.Network, cfg.SnapLen, cfg.Promisc, cfg.BPFFilter, agg, cls)
 			if err != nil {
 				cls.Close()
 				return nil, err
 			}
 			if ndpiOn {
-				log.Printf("classifier: %s gets its own nDPI engine (max_flows=%d)", t.Device, flows)
+				what := "its own nDPI module"
+				if cs.module != nil {
+					what = "a flow table on the shared nDPI module"
+				}
+				log.Printf("classifier: %s gets %s (max_flows=%d)", t.Device, what, flows)
 			}
 			return engineWithClassifier{Engine: e, cls: cls}, nil
 		},
@@ -294,5 +318,8 @@ func (cs *captureSet) Stop() {
 	select {
 	case <-cs.done:
 	case <-time.After(5 * time.Second):
+	}
+	if cs.module != nil {
+		cs.module.Close()
 	}
 }

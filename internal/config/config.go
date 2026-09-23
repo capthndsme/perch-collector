@@ -44,6 +44,13 @@ type Config struct {
 	// existing single-interface collector keeps its WAN/LAN split.
 	RoutedLAN string `yaml:"routed_lan"`
 
+	// NDPIModule is how the captures of CaptureNetworks use nDPI: "shared"
+	// (the default) runs one detection module (its protocol tables, about
+	// 12 MB) for every capture, each still with a classifier and flow
+	// table of its own; "per_network" gives every capture a module of its
+	// own (about 12 MB more per network, nDPI work spread over the CPUs).
+	NDPIModule string `yaml:"ndpi_module"`
+
 	// BPFFilter is a BPF filter expression applied to the capture.
 	BPFFilter string `yaml:"bpf_filter"`
 
@@ -288,6 +295,12 @@ var ObservePartNames = []string{"neighbors", "interfaces", "upnp", "mwan3", "res
 // is kept when controller_address_cache is not set.
 const DefaultControllerAddressCache = "/var/lib/perch-collector/controller-address"
 
+// NDPIModule values.
+const (
+	NDPIModuleShared     = "shared"
+	NDPIModulePerNetwork = "per_network"
+)
+
 // Capture rescan bounds and default, in seconds.
 const (
 	CaptureRescanMin     = 5
@@ -329,6 +342,7 @@ func Defaults() Config {
 		Interface:                   "",
 		CaptureRescan:               CaptureRescanDefault,
 		RoutedLAN:                   GatewayStatsAuto,
+		NDPIModule:                  NDPIModuleShared,
 		BPFFilter:                   "",
 		ClassificationMode:          "port",
 		NDPIMaxFlows:                50000,
@@ -438,6 +452,7 @@ func load(configPath string, cli cliOverrides) (Config, error) {
 	}
 	env.integer("CAPTURE_RESCAN", func(n int) { cfg.CaptureRescan = n })
 	env.str("ROUTED_LAN", &cfg.RoutedLAN)
+	env.str("NDPI_MODULE", &cfg.NDPIModule)
 	env.str("LISTEN", &cfg.Listen)
 	env.str("API_KEY", &cfg.APIKey)
 	env.str("BPF_FILTER", &cfg.BPFFilter)
@@ -653,6 +668,14 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("routed_lan must be auto, on or off, got %q", c.RoutedLAN)
 	}
 	c.RoutedLAN = rl
+	switch m := strings.ToLower(strings.TrimSpace(c.NDPIModule)); m {
+	case "", NDPIModuleShared:
+		c.NDPIModule = NDPIModuleShared
+	case NDPIModulePerNetwork, "per-network", "separate":
+		c.NDPIModule = NDPIModulePerNetwork
+	default:
+		return fmt.Errorf("ndpi_module must be shared or per_network, got %q", c.NDPIModule)
+	}
 	gs, ok := normalizeAutoOnOff(c.GatewayStats)
 	if !ok {
 		return fmt.Errorf("gateway_stats must be auto, on or off, got %q", c.GatewayStats)

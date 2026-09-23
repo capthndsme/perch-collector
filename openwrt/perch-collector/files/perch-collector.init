@@ -99,7 +99,7 @@ start_service() {
 	local instance_id server_url announce_interval announce_key announce_insecure
 	local transport ca_file gateway_stats wan_interfaces ports dhcp_leases dhcp_leases_refresh
 	local observe observe_parts observe_refresh conntrack_flush gateway_backup address_cache
-	local capture_networks capture_exclude capture_rescan routed_lan
+	local capture_networks capture_exclude capture_rescan routed_lan ndpi_module
 	local uci_dirty=0
 
 	config_load "$CONF"
@@ -140,6 +140,7 @@ start_service() {
 	config_list_foreach main capture_exclude append_list capture_exclude
 	config_get capture_rescan main capture_rescan '30'
 	config_get routed_lan main routed_lan 'auto'
+	config_get ndpi_module main ndpi_module 'shared'
 	if [ -n "$capture_networks" ]; then
 		# The daemon finds the devices (and the router's MACs) in netifd.
 		dev=""
@@ -200,6 +201,7 @@ start_service() {
 		PERCH_COLLECTOR_CAPTURE_EXCLUDE="$capture_exclude" \
 		PERCH_COLLECTOR_CAPTURE_RESCAN="$capture_rescan" \
 		PERCH_COLLECTOR_ROUTED_LAN="$routed_lan" \
+		PERCH_COLLECTOR_NDPI_MODULE="$ndpi_module" \
 		PERCH_COLLECTOR_LISTEN="$listen" \
 		PERCH_COLLECTOR_API_KEY="$api_key" \
 		PERCH_COLLECTOR_CLASSIFICATION_MODE="$mode" \

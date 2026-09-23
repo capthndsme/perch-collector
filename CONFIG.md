@@ -35,6 +35,11 @@ capture_rescan: 30
 # traffic to the router's own LAN addresses, as LAN instead of WAN. "auto" =
 # on with capture_networks, off with the single interface. Default: auto
 routed_lan: auto
+# With capture_networks and nDPI: "shared" = one nDPI detection module
+# (about 12 MB) for every capture, each with a classifier and flow table of
+# its own; "per_network" = a module per capture (about 12 MB more per
+# network, nDPI work spread over the CPUs). Default: shared
+ndpi_module: shared
 
 # BPF filter expression applied to the capture.
 # Empty string means capture all traffic.
@@ -279,6 +284,7 @@ Configuration values can also be set via environment variables. They take the hi
 | `PERCH_COLLECTOR_CAPTURE_EXCLUDE` | `capture_exclude` (comma-separated) |
 | `PERCH_COLLECTOR_CAPTURE_RESCAN` | `capture_rescan` (seconds) |
 | `PERCH_COLLECTOR_ROUTED_LAN` | `routed_lan` (`auto`, `on`, `off`) |
+| `PERCH_COLLECTOR_NDPI_MODULE` | `ndpi_module` (`shared`, `per_network`) |
 | `PERCH_COLLECTOR_LISTEN` | `listen` |
 | `PERCH_COLLECTOR_API_KEY` | `api_key` |
 | `PERCH_COLLECTOR_BPF_FILTER` | `bpf_filter` |
@@ -657,10 +663,15 @@ networks come and go:
   LAN-side L3 device plus `gateway_macs`; the local subnets are the prefixes
   of every LAN-side network that is up (IPv4, IPv6 addresses and the prefixes
   assigned from a delegated one) plus `local_subnets`. Both follow the rescan.
-- **nDPI.** `ndpi_max_flows` is split across the engines running when an
-  engine starts (at least 4096 each, never more than the total): a flow
-  routed between two captured networks is seen on both, and one flow table
-  would feed it to nDPI twice.
+- **nDPI.** Every capture has a classifier and flow table of its own: a
+  flow routed between two captured networks is seen on both, and one flow
+  table would feed it to nDPI twice. `ndpi_max_flows` is split across the
+  engines running when an engine starts (at least 4096 each, never more than
+  the total). The detection module behind them (its protocol tables and
+  host automata, about 12 MB resident) is one for all captures with
+  `ndpi_module: shared` (the default; the cgo calls of all captures then
+  take one lock), or one per capture with `per_network` (measured on the
+  lab router with six networks: 95 MB RSS against 32 MB for one network).
 
 `capture_networks` unset (the default outside the package's new config)
 keeps the single `interface` exactly as before: one engine, the configured
