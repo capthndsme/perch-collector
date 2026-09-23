@@ -41,7 +41,7 @@ func (p *Plane) writable(config string) bool {
 	if Denied(config) || config == LedgerConfig {
 		return false
 	}
-	for _, c := range p.allowed {
+	for _, c := range p.Allowed() {
 		if c == config {
 			return true
 		}

@@ -14,8 +14,30 @@ func TestConfigPlaneDefaults(t *testing.T) {
 	}
 	cp := cfg.ConfigPlane
 	if cp.ConfigAccess != ConfigAccessNone || !reflect.DeepEqual(cp.ManagedConfigs, []string{"network", "dhcp", "firewall"}) ||
-		cp.ConfigAllowInsecure || cp.ConfigConfirmMax != 600 || cp.StoragePath != "/etc/perch-collector" || cp.CaptureNetwork != "" {
+		cp.ConfigAllowInsecure || cp.ConfigConfirmMax != 600 || cp.StoragePath != "/etc/perch-collector" || cp.CaptureNetwork != "" ||
+		!cp.ManagedConfigAuto || len(cp.ManagedConfigExclude) != 0 {
 		t.Fatalf("%+v", cp)
+	}
+}
+
+func TestConfigPlaneSiblingOptOut(t *testing.T) {
+	t.Setenv("PERCH_COLLECTOR_MANAGED_CONFIG_AUTO", "0")
+	t.Setenv("PERCH_COLLECTOR_MANAGED_CONFIG_EXCLUDE", "sqm, sqm,perch-qos")
+	cfg, err := load(filepath.Join(t.TempDir(), "absent.yaml"), cliOverrides{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ManagedConfigAuto || !reflect.DeepEqual(cfg.ManagedConfigExclude, []string{"sqm", "perch-qos"}) {
+		t.Fatalf("%+v", cfg.ConfigPlane)
+	}
+	path := filepath.Join(t.TempDir(), "c.yaml")
+	if err := os.WriteFile(path, []byte("managed_config_exclude: [sqm]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PERCH_COLLECTOR_MANAGED_CONFIG_AUTO", "")
+	t.Setenv("PERCH_COLLECTOR_MANAGED_CONFIG_EXCLUDE", "")
+	if cfg, err = load(path, cliOverrides{}); err != nil || !cfg.ManagedConfigAuto || !reflect.DeepEqual(cfg.ManagedConfigExclude, []string{"sqm"}) {
+		t.Fatalf("%+v %v", cfg.ConfigPlane, err)
 	}
 }
 
@@ -63,6 +85,8 @@ func TestConfigPlaneBadValues(t *testing.T) {
 		{"PERCH_COLLECTOR_CONFIG_CONFIRM_MAX", "soon"},
 		{"PERCH_COLLECTOR_CONFIG_ALLOW_INSECURE", "maybe"},
 		{"PERCH_COLLECTOR_CONFIG_SIGN_KEY", "short"},
+		{"PERCH_COLLECTOR_MANAGED_CONFIG_AUTO", "sometimes"},
+		{"PERCH_COLLECTOR_MANAGED_CONFIG_EXCLUDE", "../sqm"},
 	} {
 		t.Run(tt.env, func(t *testing.T) {
 			t.Setenv(tt.env, tt.val)

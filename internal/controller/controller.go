@@ -161,6 +161,11 @@ type Options struct {
 	AddressCache string
 	// Config is the config plane (gwconfig.go); nil = not offered.
 	Config *gwconfig.Plane
+	// CaptureExclude receives agent.configure's capture.exclude: networks
+	// the controller asks not to capture, added to the local
+	// capture_exclude (nil = none; also when the block is absent). nil = the
+	// block is ignored.
+	CaptureExclude func(networks []string)
 
 	// HTTPClient performs the handshake (tests); nil = link.NewHTTPClient(TLS).
 	HTTPClient *http.Client
@@ -493,6 +498,32 @@ func (c *Client) onOpen(gen uint64, configs chan link.Schedule, note *helloNote)
 	}
 }
 
+// maxCaptureExclude bounds agent.configure's capture.exclude (network and
+// device names; a router has a handful).
+const maxCaptureExclude = 64
+
+// captureExclude validates capture.exclude: UCI network or device names,
+// at most maxCaptureExclude; nil = none (also for an absent block).
+func captureExclude(block *struct {
+	Exclude []string `json:"exclude"`
+}) []string {
+	if block == nil {
+		return nil
+	}
+	var out []string
+	for _, n := range block.Exclude {
+		n = strings.TrimSpace(n)
+		if n == "" || len(n) > 32 || strings.ContainsAny(n, "/ \t\n") || strings.HasPrefix(n, ".") {
+			continue
+		}
+		out = append(out, n)
+		if len(out) == maxCaptureExclude {
+			break
+		}
+	}
+	return out
+}
+
 // errorCode is `data.error` of a JSON-RPC error, when the controller set one.
 func errorCode(e *rpc.Error) string {
 	if m, ok := e.Data.(map[string]any); ok {
@@ -513,6 +544,9 @@ func (c *Client) onNotification(gen uint64, configs chan link.Schedule) func(ctx
 			MetricsIntervalSeconds *float64        `json:"metricsIntervalSeconds"`
 			Lifecycle              string          `json:"lifecycle"`
 			GatewayConfig          json.RawMessage `json:"gatewayConfig"`
+			Capture                *struct {
+				Exclude []string `json:"exclude"`
+			} `json:"capture"`
 		}
 		if err := rpc.Params(m.Params, &p); err != nil {
 			c.log.Warn("bad agent.configure from the controller", "err", err)
@@ -526,6 +560,9 @@ func (c *Client) onNotification(gen uint64, configs chan link.Schedule) func(ctx
 		link.Offer(configs, link.Schedule{Interval: interval})
 		c.scheduleChanged(gen, p.Lifecycle, interval)
 		c.configConfigure(p.GatewayConfig)
+		if c.o.CaptureExclude != nil {
+			c.o.CaptureExclude(captureExclude(p.Capture))
+		}
 	}
 }
 

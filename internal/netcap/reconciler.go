@@ -34,7 +34,10 @@ type Reconciler struct {
 	// Logf logs; nil = log.Printf.
 	Logf func(format string, args ...any)
 
-	mu      sync.Mutex
+	mu sync.Mutex
+	// extra are networks the controller excludes (agent.configure
+	// capture.exclude, merged with Selection.Exclude).
+	extra   []string
 	running map[string]*running // by device
 	plan    Plan
 	planned bool
@@ -47,6 +50,57 @@ type Reconciler struct {
 type running struct {
 	target Target
 	engine Engine
+}
+
+// selectionLocked is the configured selection with the controller's
+// exclusions added.
+func (r *Reconciler) selectionLocked() Selection {
+	sel := r.Selection
+	if len(r.extra) > 0 {
+		sel.Exclude = MergeExclude(r.Selection.Exclude, r.extra)
+	}
+	return sel
+}
+
+// SetControllerExclude sets the networks (or devices) the controller asks
+// not to capture (agent.configure capture.exclude; nil = none). They are
+// added to the local capture_exclude, never replace it. Reports whether the
+// set changed; the caller then reconciles (Reconcile, or a rescan kick).
+func (r *Reconciler) SetControllerExclude(names []string) bool {
+	next := MergeExclude(nil, names)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if strings.Join(next, ",") == strings.Join(r.extra, ",") {
+		return false
+	}
+	r.extra = next
+	return true
+}
+
+// Exclude is the effective exclusion list: local plus the controller's.
+func (r *Reconciler) Exclude() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.selectionLocked().Exclude
+}
+
+// MergeExclude is the sorted union of two exclusion lists, blanks and
+// repeats dropped.
+func MergeExclude(a, b []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, list := range [][]string{a, b} {
+		for _, n := range list {
+			n = strings.TrimSpace(n)
+			if n == "" || seen[n] {
+				continue
+			}
+			seen[n] = true
+			out = append(out, n)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (r *Reconciler) logf(format string, args ...any) {
@@ -87,7 +141,7 @@ func (r *Reconciler) Reconcile() (started, stopped []string) {
 		return nil, nil
 	}
 	delete(r.logged, "netifd")
-	p := MakePlan(d, r.Selection, r.Sys)
+	p := MakePlan(d, r.selectionLocked(), r.Sys)
 	for _, s := range p.Skipped {
 		dev := ""
 		if s.Device != "" {

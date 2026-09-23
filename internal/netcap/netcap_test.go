@@ -522,3 +522,61 @@ func TestNetworkOfDevice(t *testing.T) {
 		t.Errorf("an empty selection captures nothing: %v", p.Targets)
 	}
 }
+
+// The controller's capture.exclude (agent.configure) adds to the local
+// capture_exclude and is reconciled live: the excluded network's engine
+// stops, the others run on; clearing it starts it again.
+func TestReconcilerControllerExclude(t *testing.T) {
+	fake := &netifd{d: labDiscovery(t)}
+	var opened []*fakeEngine
+	r := &Reconciler{
+		Discover:  fake.discover,
+		Selection: Selection{Networks: []string{Auto}, Exclude: []string{"iot"}},
+		Sys:       labSys(),
+		Open: func(tg Target, n int) (Engine, error) {
+			e := &fakeEngine{t: tg}
+			opened = append(opened, e)
+			return e, nil
+		},
+		Logf: func(string, ...any) {},
+	}
+	started, _ := r.Reconcile()
+	if _, ok := r.Captured()["br-guest"]; !ok || len(started) == 0 {
+		t.Fatalf("guest not captured: %v", r.Captured())
+	}
+	for dev, network := range r.Captured() {
+		if network == "iot" {
+			t.Fatalf("the local exclusion is ignored: %s", dev)
+		}
+	}
+	if !r.SetControllerExclude([]string{"guest", " ", "guest"}) {
+		t.Fatal("no change reported")
+	}
+	if r.SetControllerExclude([]string{"guest"}) {
+		t.Fatal("an unchanged set reported as a change")
+	}
+	if got := r.Exclude(); !reflect.DeepEqual(got, []string{"guest", "iot"}) {
+		t.Fatalf("exclude %v", got)
+	}
+	started, stopped := r.Reconcile()
+	if len(started) != 0 || !reflect.DeepEqual(stopped, []string{"br-guest"}) {
+		t.Fatalf("exclude: started %v stopped %v", started, stopped)
+	}
+	for _, e := range opened {
+		if e.t.Device == "br-lan" && e.stopped {
+			t.Error("lan stopped by the guest exclusion")
+		}
+	}
+	// Cleared (the controller turned capture back on): guest again, iot still out.
+	if !r.SetControllerExclude(nil) {
+		t.Fatal("clearing reported no change")
+	}
+	started, stopped = r.Reconcile()
+	if !reflect.DeepEqual(started, []string{"br-guest"}) || len(stopped) != 0 {
+		t.Fatalf("clear: started %v stopped %v", started, stopped)
+	}
+	if got := r.Exclude(); !reflect.DeepEqual(got, []string{"iot"}) {
+		t.Fatalf("exclude %v", got)
+	}
+	r.Close()
+}

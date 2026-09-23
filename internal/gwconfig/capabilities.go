@@ -71,6 +71,9 @@ type Capabilities struct {
 	Management *ManagementPath `json:"management"`
 	// InstallAllowlist: what gateway.package.install accepts.
 	InstallAllowlist []string `json:"installAllowlist"`
+	// SiblingConfigs: installed sibling packages bring their config onto
+	// AllowedConfigs by themselves (README 7.7); why each is or is not there.
+	SiblingConfigs []SiblingConfig `json:"siblingConfigs"`
 }
 
 func strPtr(s string) *string {
@@ -100,6 +103,7 @@ func (p *Plane) Capabilities(ctx context.Context, challenge string) *Capabilitie
 		Apply:            p.ApplyState(),
 		Capture:          Capture{Networks: []CaptureNetwork{}},
 		InstallAllowlist: append(append([]string(nil), InstallAllowlist...), p.o.PackageAllow...),
+		SiblingConfigs:   p.SiblingConfigs(),
 	}
 	if p.o.Access == AccessWrite {
 		c.Signing = p.SigningFor(challenge)
@@ -115,7 +119,9 @@ func (p *Plane) Capabilities(ctx context.Context, challenge string) *Capabilitie
 	cancel()
 	db := p.packageDB()
 	c.PackageManager = strPtr(db.Manager())
-	if w, err := db.Watched(); err == nil {
+	// The kit's watch list plus the sibling packages (perch-qos is not in
+	// the kit's list): the controller shows "Install on gateway" by them.
+	if w, err := db.Watched(siblingPackages()...); err == nil {
 		c.Packages = w
 	}
 	if p.Access() != AccessNone {

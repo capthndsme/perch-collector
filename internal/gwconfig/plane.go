@@ -90,6 +90,12 @@ type Options struct {
 	ServerURL string
 	// PackageAllow extends InstallAllowlist (list package_allow).
 	PackageAllow []string
+	// SiblingsOff is managed_config_auto '0': installed sibling packages
+	// (siblings.go) do not bring their config onto the allowlist.
+	SiblingsOff bool
+	// SiblingExclude is list managed_config_exclude: sibling configs that
+	// stay off the allowlist although their package is installed.
+	SiblingExclude []string
 	// StoragePath is the path for the agent's local state (README section
 	// 7.18); only detected and reported here.
 	StoragePath string
@@ -140,6 +146,9 @@ type Plane struct {
 	pair        pairState
 	ap          applier
 	hooks       Hooks
+
+	sibMu sync.Mutex
+	sib   siblingCache
 }
 
 // New prepares a plane.
@@ -205,8 +214,10 @@ func (p *Plane) Access() string {
 // ConfiguredAccess is config_access as configured.
 func (p *Plane) ConfiguredAccess() string { return p.o.Access }
 
-// Allowed is the allowlist after the denylist, sorted.
-func (p *Plane) Allowed() []string { return append([]string(nil), p.allowed...) }
+// Allowed is the effective allowlist, sorted: managed_config after the
+// denylist, plus the configs of installed sibling packages (siblings.go,
+// README 7.7) unless the owner opted out.
+func (p *Plane) Allowed() []string { return p.effectiveAllowlist() }
 
 // Readable are the configs reads and change detection cover: the allowlist
 // and the ledger; none without read access.

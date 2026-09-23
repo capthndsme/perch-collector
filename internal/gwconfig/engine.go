@@ -685,6 +685,9 @@ func (p *Plane) rollbackPending(id, reason string, reload bool) {
 // (not at boot, where they start after the guard).
 func (p *Plane) rollback(rec *pendingRecord, reason string, reload bool, detail string) Result {
 	res := restore(p.store(), rec, reason, detail, p.redact, p.o.Root, p.pkgRunner(), p.clock.Now())
+	if rec.Packages != nil {
+		p.refreshSiblings()
+	}
 	if reload && len(res.restored) > 0 {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		var cfgs []string

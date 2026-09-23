@@ -477,10 +477,15 @@ the wire. UCI parsing, hashing, redaction and the package database come from
 the kit (`perch-agentkit/openwrt/uci`, `openwrt/pkgdb`, `openwrt/ubus`).
 
 **Router opt-in.** `config_access` none (default) / read / write, and the
-`managed_config` allowlist; see CONFIG.md. Readable = allowlist minus the
-denylist (`perch-collector perch-apd rpcd uhttpd dropbear luci`) plus the
-ledger `perch-managed`; nothing with access `none`. Writable = the allowlist
-minus the denylist (never the ledger, which only the agent writes).
+`managed_config` allowlist; see CONFIG.md. The effective allowlist adds the
+configs of installed sibling packages (`internal/gwconfig/siblings.go`,
+gateway README 7.7: `sqm-scripts` → `sqm`, `perch-qos` → `perch-qos`) unless
+`managed_config_auto '0'` or `list managed_config_exclude` opts them out; the
+package database is cached 30 s and re-read after a package job. Readable =
+the effective allowlist minus the denylist (`perch-collector perch-apd rpcd
+uhttpd dropbear luci`) plus the ledger `perch-managed`; nothing with access
+`none`. Writable = the effective allowlist minus the denylist (never the
+ledger, which only the agent writes); anything else is `config_not_allowed`.
 
 **Hello** (`collector.hello` params): the capability `gateway_config` joins
 `capabilities` whenever the plane exists, and
@@ -513,11 +518,17 @@ Mode `off`, an unknown mode, or no block at all means no watching. Seconds are
 clamped to 10..600 and 1..60. A session's end turns the mode off until the next
 configure.
 
+It may also carry `"capture":{"exclude":["guest"]}` (the controller's
+per-network capture toggle, controller `docs/gateway/networks.md` section 5):
+up to 64 network or device names, merged into `capture_exclude`
+(`netcap.Reconciler.SetControllerExclude`) and reconciled at once (the rescan
+kick); `[]` or no block clears the controller's part.
+
 **Requests from the controller**
 
 | Method | Params | Result |
 |---|---|---|
-| `gateway.capabilities` | `{}` | `{protocol, access, accessConfigured, allowedConfigs[], transportOk, allowInsecure, confirmMaxSeconds, backend:"ubus"\|"uci-cli"\|null, openwrt:{release,revision,target,arch,board}\|null, firewall:"fw4"\|"fw3"\|null, packageManager:"opkg"\|"apk"\|null, packages:{name:version}, configs[], hashes{}, uncommitted[], luciPending, apply:{state,…}, capture:{networks:[{network,device}]}, flash:{path,totalBytes,freeBytes}\|null, storage:{path,exists,mountPoint,fsType,device,medium,onRoot,readOnly,totalBytes,freeBytes}\|null, signing?:{…}, management:{network,device,controllerAddress,reportedAt}\|null, installAllowlist[]}` |
+| `gateway.capabilities` | `{}` | `{protocol, access, accessConfigured, allowedConfigs[], transportOk, allowInsecure, confirmMaxSeconds, siblingConfigs:[{config, package, installed, allowed, reason:"listed"\|"installed"\|"not_installed"\|"opted_out"}], backend:"ubus"\|"uci-cli"\|null, openwrt:{release,revision,target,arch,board}\|null, firewall:"fw4"\|"fw3"\|null, packageManager:"opkg"\|"apk"\|null, packages:{name:version}, configs[], hashes{}, uncommitted[], luciPending, apply:{state,…}, capture:{networks:[{network,device}]}, flash:{path,totalBytes,freeBytes}\|null, storage:{path,exists,mountPoint,fsType,device,medium,onRoot,readOnly,totalBytes,freeBytes}\|null, signing?:{…}, management:{network,device,controllerAddress,reportedAt}\|null, installAllowlist[]}` |
 | `gateway.config.read` | `{configs?:[…]}` (default: every readable config) | `{readAt, configs:[{name, hash, missing?, sections:[{name, type, anonymous, index, options:{k: string\|string[]}, secrets?:{k:"hmac:…"}, hash}]}], ledger:[{perchId, config, section, domain}], uncommitted[], luciPending}` |
 
 - `packages` lists only the kit's watch list (`firewall4 firewall dnsmasq

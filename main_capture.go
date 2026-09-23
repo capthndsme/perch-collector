@@ -45,6 +45,8 @@ type captureSet struct {
 	cancel context.CancelFunc
 	done   chan struct{}
 	kick   chan struct{}
+
+	singleExcludeOnce sync.Once
 }
 
 // newClassifier builds one classifier for the configured mode; flows is
@@ -306,6 +308,27 @@ func (cs *captureSet) Rescan() {
 	case cs.kick <- struct{}{}:
 	default:
 	}
+}
+
+// ControllerExclude applies agent.configure's capture.exclude (ctl-nets:
+// the controller's per-network capture toggle): the networks are added to
+// capture_exclude and the captures reconcile at once. With one capture
+// (single-interface mode) there is nothing to reconcile; the controller
+// drops that network's rows itself.
+func (cs *captureSet) ControllerExclude(networks []string) {
+	if cs.reconciler == nil {
+		if len(networks) > 0 {
+			cs.singleExcludeOnce.Do(func() {
+				log.Printf("capture: the controller excludes %s; single-interface capture keeps capturing (the controller drops those rows)", strings.Join(networks, ","))
+			})
+		}
+		return
+	}
+	if !cs.reconciler.SetControllerExclude(networks) {
+		return
+	}
+	log.Printf("capture: the controller excludes %q; capture_exclude is now %s", networks, strings.Join(cs.reconciler.Exclude(), ","))
+	cs.Rescan()
 }
 
 // CaptureInterface is what the collector says it captures on: the

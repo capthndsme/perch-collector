@@ -185,7 +185,7 @@ func simulate(in simInput) (*simulation, error) {
 			return nil, perr(CodeBadParams, "invalid config name %q", config)
 		}
 		if !in.writable(config) {
-			return nil, &PlaneError{Code: ErrConfigNotAllowed.Error(), Message: "not on the router's managed_config allowlist, or never writable", Data: map[string]any{"configs": []string{config}}}
+			return nil, &PlaneError{Code: ErrConfigNotAllowed.Error(), Message: "not on the router's allowlist (managed_config, or an installed sibling package such as sqm-scripts or perch-qos), or never writable", Data: map[string]any{"configs": []string{config}}}
 		}
 		if c, ok := sim.desired[config]; ok {
 			return c, nil

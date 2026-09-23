@@ -81,7 +81,7 @@ func (p *Plane) Read(names []string) (*ReadResult, error) {
 	}
 	if len(refused) > 0 {
 		sort.Strings(refused)
-		return nil, &AccessError{Code: ErrConfigNotAllowed, Message: "not on the router's managed_config allowlist, or never readable", Configs: refused}
+		return nil, &AccessError{Code: ErrConfigNotAllowed, Message: "not on the router's allowlist (managed_config, or an installed sibling package such as sqm-scripts or perch-qos), or never readable", Configs: refused}
 	}
 	sort.Strings(list)
 	res := &ReadResult{

@@ -352,3 +352,48 @@ func TestRunStopsAndWakes(t *testing.T) {
 		t.Fatal("Run did not stop")
 	}
 }
+
+// An own write the controller saw through a fresh hello (an apply's
+// redial) leaves no echo behind: the router later pausing and resuming a
+// section back to Perch's exact bytes is a router edit both times (lab,
+// 2026-09-23: sqm enabled 0 then 1 was reported as origin perch, unread).
+func TestWatchOwnEchoAbsorbedByHello(t *testing.T) {
+	root, p, _, clk, in := watchSetup(t)
+	p.Step(in.notify)
+	written := "\nconfig interface 'lan'\n\toption proto 'static'\n"
+	edit(t, root, "network", written, clk.now().Add(time.Hour))
+	h, _ := p.files.Hash("network")
+	p.RecordOwn("network", h, "g3-a42")
+	// The apply drops the session; the fresh hello carries the new hash.
+	p.Hello(context.Background(), "")
+	p.Configure(Configure{Mode: ModeObserve, WatchSeconds: seconds(10), DebounceSeconds: seconds(5)})
+	paused := "\nconfig interface 'lan'\n\toption proto 'static'\n\toption disabled '1'\n"
+	for i, body := range []string{paused, written} {
+		edit(t, root, "network", body, clk.now().Add(time.Duration(2+i)*time.Hour))
+		p.Trigger()
+		p.Step(in.notify)
+		clk.add(5 * time.Second)
+		p.Step(in.notify)
+		if len(in.got) != i+1 || in.got[i].Origin != OriginRouter {
+			t.Fatalf("edit %d: %+v", i, in.got)
+		}
+	}
+
+	// Without a hello in between, a router edit on top of an own write
+	// that was never reported still drops the echo.
+	edit(t, root, "firewall", "\nconfig defaults\n", clk.now().Add(5*time.Hour))
+	hf, _ := p.files.Hash("firewall")
+	p.RecordOwn("firewall", hf, "g3-a43")
+	edit(t, root, "firewall", "\nconfig defaults\n\toption input 'DROP'\n", clk.now().Add(6*time.Hour))
+	p.Trigger()
+	p.Step(in.notify)
+	edit(t, root, "firewall", "\nconfig defaults\n", clk.now().Add(7*time.Hour))
+	p.Trigger()
+	p.Step(in.notify)
+	clk.add(5 * time.Second)
+	p.Step(in.notify)
+	last := in.got[len(in.got)-1]
+	if last.Origin != OriginRouter || !reflect.DeepEqual(last.Changed, []string{"firewall"}) {
+		t.Fatalf("%+v", in.got)
+	}
+}

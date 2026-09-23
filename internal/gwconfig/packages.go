@@ -170,6 +170,9 @@ func (p *Plane) InstallPackages(ctx context.Context, a *PackageInstallParams, se
 			ConfirmTimeoutSeconds: rec.ConfirmSeconds, Manager: rec.Packages.Manager, Install: rec.Packages.Installed}, nil
 	}
 	res, err := p.installPackages(ctx, a, names, sess)
+	// A sibling package (sqm-scripts, perch-qos) brings its config onto the
+	// allowlist: look again now rather than after the cache's TTL.
+	p.refreshSiblings()
 	if err != nil {
 		p.release()
 	}
