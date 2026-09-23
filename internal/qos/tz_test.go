@@ -6,7 +6,7 @@ import (
 )
 
 func TestParseTZRefusals(t *testing.T) {
-	for _, bad := range []string{"X1", "CET", "CET-1CEST,M3.5", "CET-1CEST,M13.5.0,M10.5.0", "<+08", "CET-99"} {
+	for _, bad := range []string{"X1", "CET-1CEST,M3.5", "CET-1CEST,M13.5.0,M10.5.0", "<+08", "CET-99"} {
 		if _, err := ParseTZ(bad); err == nil {
 			t.Errorf("%q parsed", bad)
 		}
@@ -14,6 +14,12 @@ func TestParseTZRefusals(t *testing.T) {
 	z, err := ParseTZ("")
 	if err != nil || z != UTCZone {
 		t.Errorf("empty TZ: %v %v", z, err)
+	}
+	// OpenWrt's default /tmp/TZ is "UTC" with no offset.
+	if z, err := ParseTZ("UTC"); err != nil {
+		t.Errorf("UTC: %v", err)
+	} else if off, _ := z.Offset(time.Now()); off != 0 {
+		t.Errorf("UTC offset %d", off)
 	}
 }
 

@@ -43,6 +43,11 @@ func ParseTZ(s string) (*Zone, error) {
 	if z.stdName, rest, ok = tzName(rest); !ok {
 		return nil, fmt.Errorf("TZ %q: bad zone name", s)
 	}
+	if rest == "" {
+		// "UTC", "GMT": OpenWrt's default system.timezone. musl reads a
+		// missing offset as 0; so does this.
+		return z, nil
+	}
 	off, rest, ok := tzOffset(rest)
 	if !ok {
 		return nil, fmt.Errorf("TZ %q: bad offset", s)

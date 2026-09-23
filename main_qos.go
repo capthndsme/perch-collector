@@ -47,6 +47,7 @@ Runs the Perch traffic shaper once and exits (the daemon keeps it applied):
 
   apply    lift a stop and bring the kernel to /etc/config/perch-qos and the
            last device set (idempotent; the batch lands in /tmp/perch-qos/)
+  devices FILE  take a qos.devices.set ({revision, devices}) from a file
   sync     like apply, but a stop stays in force (hotplug, reloads)
   stop     remove every Perch tc object and keep shaping off until apply
            (sqm on the WAN is not touched)
@@ -77,6 +78,30 @@ func qosCommand(args []string, stdout, stderr io.Writer, sys qos.System) int {
 		return report(e.Start("cli " + args[0]))
 	case "stop":
 		return report(e.Stop())
+	case "devices":
+		// A qos.devices.set from a file (what the controller sends), for
+		// tests and debugging; the daemon picks it up.
+		if len(args) != 2 {
+			fmt.Fprint(stderr, "usage: perch-collector qos devices FILE\n")
+			return 2
+		}
+		data, err := os.ReadFile(args[1])
+		var p qos.DevicesSetParams
+		if err == nil {
+			err = json.Unmarshal(data, &p)
+		}
+		if err != nil {
+			fmt.Fprintf(stderr, "perch-collector qos devices: %v\n", err)
+			return 2
+		}
+		res, err := e.SetDevices(p)
+		if err != nil {
+			fmt.Fprintf(stderr, "perch-collector qos devices: %v\n", err)
+			return 1
+		}
+		e.Flush()
+		_ = enc.Encode(res)
+		return report(e.Reconcile("cli devices", true))
 	case "sync":
 		return report(e.Reconcile("cli sync", true))
 	case "run":

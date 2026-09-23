@@ -132,6 +132,9 @@ type Engine struct {
 	notify   chan struct{}
 	kick     chan struct{}
 	filterBy map[string]uint64 // last filter byte counters (quota deltas)
+	// devStamp is the runtime device file as this engine last wrote or
+	// read it: another writer (`perch-collector qos devices`) is picked up.
+	devStamp string
 	// quotaPrimed: the filter counters were read once since the start.
 	quotaPrimed bool
 	capRuns     map[string]int
@@ -170,6 +173,7 @@ func newEpoch() string {
 func (e *Engine) LoadDevices() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	e.devStamp = e.stamp(runtimeDevices)
 	if data, err := e.sys.ReadFile(runtimeDevices); err == nil {
 		if d, err := DecodeDevices(data); err == nil {
 			e.setDevicesLocked(d)
@@ -237,6 +241,7 @@ func (e *Engine) SetDevices(p DevicesSetParams) (DevicesSetResult, error) {
 	e.checkQuotasLocked()
 	data, _ := json.Marshal(next)
 	werr := e.sys.WriteFile(runtimeDevices, data, 0o600)
+	e.devStamp = e.stamp(runtimeDevices)
 	e.mu.Unlock()
 	if werr != nil {
 		log.Printf("qos: keeping the device set: %v", werr)
@@ -319,6 +324,16 @@ func (e *Engine) refreshConfigLocked() {
 		data, _ := e.sys.ReadFile(FirewallPath)
 		e.wanNets = WANNetworks(data)
 		e.lansAt = time.Time{}
+	}
+	if e.daemon && e.devStamp != "" && e.stamp(runtimeDevices) != e.devStamp {
+		e.devStamp = e.stamp(runtimeDevices)
+		if data, err := e.sys.ReadFile(runtimeDevices); err == nil {
+			if d, err := DecodeDevices(data); err == nil {
+				e.setDevicesLocked(d)
+				e.flashDirty = true
+				log.Printf("qos: device set revision %d taken from %s", d.Revision, runtimeDevices)
+			}
+		}
 	}
 	tz, _ := e.sys.ReadFile(TZPath)
 	if key := strings.TrimSpace(string(tz)); key != e.zoneKey || e.zone == nil {
@@ -774,6 +789,9 @@ func (e *Engine) flush(final bool) {
 	e.flashDirty, e.quotaDirty = false, false
 	e.flashAt, e.quotaFlashAt = now, now
 }
+
+// Flush writes the device cache to flash now.
+func (e *Engine) Flush() { e.flush(true) }
 
 // Desired returns the last plan (nil before the first reconcile).
 func (e *Engine) Desired() *Desired {

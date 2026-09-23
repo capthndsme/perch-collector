@@ -315,6 +315,7 @@ func (e *Engine) countQuotasLocked(k *Kernel) {
 		if err := e.sys.WriteFile(runtimeDevices, data, 0o600); err != nil {
 			log.Printf("qos: quota counters: %v", err)
 		}
+		e.devStamp = e.stamp(runtimeDevices)
 	}
 }
 
