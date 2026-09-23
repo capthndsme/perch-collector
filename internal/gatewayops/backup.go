@@ -244,6 +244,16 @@ func isPathValue(v string) bool {
 	return strings.HasPrefix(v, "/") && !strings.ContainsAny(v, " \t")
 }
 
+// isFlagValue: a UCI boolean (dropbear's `PasswordAuth '1'`, the
+// collector's `announce_api_key '1'`) is a switch, not a secret.
+func isFlagValue(v string) bool {
+	switch strings.ToLower(strings.Trim(strings.TrimSpace(v), `'"`)) {
+	case "0", "1", "on", "off", "yes", "no", "true", "false", "enabled", "disabled":
+		return true
+	}
+	return false
+}
+
 func isText(b []byte) bool {
 	if len(b) > 0 && bytes.IndexByte(b, 0) >= 0 {
 		return false
@@ -281,7 +291,7 @@ func redactText(name string, content []byte) ([]byte, []Redaction) {
 				note(f[0])
 			}
 		case isUCI:
-			if m := uciLine.FindStringSubmatch(line); m != nil && secretOption(m[3]) && !isPathValue(m[6]) {
+			if m := uciLine.FindStringSubmatch(line); m != nil && secretOption(m[3]) && !isPathValue(m[6]) && !isFlagValue(m[6]) {
 				line = m[1] + m[2] + m[3] + m[4] + m[5] + "'" + Redacted + "'"
 				note(m[3])
 			}

@@ -46,8 +46,9 @@ type MWAN3Interface struct {
 	Running       bool   `json:"running"`
 	Up            bool   `json:"up"`
 	UptimeSeconds int64  `json:"uptimeSeconds"`
-	// Tracking is "active" when mwan3track probes this interface, else
-	// "none" (fingerprint-stable form of the status's track state).
+	// Tracking is mwan3's own track state ("active", "paused", "down",
+	// "disabled") when it reports one; older mwan3: "active" while
+	// mwan3track probes the interface, else "none".
 	Tracking string         `json:"tracking"`
 	TrackIPs []MWAN3TrackIP `json:"trackIps"`
 }
@@ -73,7 +74,9 @@ func ParseMWAN3Status(data []byte) ([]MWAN3Interface, map[string][]MWAN3PolicyMe
 			Running bool   `json:"running"`
 			Up      bool   `json:"up"`
 			Uptime  int64  `json:"uptime"`
-			TrackIP []struct {
+			// Tracking: "active", "paused", "down", "disabled" (mwan3 2.10+).
+			Tracking string `json:"tracking"`
+			TrackIP  []struct {
 				IP     string `json:"ip"`
 				Status string `json:"status"`
 			} `json:"track_ip"`
@@ -91,7 +94,10 @@ func ParseMWAN3Status(data []byte) ([]MWAN3Interface, map[string][]MWAN3PolicyMe
 		}
 		i := MWAN3Interface{Name: n, Status: cleanName(it.Status), Enabled: it.Enabled, Running: it.Running, Up: it.Up,
 			UptimeSeconds: it.Uptime, Tracking: "none", TrackIPs: []MWAN3TrackIP{}}
-		if it.Running && len(it.TrackIP) > 0 {
+		switch t := cleanName(it.Tracking); {
+		case t != "":
+			i.Tracking = t
+		case it.Running && len(it.TrackIP) > 0:
 			i.Tracking = "active"
 		}
 		for _, t := range it.TrackIP {

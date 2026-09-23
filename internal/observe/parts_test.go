@@ -308,7 +308,7 @@ func TestMWAN3(t *testing.T) {
 		!reflect.DeepEqual(w.TrackIPs, []MWAN3TrackIP{{IP: "203.0.113.1", Up: true}, {IP: "198.51.100.9"}}) {
 		t.Errorf("wan = %+v", w)
 	}
-	if b := ifaces[1]; b.Name != "wanb" || b.Status != "offline" {
+	if b := ifaces[1]; b.Name != "wanb" || b.Status != "offline" || b.Tracking != "paused" {
 		t.Errorf("wanb = %+v", b)
 	}
 	wantPol := map[string][]MWAN3PolicyMember{

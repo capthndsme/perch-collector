@@ -215,7 +215,7 @@ func TestRedactArchive(t *testing.T) {
 	in := makeArchive(t, []file{
 		{"etc/config/wireless", wirelessConf},
 		{"etc/config/network", networkConf},
-		{"etc/config/perch-collector", "config perch-collector 'main'\n\toption api_key 'abcdefgh12345678'\n\toption server_url 'https://perch.example.com'\n"},
+		{"etc/config/perch-collector", "config perch-collector 'main'\n\toption api_key 'abcdefgh12345678'\n\toption announce_api_key '1'\n\toption server_url 'https://perch.example.com'\n"},
 		{"etc/config/uhttpd", "config uhttpd 'main'\n\toption key '/etc/uhttpd.key'\n\toption cert '/etc/uhttpd.crt'\n"},
 		{"etc/config/ddns", "config service 'x'\n\toption password 'ddns-pass'\n\toption lookup_host 'example.com'\n"},
 		{"etc/shadow", "root:$1$abc$defghijklmnop:19000:0:99999:7:::\ndaemon:*:0:0:99999:7:::\n"},
@@ -281,7 +281,10 @@ func TestRedactArchive(t *testing.T) {
 			t.Errorf("redactions lack %s: %+v", want, reds)
 		}
 	}
-	if got["/etc/config/network#public_key"] || got["/etc/config/uhttpd#key"] {
+	if !strings.Contains(files["etc/config/perch-collector"], "option announce_api_key '1'") {
+		t.Errorf("a boolean switch is not a secret:\n%s", files["etc/config/perch-collector"])
+	}
+	if got["/etc/config/network#public_key"] || got["/etc/config/uhttpd#key"] || got["/etc/config/perch-collector#announce_api_key"] {
 		t.Errorf("non-secrets listed: %+v", reds)
 	}
 }

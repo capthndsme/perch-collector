@@ -5,7 +5,7 @@
 			"track_ip": [ { "ip": "203.0.113.1", "status": "up", "latency": 3, "packetloss": 0 },
 			              { "ip": "198.51.100.9", "status": "down", "latency": 0, "packetloss": 100 } ] },
 		"wanb": { "age": 3, "online": 0, "offline": 120, "uptime": 0, "score": 0, "lost": 3, "turn": 5,
-			"status": "offline", "enabled": true, "running": true, "up": true,
+			"status": "offline", "enabled": true, "running": true, "tracking": "paused", "up": true,
 			"track_ip": [ { "ip": "192.0.2.1", "status": "down" } ] }
 	},
 	"connected": { "ipv4": [ "203.0.113.0/24" ], "ipv6": [] },
