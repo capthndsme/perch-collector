@@ -44,6 +44,15 @@ depending on the architecture and on the Go the OpenWrt release builds with
 (see "On a router" below for flash and memory). `SHA256SUMS` on the release
 lists every file.
 
+**Release candidates** (tags like `v1.0.0-rc.1`) are GitHub pre-releases, so
+`…/releases/latest` keeps pointing at the last final release. Their packages
+carry the pre-release in the form apk-tools accepts, `1.0.0_rc1`: tag
+`v1.0.0-rc.1` holds `perch-collector_1.0.0_rc1-r1_<arch>.ipk` / `.apk`, and
+`perch-collector --version` prints `1.0.0-rc.1`. apk sorts `1.0.0_rc1` below
+`1.0.0`, so the final release installs over it as an upgrade. opkg sorts it
+above `1.0.0` and answers "Not downgrading": move from a release candidate to
+the final release with `opkg install --force-downgrade`.
+
 ## Build
 
 From a checkout, with nothing but Docker (the official SDK image does the

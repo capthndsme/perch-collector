@@ -20,7 +20,10 @@ IMAGE        ?= perch-collector
 PKG          := ./...
 GO           ?= go
 BUILD_FLAGS  ?= -trimpath
-LDFLAGS      ?= -s -w
+# Version baked into the binary (start-up line, /healthz, the hello): the tag
+# at HEAD without its v, else the commit; override with VERSION=.
+VERSION      ?= $(or $(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v//'),dev)
+LDFLAGS      ?= -s -w -X main.version=$(VERSION)
 
 # Non-system nDPI install (see scripts/build-ndpi.sh). Points pkg-config
 # at it for the cgo build, the test runner's dynamic linker at its lib/,

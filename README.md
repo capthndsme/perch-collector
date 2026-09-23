@@ -56,6 +56,10 @@ docker run -d --name perch-collector --restart unless-stopped \
   ghcr.io/capthndsme/perch-collector:latest
 ```
 
+Image tags: `latest` and `1.0` follow final releases, a version tag (`1.0.0`,
+`1.0.0-rc.1`) stays put, `rc` is the newest release candidate and `edge` is
+`main`.
+
 It then shows up in the controller under Settings → Collectors → Pending
 adoption; the log prints the key's fingerprint to compare before you adopt.
 Add `-e PERCH_COLLECTOR_INTERFACE=<name>` to capture on a specific interface (a
@@ -266,7 +270,7 @@ Example response:
   "meta": {
     "capture_interface": "br-lan",
     "query_time": "2026-05-25T02:15:01Z",
-    "version": "0.2.0",
+    "version": "1.0.0-rc.1",
     "transport": "websocket",
     "announce_status": "adopted"
   }

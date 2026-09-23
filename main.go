@@ -39,6 +39,13 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "ports" {
 		os.Exit(portsCommand(os.Args[2:], os.Stdout, os.Stderr, hoststat.FS{}))
 	}
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "version", "--version", "-version":
+			fmt.Println("perch-collector " + version)
+			os.Exit(0)
+		}
+	}
 
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 	flag.Usage = usage
@@ -399,7 +406,8 @@ func usage() {
 	fmt.Fprintf(out, "perch-collector %s: Perch Network Collector\n\n"+
 		"Usage:\n"+
 		"  perch-collector [flags]   run the collector (every setting: CONFIG.md)\n"+
-		"  perch-collector ports     print the Ethernet ports the Gateway agent reports, as JSON\n\n"+
+		"  perch-collector ports     print the Ethernet ports the Gateway agent reports, as JSON\n"+
+		"  perch-collector version   print the version\n\n"+
 		"Flags:\n", version)
 	flag.PrintDefaults()
 }
