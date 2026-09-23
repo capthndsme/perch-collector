@@ -91,10 +91,12 @@ the router it adds the router's own health and its Ethernet ports
 ```
 perch-collector/
 ├── main.go                    # Entry point, `ports` subcommand, wiring, gateway/subnet resolution, transport
+├── main_config.go             # Config plane wiring, SIGHUP, `gateway-config` subcommand
 ├── collector.example.yaml     # Configuration template (copy to collector.yaml)
 ├── internal/
 │   ├── config/
-│   │   └── config.go          # YAML + CLI + env config loading
+│   │   ├── config.go          # YAML + CLI + env config loading
+│   │   └── config_plane.go    # config_access, managed_config, storage_path, ...
 │   ├── netutil/
 │   │   ├── gateway.go         # /proc/net/route + /proc/net/arp parsers
 │   │   └── subnets.go         # Interface CIDR enumeration + helpers
@@ -108,7 +110,9 @@ perch-collector/
 │   │   ├── announce.go        # HTTP announce (transport poll)
 │   │   └── instance.go        # Stable instance id resolution
 │   ├── controller/
-│   │   └── controller.go      # WebSocket session to the controller (transport websocket)
+│   │   ├── controller.go      # WebSocket session to the controller (transport websocket)
+│   │   └── gwconfig.go        # Config plane on the socket: hello block, RPCs, notifications
+│   ├── gwconfig/              # Config plane: access, read + redaction, capabilities, storage, change watch
 │   ├── gateway/
 │   │   └── gateway.go         # Router health from /proc (conntrack, TCP, load, memory, WAN) + ports from /sys
 │   └── flusher/
@@ -136,8 +140,15 @@ perch-collector/
   They share its `gateway.Ports`: the kit's port reader and its cache,
   behind a mutex that covers setting the report's WAN list and reading (the
   kit's reader must not have its options changed during a read).
+- **Config plane watcher** (OpenWrt, transport websocket) — one goroutine
+  for the daemon's life: stats the readable configs on the controller's
+  interval, re-hashes on SIGHUP, and notifies on the current session. The
+  controller's `gateway.*` requests run on the kit's request goroutines; the
+  plane's state is behind one mutex, and the ubus call for the author runs
+  outside it so a hello never waits for it.
 - **Main goroutine** — blocks on the OS signal channel, then orchestrates
-  graceful shutdown.
+  graceful shutdown. SIGHUP has its own goroutine (the config plane's
+  trigger) and no longer ends the daemon.
 
 The aggregator uses `sync.RWMutex` so the API server and flusher can read
 concurrently with each other and only block when the capture goroutine is
@@ -184,6 +195,112 @@ ports read with the default-route WAN list, prints the JSON and exits, before
 logging, configuration, capture, the listener or any connection. The daemon
 itself takes flags only and refuses a leftover argument before capture
 starts, so a subcommand typed after a flag cannot start a second collector.
+
+## The config plane
+
+The router side of the managed gateway's config plane (plan 1 of the design,
+promoted into the controller's `docs/gateway/`). This version is read-only:
+capabilities, reads with secrets redacted, change notifications with an
+author. Everything is additive on `perch-collector.v1`: an older controller
+drops the unknown hello key, sends no `gatewayConfig` in `agent.configure`
+(the plane then stays off) and never calls the new methods; an older
+collector answers them with -32601.
+
+Built in `main_config.go` when the collector runs on OpenWrt with transport
+websocket; `internal/gwconfig` holds the logic, `internal/controller/gwconfig.go`
+the wire. UCI parsing, hashing, redaction and the package database come from
+the kit (`perch-agentkit/openwrt/uci`, `openwrt/pkgdb`, `openwrt/ubus`).
+
+**Router opt-in.** `config_access` none (default) / read / write, and the
+`managed_config` allowlist; see CONFIG.md. Effective access = the configured
+one capped at `read` in this version. Readable = allowlist minus the denylist
+(`perch-collector perch-apd rpcd uhttpd dropbear luci`) plus the ledger
+`perch-managed`; nothing with access `none`.
+
+**Hello** (`collector.hello` params): the capability `gateway_config` joins
+`capabilities` whenever the plane exists, and
+
+```json
+"gatewayConfig":{"protocol":1,"access":"read","accessConfigured":"write","transportOk":false,
+  "hashes":{"network":"3f9a…","firewall":"77c0…","perch-managed":"…"},
+  "apply":{"state":"idle"},"results":[]}
+```
+
+`access` is effective, `accessConfigured` appears only when the router asks
+for more than this version does. `transportOk` = `server_url` is https with
+verification on (`announce_tls_insecure` off). `hashes` = SHA-256 of each
+readable config file that exists (absent = no file; none at all with access
+`none`); they are also the baseline later notifications are judged against.
+`apply` and `results` are always idle/empty until applies exist.
+
+**`agent.configure`** may carry
+`"gatewayConfig":{"mode":"off"|"observe"|"managed","authoritative":bool,"watchSeconds":30,"debounceSeconds":5}`.
+Mode `off`, an unknown mode, or no block at all means no watching. Seconds are
+clamped to 10..600 and 1..60. A session's end turns the mode off until the next
+configure.
+
+**Requests from the controller**
+
+| Method | Params | Result |
+|---|---|---|
+| `gateway.capabilities` | `{}` | `{protocol, access, accessConfigured, allowedConfigs[], transportOk, allowInsecure, confirmMaxSeconds, backend:"ubus"\|"uci-cli"\|null, openwrt:{release,revision,target,arch,board}\|null, firewall:"fw4"\|"fw3"\|null, packageManager:"opkg"\|"apk"\|null, packages:{name:version}, configs[], hashes{}, uncommitted[], luciPending, apply:{state:"idle"}, capture:{networks:[{network,device}]}, flash:{path,totalBytes,freeBytes}\|null, storage:{path,exists,mountPoint,fsType,device,medium,onRoot,readOnly,totalBytes,freeBytes}\|null}` |
+| `gateway.config.read` | `{configs?:[…]}` (default: every readable config) | `{readAt, configs:[{name, hash, missing?, sections:[{name, type, anonymous, index, options:{k: string\|string[]}, secrets?:{k:"hmac:…"}, hash}]}], ledger:[{perchId, config, section, domain}], uncommitted[], luciPending}` |
+
+- `packages` lists only the kit's watch list (`firewall4 firewall dnsmasq
+  dnsmasq-full odhcpd odhcpd-ipv6only sqm-scripts kmod-sched-cake opennds mwan3
+  pbr wireguard-tools luci rpcd`), read from `/usr/lib/opkg/status` or
+  `/lib/apk/db/installed`.
+- A read is the committed files, never staged changes. `missing: true` = an
+  allowlisted config without a file (hash `""`, no sections). Sections are in
+  file order with libuci's names for anonymous ones; the section `hash` is the
+  SHA-256 of `["<type>",{options sorted by name, secrets as fingerprints}]`.
+- Refusals are -32000 with `data.error`: `not_managed` (access `none`),
+  `config_not_allowed` (+ `data.configs`, the refused names; nothing is read),
+  `read_too_large` (a file over 2 MiB, or the read over 2 MiB / 2000 sections);
+  `read_failed` for a file that cannot be read or parsed. Bad params are
+  -32602. `gateway.config.apply`, `.confirm`, `.rollback` and `.ack` do not
+  exist yet (-32601).
+
+**Notification to the controller:** `gateway.config.changed`
+
+```json
+{"hashes":{"network":"…","firewall":"…"},"changed":["firewall"],"origin":"router",
+ "author":{"kind":"luci","user":"root","via":"trigger"},"at":"2026-09-23T10:00:15Z","uncommitted":[]}
+```
+
+`hashes` = every readable config now (a deleted one is absent). `origin` is
+`router`, or `perch` with `applyId` for the plane's own writes: the apply
+engine records each commit's hash with `Plane.RecordOwn(config, hash,
+applyID)`, and a change to exactly that hash is reported once that way (own
+echoes and router edits go in separate notifications). `author.kind`:
+`luci` (+ `user`) when procd's trigger saw the change and `ubus call session
+list` has exactly one logged-in session, `cli` when only polling saw it,
+`unknown` when the trigger saw it without a single LuCI user, `perch` for
+echoes. `uncommitted` = readable configs with staged, uncommitted changes
+(`/tmp/.uci`, other rpcd sessions).
+
+**Change detection** (`gwconfig.Plane.Run`, one goroutine for the daemon's
+life, started by the controller client):
+
+```
+while mode != off and access != none:
+  every watchSeconds, or at once on SIGHUP (Trigger):
+    stat every readable config; re-hash when size/mtime moved (all of them on SIGHUP)
+    hash != last reported → dirty (since t); back to the reported hash → clean again
+  when dirty and quiet for debounceSeconds:
+    LuCI apply pending (/var/run/rpcd/snapshot-files non-empty) → hold (max 5 min)
+    else notify on the current session; without one, stay dirty
+hello → the hello's hashes become the reported baseline, dirty is cleared
+```
+
+The package's init script adds a procd reload trigger per allowlisted config
+(when `config_access` is not `none`) and a `reload_service` that runs `start`
+(procd restarts the instance only if its parameters changed) and sends
+SIGHUP; the daemon handles SIGHUP (it used to end the process). A CLI `uci
+commit` without `reload_config`, an editor or scp are caught by polling.
+
+`perch-collector gateway-config [config...]` runs capabilities and a read
+with the settings of `/etc/config/perch-collector` and prints them.
 
 ## Graceful Shutdown
 

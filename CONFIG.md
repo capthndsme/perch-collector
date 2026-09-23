@@ -216,6 +216,34 @@ dhcp_leases: auto
 # push). Clamped to 60..3600.
 # Default: 600
 dhcp_leases_refresh: 600
+
+# The config plane (below): may the controller read this router's UCI
+# configuration? "none", "read", or "write" (accepted; this version reads
+# only). Only on OpenWrt and with transport websocket.
+# Default: "none"
+config_access: none
+
+# The UCI configs the controller may read. perch-collector, perch-apd, rpcd,
+# uhttpd, dropbear and luci are never readable, whatever is listed.
+# Default: [network, dhcp, firewall]
+managed_config: [network, dhcp, firewall]
+
+# For later versions: accept config writes over plain http:// or an
+# unverified certificate (needs the controller's matching opt-in too), and
+# the longest confirm window of a config change in seconds (30..3600).
+# Default: false, 600
+config_allow_insecure: false
+config_confirm_max: 600
+
+# Where the collector would keep local state; only its storage type is
+# detected and reported today. Must be absolute.
+# Default: "/etc/perch-collector"
+storage_path: /etc/perch-collector
+
+# The UCI network the capture interface belongs to, for the capabilities
+# report (the OpenWrt init script sets it from capture_network).
+# Default: ""
+capture_network: ""
 ```
 
 ## Environment Variables
@@ -256,6 +284,12 @@ Configuration values can also be set via environment variables. They take the hi
 | `PERCH_COLLECTOR_PORTS` | `ports` (`auto`, `on`, `off`) |
 | `PERCH_COLLECTOR_DHCP_LEASES` | `dhcp_leases` (`auto`, `on`, `off`) |
 | `PERCH_COLLECTOR_DHCP_LEASES_REFRESH` | `dhcp_leases_refresh` (seconds) |
+| `PERCH_COLLECTOR_CONFIG_ACCESS` | `config_access` (`none`, `read`, `write`) |
+| `PERCH_COLLECTOR_MANAGED_CONFIGS` | `managed_config` (comma-separated config names) |
+| `PERCH_COLLECTOR_CONFIG_ALLOW_INSECURE` | `config_allow_insecure` (`true`/`false`, `1`/`0`) |
+| `PERCH_COLLECTOR_CONFIG_CONFIRM_MAX` | `config_confirm_max` (seconds) |
+| `PERCH_COLLECTOR_STORAGE_PATH` | `storage_path` |
+| `PERCH_COLLECTOR_CAPTURE_NETWORK` | `capture_network` |
 
 The names before the rename, `GOCOLLECTOR_<NAME>`, are still read when
 `PERCH_COLLECTOR_<NAME>` is unset; the daemon logs one deprecation line per
@@ -605,6 +639,72 @@ enrichment then says "provided by the gateway agent"):
 
 `perch-collector dhcp` prints the section once and exits, without reading
 this configuration.
+
+## The config plane (`config_access`)
+
+The first part of Perch's managed gateway: with the owner's opt-in on the
+router, the controller can read the router's UCI configuration and is told
+when it changes. Writing (apply, confirm, rollback) comes in a later version;
+this one reads only, whatever `config_access` says. The protocol is in
+ARCHITECTURE.md ("The config plane"); the design in the controller
+repository (`docs/gateway/`).
+
+- **Opt-in.** `config_access` is `none` by default: nothing is read and the
+  hello says so. `read` lets the controller read the configs in
+  `managed_config` (default `network dhcp firewall`) plus the sync ledger
+  `perch-managed`. The agent's own config (so the controller can never flip
+  this switch or re-point `server_url`), `perch-apd`, `rpcd`, `uhttpd`,
+  `dropbear` and `luci` are never readable. The controller has its own
+  switch per gateway (mode `off`/`observe`/`managed`); the effective access
+  is the lower of the two.
+- **Where.** On OpenWrt (`/etc/openwrt_release`) with `transport websocket`.
+  A collector on a server offers no config plane.
+- **What is read.** The committed files in `/etc/config`, parsed by the
+  kit's libuci-compatible parser (anonymous sections carry the names libuci
+  gives them, `cfg0a1b2c`), never staged changes: `uci set` without a
+  commit and a LuCI session's unsaved edits are reported only as
+  `uncommitted`. Every section also carries a content hash.
+- **Secrets never leave the router.** Options named `key`, `password`,
+  `secret`, `psk`, `private_key`, `preshared_key`, `auth_secret`,
+  `sae_password`, `faskey`, `api_key`, `r0kh`, `r1kh`, `key1`..`key4` or
+  ending in `_key`, `_secret`, `_password`, `_passwd`, `_psk`, `_pwd` are
+  removed and replaced by `"hmac:" + 16 hex digits` of
+  HMAC-SHA256(api_key, `config.section.option=value`): the controller can
+  tell a value changed, or check one it holds, without seeing it.
+- **Change detection.** While the controller's mode is not `off`, every
+  readable config is stat'ed every `watchSeconds` (the controller's setting,
+  10..600, default 30) and re-hashed when its size or mtime moved. The
+  package's init script adds a procd reload trigger for each allowlisted
+  config; its `reload_service` sends SIGHUP, and the daemon re-hashes at once
+  (a LuCI save, `uci commit` through rpcd, `reload_config`). A change is
+  reported after `debounceSeconds` (1..60, default 5) of quiet, and held while
+  a LuCI apply waits for its confirm (at most 5 minutes; one that rolls back
+  is never reported). The author is a guess: the one logged-in LuCI user when
+  the trigger saw it, `cli` when only polling did, `unknown` otherwise.
+- **Capabilities.** OpenWrt release and board, firewall (`fw4`/`fw3`),
+  package manager (opkg or apk) and the versions of the packages gateway
+  features depend on (read from the package database, never by running
+  opkg/apk), whether rpcd's `uci` object or only the uci CLI is there, free
+  flash, and what backs `storage_path` (`flash`, `emmc`, `sd`, `usb`,
+  `sata`, `nvme`, `disk`, `ram`, `network`, `unknown`; `onRoot` = the path is
+  on the router's own root, i.e. a USB stick meant for it is not mounted).
+
+OpenWrt package options (`/etc/config/perch-collector`, `main` section):
+
+```
+option config_access 'none'          # none | read | write (reads only for now)
+list   managed_config 'network'      # the allowlist (package default network dhcp firewall)
+list   managed_config 'dhcp'
+list   managed_config 'firewall'
+option config_allow_insecure '0'     # later: writes over plain http
+option config_confirm_max '600'      # later: longest confirm window, seconds
+option storage_path '/etc/perch-collector'
+```
+
+`perch-collector gateway-config [config...]` prints the capabilities and the
+read the controller would get, as JSON, and exits. It takes its settings from
+`/etc/config/perch-collector` (environment variables win), reads nothing
+with `config_access none`, and writes nothing.
 
 ## Packaged deployments
 

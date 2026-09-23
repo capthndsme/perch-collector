@@ -43,6 +43,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "dhcp" {
 		os.Exit(dhcpCommand(os.Args[2:], os.Stdout, os.Stderr, &observe.Reader{}))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "gateway-config" {
+		os.Exit(gatewayConfigCommand(os.Args[2:], os.Stdout, os.Stderr, routerConfig))
+	}
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "version", "--version", "-version":
@@ -250,6 +253,9 @@ func main() {
 		close(ctlDone)
 	}
 
+	// SIGHUP: re-hash the router's configs now (procd's reload trigger).
+	watchReloadSignal()
+
 	// Wait for shutdown signal.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -360,6 +366,7 @@ func buildController(cfg config.Config, agg *aggregator.Aggregator, cls classifi
 		System:           controller.SystemInfo(hoststat.FS{}, runtime.GOARCH),
 		Source:           source,
 		DHCPRefresh:      time.Duration(cfg.DHCPLeasesRefresh) * time.Second,
+		Config:           configPlane(cfg),
 	})
 	if err != nil {
 		log.Fatalf("controller: %v", err)
@@ -428,6 +435,7 @@ func usage() {
 		"  perch-collector [flags]   run the collector (every setting: CONFIG.md)\n"+
 		"  perch-collector ports     print the Ethernet ports the Gateway agent reports, as JSON\n"+
 		"  perch-collector dhcp      print the DHCP leases and static hosts it reports, as JSON\n"+
+		"  perch-collector gateway-config [config...]  print the router capabilities and configs the config plane offers, as JSON\n"+
 		"  perch-collector version   print the version\n\n"+
 		"Flags:\n", version)
 	flag.PrintDefaults()

@@ -31,6 +31,7 @@ import (
 	"github.com/capthndsme/perch-collector/internal/announce"
 	"github.com/capthndsme/perch-collector/internal/classifier"
 	"github.com/capthndsme/perch-collector/internal/gateway"
+	"github.com/capthndsme/perch-collector/internal/gwconfig"
 	"github.com/capthndsme/perch-collector/internal/observe"
 )
 
@@ -132,6 +133,8 @@ type Options struct {
 	Source Source
 	// DHCPRefresh resends an unchanged DHCP observation; 0 = DefaultDHCPRefresh.
 	DHCPRefresh time.Duration
+	// Config is the config plane (gwconfig.go); nil = not offered.
+	Config *gwconfig.Plane
 
 	// HTTPClient performs the handshake (tests); nil = link.NewHTTPClient(TLS).
 	HTTPClient *http.Client
@@ -184,6 +187,8 @@ type Client struct {
 	dhcpGen    uint64
 	dhcpFP     string
 	dhcpSentAt time.Time
+	// configSession is where gateway.config.changed goes (gwconfig.go).
+	configSession *link.Session
 	// gen counts sessions. A session's goroutines may still report (a hello
 	// answered just before the close) after Run has moved on; anything they
 	// report for an older generation is dropped.
@@ -219,6 +224,7 @@ func New(o Options) (*Client, error) {
 	c.dispatcher = rpc.NewDispatcher()
 	c.dispatcher.Register("collector.status", c.handleStatus)
 	c.dispatcher.Register("collector.protocols", c.handleProtocols)
+	c.registerConfigPlane()
 	return c, nil
 }
 
@@ -250,6 +256,7 @@ func (c *Client) Run(ctx context.Context) {
 		log.Printf("controller: WARNING certificate verification is DISABLED for %s (announce_tls_insecure)", c.o.ServerURL)
 	}
 	bo := link.Backoff{Min: reconnectMin, Max: reconnectMax}
+	c.startConfigPlane(ctx)
 	for ctx.Err() == nil {
 		c.mu.Lock()
 		gen := c.gen
@@ -307,6 +314,8 @@ type helloParams struct {
 	BaseURL           string   `json:"baseUrl,omitempty"`
 	Capabilities      []string `json:"capabilities"`
 	System            *System  `json:"system,omitempty"`
+	// GatewayConfig is the config plane's block (gwconfig.go).
+	GatewayConfig *gwconfig.Hello `json:"gatewayConfig,omitempty"`
 }
 
 type helloResult struct {
@@ -339,6 +348,8 @@ func (c *Client) hello() helloParams {
 	if c.o.Source.DHCP != nil {
 		p.Capabilities = append(p.Capabilities, CapabilityObserveDHCP)
 	}
+	p.Capabilities = append(p.Capabilities, c.configCapabilities()...)
+	p.GatewayConfig = c.configHello()
 	return p
 }
 
@@ -410,6 +421,7 @@ func (c *Client) onOpen(gen uint64, configs chan link.Schedule, note *helloNote)
 			return
 		}
 		c.helloAccepted(gen, res)
+		c.configSessionOpened(gen, s)
 		link.RunPusher(ctx, link.PushOptions{
 			Configs: configs,
 			Push:    func(_ context.Context, seq uint64) { c.push(s, seq, gen) },
@@ -436,8 +448,9 @@ func (c *Client) onNotification(gen uint64, configs chan link.Schedule) func(ctx
 			return
 		}
 		var p struct {
-			MetricsIntervalSeconds *float64 `json:"metricsIntervalSeconds"`
-			Lifecycle              string   `json:"lifecycle"`
+			MetricsIntervalSeconds *float64        `json:"metricsIntervalSeconds"`
+			Lifecycle              string          `json:"lifecycle"`
+			GatewayConfig          json.RawMessage `json:"gatewayConfig"`
 		}
 		if err := rpc.Params(m.Params, &p); err != nil {
 			c.log.Warn("bad agent.configure from the controller", "err", err)
@@ -450,6 +463,7 @@ func (c *Client) onNotification(gen uint64, configs chan link.Schedule) func(ctx
 		interval := c.intervalOf(secs)
 		link.Offer(configs, link.Schedule{Interval: interval})
 		c.scheduleChanged(gen, p.Lifecycle, interval)
+		c.configConfigure(p.GatewayConfig)
 	}
 }
 
@@ -694,6 +708,7 @@ func (c *Client) ended(o outcome) {
 	c.gen++
 	c.configured, c.interval = false, 0
 	c.mu.Unlock()
+	c.configSessionEnded()
 	if o.note != "" {
 		log.Printf("controller: %s", o.note)
 	}
