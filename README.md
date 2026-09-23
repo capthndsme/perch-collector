@@ -31,7 +31,7 @@ Perch Network Gateway agent. Which means Perch can now have gateway related sett
 - **Periodic disk flush** — optional JSON snapshots to disk
 - **Configurable** — YAML config file + CLI flags + env var overrides ([CONFIG.md](CONFIG.md))
 - **API key auth** — the local API's bearer token and the collector's credential towards the controller
-- **Low footprint** — headers only (96-byte snaplen) in port mode; nDPI mode wants 256+ bytes for TLS hellos, 1500 for the best QUIC / BitTorrent detection
+- **Low footprint** — headers only (96-byte snaplen) in port mode; nDPI mode captures whole packets (TLS hellos with post-quantum key shares span more than one MTU)
 
 ## OpenWrt package
 

@@ -31,10 +31,14 @@ interface: ""
 bpf_filter: ""
 
 # Snapshot length — how many bytes of each packet to capture.
-# 96 bytes is enough for Ethernet + IP + TCP/UDP headers.
-# Bump to 256+ when classification_mode is "ndpi" so the TLS ClientHello
-# (SNI) and QUIC initial packets fit; the daemon prints a startup
-# warning if nDPI is enabled with snap_len < 256.
+# 96 bytes is enough for Ethernet + IP + TCP/UDP headers (port mode).
+# With classification_mode "ndpi" the collector ignores lower values and
+# captures whole packets (65535 bytes, logged at startup): a TLS
+# ClientHello with a post-quantum key share (X25519MLKEM768, the default
+# in current browsers and curl) is 1.5-2 KB and reaches the capture as one
+# packet above the MTU behind GSO/GRO, and even a plain full-size packet
+# is a 1514-byte frame. A cut-off ClientHello never reassembles in nDPI
+# and the flow loses its server name.
 # Default: 96
 snap_len: 96
 
@@ -350,7 +354,7 @@ README, Build).
 interface: "br-lan"
 listen: "127.0.0.1:9800"
 classification_mode: "ndpi"
-snap_len: 1500          # full packets so TLS SNI + QUIC initials fit
+# snap_len is not needed: nDPI mode always captures whole packets
 ndpi_max_flows: 50000   # ~50 MB peak when fully populated
 ndpi_flow_idle_seconds: 120
 promiscuous: true

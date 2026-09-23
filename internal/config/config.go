@@ -37,7 +37,9 @@ type Config struct {
 	NDPIPartialExtraPackets int `yaml:"ndpi_partial_extra_packets"`
 
 	// SnapLen is the maximum number of bytes to capture per packet.
-	// 96 bytes captures all headers without payload.
+	// 96 bytes captures all headers without payload. It applies to port
+	// classification only: with nDPI the capture takes whole packets
+	// (capture.FullPacketSnapLen) whatever this says.
 	SnapLen int32 `yaml:"snap_len"`
 
 	// Listen is the address:port for the HTTP API server.
@@ -412,10 +414,6 @@ func (c *Config) Validate() error {
 	}
 	if c.ClassificationMode != "port" && c.ClassificationMode != "ndpi" {
 		return fmt.Errorf("classification_mode must be 'port' or 'ndpi', got %q", c.ClassificationMode)
-	}
-	if c.ClassificationMode == "ndpi" && c.SnapLen < 256 {
-		// Log a warning if snap_len is too small for TLS SNI detection.
-		fmt.Fprintf(os.Stderr, "WARNING: nDPI mode is most effective with snap_len >= 256; current value %d captures headers only.\n", c.SnapLen)
 	}
 	if c.FlushInterval <= 0 {
 		c.FlushInterval = 60

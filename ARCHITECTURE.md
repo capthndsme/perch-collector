@@ -51,6 +51,11 @@ the router it adds the router's own health and its Ethernet ports
 2. PACKET CAPTURE
    NIC → libpcap (BPF filter) → gopacket decoder
    Extract: Ethernet srcMAC/dstMAC, IPv4/IPv6 srcIP/dstIP, packet length
+   nDPI mode opens the capture with a 65535-byte snap length whatever
+   snap_len says (capture.SnapLen): offloads hand over coalesced packets
+   above the MTU, and a post-quantum TLS ClientHello (1.5-2 KB) cut short
+   never yields its SNI. The IP packet goes to the classifier as a
+   re-slice of the capture buffer, not a copy.
 
 3. CLASSIFICATION (Aggregator.Record)
    Drop:  broadcast (ff:ff:ff:ff:ff:ff) or any multicast MAC,

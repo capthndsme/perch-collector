@@ -276,7 +276,13 @@ func (c *NDPIClassifier) Classify(srcIP, dstIP []byte, srcPort, dstPort uint16, 
 	mod := (*C.struct_ndpi_detection_module_struct)(c.mod)
 	flowPtr := (*C.struct_ndpi_flow_struct)(entry.UserData)
 	pkt := (*C.uchar)(unsafe.Pointer(&ipPacket[0]))
-	pktLen := C.ushort(len(ipPacket))
+	// nDPI takes a 16-bit length. Anything longer (a BIG TCP super-packet)
+	// is handed over as its first 64 KB instead of a wrapped-around length.
+	n := len(ipPacket)
+	if n > 0xffff {
+		n = 0xffff
+	}
+	pktLen := C.ushort(n)
 	nowMs := C.u_int64_t(uint64(now.UnixMilli()))
 
 	proto := C.gc_ndpi_process_packet(mod, flowPtr, pkt, pktLen, nowMs)

@@ -113,6 +113,7 @@ func main() {
 	// degrade to the always-available port-based classifier so the
 	// collector never crashes on a misconfigured nDPI install.
 	var cls classifier.Classifier
+	inspectsPayload := false
 	switch cfg.ClassificationMode {
 	case "ndpi":
 		classifier.SetNDPIPartialExtraPackets(cfg.NDPIPartialExtraPackets)
@@ -124,6 +125,7 @@ func main() {
 			log.Printf("classifier: using nDPI (max_flows=%d idle=%ds, NDPIAvailable=%v)",
 				cfg.NDPIMaxFlows, cfg.NDPIFlowIdleSeconds, classifier.NDPIAvailable)
 			cls = ndpiCls
+			inspectsPayload = true
 		}
 	case "port":
 		log.Println("classifier: using stateless port-based classification")
@@ -133,8 +135,13 @@ func main() {
 		cls = classifier.NewPortClassifier()
 	}
 
-	// Initialize the capture engine.
-	captureEngine, err := capture.New(cfg.Interface, cfg.SnapLen, cfg.Promisc, cfg.BPFFilter, agg, cls)
+	// Initialize the capture engine. nDPI needs whole packets (a truncated
+	// TLS ClientHello loses its server name), whatever snap_len says.
+	snapLen := capture.SnapLen(cfg.SnapLen, inspectsPayload)
+	if snapLen != cfg.SnapLen {
+		log.Printf("capture: snap_len %d raised to %d: nDPI inspects whole packets", cfg.SnapLen, snapLen)
+	}
+	captureEngine, err := capture.New(cfg.Interface, snapLen, cfg.Promisc, cfg.BPFFilter, agg, cls)
 	if err != nil {
 		log.Fatalf("capture: %v", err)
 	}

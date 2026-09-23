@@ -170,7 +170,7 @@ adopted by …`, `pushing every 5s`) — never one per push, and never the key.
 | `listen_network` / `listen_address` / `port` | `loopback` / (its address) / `9800` | Where the local API listens. `loopback` is enough for the WebSocket transport; `lan` to be polled; `listen_address '0.0.0.0'` for everything. |
 | `api_key` | generated | The collector's credential towards the controller and the bearer token of the local API. |
 | `classification` | `ndpi` | `ndpi` or `port`. |
-| `snap_len` | `1500` | Bytes per packet; 96 is enough for `port`. |
+| `snap_len` | `1500` | Bytes per packet with `port` classification (96 is enough); `ndpi` always captures whole packets. |
 | `promiscuous` | `1` | |
 | `gateway_mac` (list) | the capture device's MAC | Upstream pivots. The default is right on the gateway itself. |
 | `local_subnet` (list) | none | Extra CIDRs that count as LAN. |
