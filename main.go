@@ -44,6 +44,11 @@ func main() {
 		os.Exit(dhcpCommand(os.Args[2:], os.Stdout, os.Stderr, &observe.Reader{}))
 	}
 	if len(os.Args) > 1 {
+		if code, ok := gatewayCommand(os.Args[1], os.Args[2:], os.Stdout, os.Stderr); ok {
+			os.Exit(code)
+		}
+	}
+	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "version", "--version", "-version":
 			fmt.Println("perch-collector " + version)
@@ -180,16 +185,11 @@ func main() {
 		log.Printf("config: ports on has no effect with gateway stats off: the ports travel in the gateway report")
 	}
 
-	// The DHCP observation: leases and static hosts, so the controller can
-	// name devices with nothing to set up (dhcp_leases auto = OpenWrt).
-	var dhcp func() (*observe.DHCP, string)
-	if cfg.DHCPLeasesEnabled(gateway.OnOpenWrt(hoststat.FS{})) {
-		reader := &observe.Reader{}
-		dhcp = reader.Read
-		d, _ := reader.Read()
-		log.Printf("dhcp: reporting leases and static hosts (%d IPv4 leases, %d DHCPv6, %d static hosts now; resent every %ds unchanged)",
-			len(d.Leases4), len(d.Leases6), len(d.Hosts), cfg.DHCPLeasesRefresh)
-	}
+	// The observation channel: the DHCP leases and static hosts, so the
+	// controller can name devices with nothing to set up (dhcp_leases auto
+	// = OpenWrt), and the router's other runtime state (observe auto =
+	// OpenWrt). With it the runtime actions: conntrack flush and backups.
+	gw := buildGatewayFeatures(cfg, gateway.OnOpenWrt(hoststat.FS{}))
 
 	// Build the announcer or the controller client (when the daemon has a
 	// server) before the API server starts, so its status can be part of
@@ -202,7 +202,7 @@ func main() {
 	)
 	switch transport {
 	case config.TransportWebSocket:
-		ctl = buildController(cfg, agg, cls, gatewayStats, dhcp)
+		ctl = buildController(cfg, agg, cls, gatewayStats, gw)
 	case config.TransportPoll:
 		ann = buildAnnouncer(cfg)
 	}
@@ -218,8 +218,9 @@ func main() {
 	if gatewayStats != nil {
 		apiServer.SetGatewayStats(gatewayStats)
 	}
-	if dhcp != nil {
-		apiServer.SetDHCP(dhcp)
+	if gw.observer != nil {
+		observer := gw.observer
+		apiServer.SetObserve(func() *observe.Section { return observer.Section(nil, false) })
 	}
 	switch {
 	case ctl != nil:
@@ -332,7 +333,7 @@ func buildAnnouncer(cfg config.Config) *announce.Announcer {
 
 // buildController prepares the WebSocket client (transport websocket). The
 // socket carries everything the controller would otherwise poll.
-func buildController(cfg config.Config, agg *aggregator.Aggregator, cls classifier.Classifier, gatewayStats func() *gateway.Stats, dhcp func() (*observe.DHCP, string)) *controller.Client {
+func buildController(cfg config.Config, agg *aggregator.Aggregator, cls classifier.Classifier, gatewayStats func() *gateway.Stats, gw gatewayFeatures) *controller.Client {
 	instanceID := resolveInstanceID(cfg)
 	if instanceID == "" {
 		log.Fatalf("controller: no usable instance id; cannot connect to %s", cfg.ServerURL)
@@ -341,7 +342,9 @@ func buildController(cfg config.Config, agg *aggregator.Aggregator, cls classifi
 		Summary: agg.GetSummary,
 		Devices: func() []aggregator.DeviceStats { return agg.Snapshot(time.Time{}) },
 		Gateway: gatewayStats,
-		DHCP:    dhcp,
+	}
+	if gw.observer != nil {
+		source.Observe = gw.observer
 	}
 	if lister, ok := cls.(classifier.CategoryLister); ok {
 		categories := lister.ProtocolCategories()
@@ -360,6 +363,10 @@ func buildController(cfg config.Config, agg *aggregator.Aggregator, cls classifi
 		System:           controller.SystemInfo(hoststat.FS{}, runtime.GOARCH),
 		Source:           source,
 		DHCPRefresh:      time.Duration(cfg.DHCPLeasesRefresh) * time.Second,
+		ObserveRefresh:   time.Duration(cfg.ObserveRefresh) * time.Second,
+		Conntrack:        gw.conntrack,
+		Backup:           gw.backup,
+		AddressCache:     cfg.ControllerAddressCache,
 	})
 	if err != nil {
 		log.Fatalf("controller: %v", err)
@@ -428,6 +435,12 @@ func usage() {
 		"  perch-collector [flags]   run the collector (every setting: CONFIG.md)\n"+
 		"  perch-collector ports     print the Ethernet ports the Gateway agent reports, as JSON\n"+
 		"  perch-collector dhcp      print the DHCP leases and static hosts it reports, as JSON\n"+
+		"  perch-collector observe [part...]\n"+
+		"                            print the observation (every part, or the named ones), as JSON\n"+
+		"  perch-collector conntrack-flush [-dry-run] [-proto P] IP...\n"+
+		"                            delete the conntrack entries of these addresses\n"+
+		"  perch-collector backup [-full] -o FILE\n"+
+		"                            write a (redacted) sysupgrade -b backup to FILE\n"+
 		"  perch-collector version   print the version\n\n"+
 		"Flags:\n", version)
 	flag.PrintDefaults()

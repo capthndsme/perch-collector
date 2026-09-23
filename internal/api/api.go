@@ -42,6 +42,9 @@ type Server struct {
 	// dhcp fills the summary's `observe.dhcp`; nil when the DHCP
 	// observation is off. Set once before ListenAndServe.
 	dhcp func() (*observe.DHCP, string)
+	// observe fills the whole `observe` section (every part the collector
+	// reports); it takes precedence over dhcp. Set once before ListenAndServe.
+	observe func() *observe.Section
 }
 
 // devicesResponse is the JSON shape for GET /api/v1/devices.
@@ -219,6 +222,13 @@ func (s *Server) SetDHCP(fn func() (*observe.DHCP, string)) {
 	s.dhcp = fn
 }
 
+// SetObserve registers the reader behind the summary's whole `observe`
+// section (gateway plan 2 section 3). Call before ListenAndServe; nil turns
+// it off (SetDHCP still applies then).
+func (s *Server) SetObserve(fn func() *observe.Section) {
+	s.observe = fn
+}
+
 // SetProtocolCategories replaces the list served by GET /api/v1/protocols.
 // Call before ListenAndServe; nil is stored as an empty list.
 func (s *Server) SetProtocolCategories(list []classifier.ProtocolCategory) {
@@ -242,7 +252,11 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 	if s.gatewayStats != nil {
 		resp.Gateway = s.gatewayStats()
 	}
-	if s.dhcp != nil {
+	if s.observe != nil {
+		if o := s.observe(); o != nil && !o.Empty() {
+			resp.Observe = o
+		}
+	} else if s.dhcp != nil {
 		if d, _ := s.dhcp(); d != nil {
 			resp.Observe = &observe.Section{DHCP: d}
 		}

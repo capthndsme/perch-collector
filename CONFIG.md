@@ -216,6 +216,41 @@ dhcp_leases: auto
 # push). Clamped to 60..3600.
 # Default: 600
 dhcp_leases_refresh: 600
+
+# Report the router's other runtime state for the managed gateway (the
+# observation channel, below): neighbours, interfaces, UPnP mappings, mwan3,
+# who answers DNS, the system. "auto" = on under OpenWrt, "on", "off".
+# Default: "auto"
+observe: auto
+
+# Only these parts of the observation (neighbors, interfaces, upnp, mwan3,
+# resolver, system). Empty = all. dhcp has its own switch, dhcp_leases.
+# Default: []
+observe_parts: []
+
+# Seconds between resends of an unchanged part. Clamped to 60..3600.
+# Default: 600
+observe_refresh: 600
+
+# Let the controller delete a device's conntrack entries (net.conntrack_flush),
+# so blocking a device also ends its running connections. "auto" = on with
+# observe; needs ctnetlink (kmod-nf-conntrack-netlink) and root.
+# Default: "auto"
+conntrack_flush: auto
+
+# Configuration backups (gateway.backup, sysupgrade -b) the controller may
+# take: "redacted" (secrets replaced, private key files left out), "full"
+# (the archive as is) or "off". Offered only with observe on and sysupgrade
+# on the PATH.
+# Default: "redacted"
+gateway_backup: redacted
+
+# File that keeps the controller's last good address, dialed when its host
+# name does not resolve. Written only when the address changes. "" = memory
+# only. The OpenWrt package uses /etc/perch-collector/controller-address
+# (survives a reboot).
+# Default: "/var/lib/perch-collector/controller-address"
+controller_address_cache: /var/lib/perch-collector/controller-address
 ```
 
 ## Environment Variables
@@ -256,6 +291,12 @@ Configuration values can also be set via environment variables. They take the hi
 | `PERCH_COLLECTOR_PORTS` | `ports` (`auto`, `on`, `off`) |
 | `PERCH_COLLECTOR_DHCP_LEASES` | `dhcp_leases` (`auto`, `on`, `off`) |
 | `PERCH_COLLECTOR_DHCP_LEASES_REFRESH` | `dhcp_leases_refresh` (seconds) |
+| `PERCH_COLLECTOR_OBSERVE` | `observe` (`auto`, `on`, `off`) |
+| `PERCH_COLLECTOR_OBSERVE_PARTS` | `observe_parts` (comma-separated) |
+| `PERCH_COLLECTOR_OBSERVE_REFRESH` | `observe_refresh` (seconds) |
+| `PERCH_COLLECTOR_CONNTRACK_FLUSH` | `conntrack_flush` (`auto`, `on`, `off`) |
+| `PERCH_COLLECTOR_GATEWAY_BACKUP` | `gateway_backup` (`redacted`, `full`, `off`) |
+| `PERCH_COLLECTOR_CONTROLLER_ADDRESS_CACHE` | `controller_address_cache` |
 
 The names before the rename, `GOCOLLECTOR_<NAME>`, are still read when
 `PERCH_COLLECTOR_<NAME>` is unset; the daemon logs one deprecation line per
@@ -605,6 +646,129 @@ enrichment then says "provided by the gateway agent"):
 
 `perch-collector dhcp` prints the section once and exits, without reading
 this configuration.
+
+Since the observation channel (below) the `dhcp` part also carries `pools`
+(one per UCI `config dhcp` section: `network`, `ignore`, `leaseTime` in
+seconds with OpenWrt's 12 h default, 0 = infinite, `start`, `limit`; absent
+when there is none), each IPv4 lease a `network` when its address lies in
+one of the router's subnets, and odhcpd's leases come from its state file
+(`dhcp.odhcpd.leasefile`) when `ubus` does not answer.
+
+### The observation channel (`observe`, gateway plan 2 section 3)
+
+With `observe` on (the default on OpenWrt) the push's `observe` section gets
+one key per part beside `dhcp`. Everything is runtime state, read only; no
+part is config.
+
+```json
+"observe":{"full":true,
+ "dhcp":{…},
+ "neighbors":[{"ip":"192.168.1.21","mac":"02:00:00:00:10:21","device":"br-lan","network":"lan","reachable":true,"state":"reachable"}],
+ "interfaces":[{"network":"wan","device":"wan0","proto":"dhcp","up":true,"ipv4":["203.0.113.10/24"],"ipv6":[],
+                "uptimeSeconds":86400,"defaultRoute":true,"metric":1,"gateway4":"203.0.113.1","dnsServers":["203.0.113.53"]}],
+ "upnp":{"installed":true,"enabled":true,"running":true,
+         "mappings":[{"proto":"TCP","extPort":51413,"intIp":"192.168.1.21","intPort":51413,"expires":0,"description":"app"}]},
+ "mwan3":{"serviceEnabled":false,"running":false,"configInterfaces":[{"name":"wan","enabled":true,"family":"ipv4","trackIps":["203.0.113.1"]}],
+          "interfaces":[{"name":"wan","status":"notracking","enabled":true,"running":false,"up":true,"uptimeSeconds":86400,"tracking":"none","trackIps":[]}],
+          "policies":{},"configPolicies":{"balanced":["wan_m1","wanb_m1"]}},
+ "resolver":{"dnsmasqPort":54,"port53Process":"AdGuardHome","port53Processes":["AdGuardHome"],
+             "controllerHost":{"name":"perch.example.com","addresses":["192.168.1.10"]}},
+ "system":{"hostname":"gateway","release":"OpenWrt 24.10.2 r28739-…","version":"24.10.2","board":"x86/64",
+           "model":"…","kernel":"6.6.100","uptimeSeconds":123456,"flowOffloading":false,"flowOffloadingHw":false}}
+```
+
+| Part | Source | Read at most every |
+|---|---|---|
+| `neighbors` | rtnetlink neighbour dump (IPv4 + IPv6), `/proc/net/arp` without netlink; unicast Ethernet MACs, no link-local, no failed/incomplete entries; `reachable` = REACHABLE, DELAY or PROBE | 60 s |
+| `interfaces` | `ubus call network.interface dump` (loopback left out); `defaultRoute`, `metric` and `gateway4/6` from its routes, so two WANs with metric failover read right without mwan3 | 5 s |
+| `upnp` | `upnpd.config` (`enabled`, `upnp_lease_file`, default `/var/run/miniupnpd.leases`), the `miniupnpd` process, the lease file (`PROTO:EXT:IP:INT:EXPIRES:DESC`, 1.x without `EXPIRES`); `installed:false` without miniupnpd | 15 s |
+| `mwan3` | UCI (`configInterfaces`, `configPolicies`), `/etc/rc.d` (`serviceEnabled`), the `mwan3track` process (`running`), `ubus call mwan3 status` (`interfaces` with mwan3's own `status` and `tracking`, `policies`); absent when mwan3 is not installed. A service started by hand but disabled at boot reads `serviceEnabled:false, running:true` | 15 s |
+| `resolver` | dnsmasq's `port` (UCI, 53 when unset), the process holding a port-53 listener (`/proc/net/{udp,tcp}{,6}` + `/proc/*/fd`), the controller's host name resolved through the router's resolver | 60 s |
+| `system` | `ubus call system board` / `info`, `firewall.@defaults[0].flow_offloading(_hw)` | 60 s |
+
+- **When a part is sent.** Each part has its own fingerprint (SHA-256 of its
+  JSON, uptimes left out): it rides in the first push of a session, when its
+  fingerprint changed (the neighbour table at most once a minute) and every
+  `observe_refresh` seconds (`dhcp`: `dhcp_leases_refresh`). `full: true`
+  marks a push that carries every part the collector reports. A part that
+  has nothing to report (no ubus, mwan3 not installed) is absent: the
+  controller keeps what it has. Lists are `[]` when empty.
+- **On demand.** The controller's `gateway.observe {parts?: string[]}`
+  request answers the same object read fresh, with `collectedAt`; unknown
+  part names are ignored, `full` is true when every part was asked for.
+- **Caps.** 4096 neighbours, 256 interfaces, 512 UPnP mappings (descriptions
+  ≤ 128 bytes), 64 mwan3 interfaces and policies; names ≤ 253 bytes.
+- The hello's `capabilities` list `observe.<part>` for every part on, and
+  `gateway.observe`.
+
+`perch-collector observe [part...]` prints the section once and exits,
+without reading this configuration (the resolver part then resolves no
+controller name).
+
+### Conntrack flush (`net.conntrack_flush`)
+
+With `conntrack_flush` on (`auto` = with `observe`) and ctnetlink answering at
+start, the hello lists `net.conntrack_flush` and the controller may ask:
+
+```json
+{"ips":["192.168.1.21"],"proto":"tcp","dryRun":false}
+→ {"flushed":true,"matched":12,"deleted":11,"skipped":1}
+```
+
+A flow matches when one of `ips` is its original or reply source or
+destination (so a port forward to the device and its masqueraded outbound
+flows both go). `proto` is optional (`tcp`, `udp`, `icmp`, `icmpv6`, … or a
+number). The collector's own connection to the controller is never deleted
+(`skipped`). Refused with -32602 and `data.error`: `conntrack_ips_required`,
+`conntrack_too_many_ips` (> 64), `conntrack_ip_invalid` (not a unicast
+address), `conntrack_router_address` (one of the router's own addresses:
+every NATed flow has the WAN address as its reply destination),
+`conntrack_proto_invalid`. When ctnetlink fails at run time the answer is
+`flushed:false` with a `reason`. Implemented in pure Go (ti-mo/conntrack over
+netlink); no conntrack-tools. `perch-collector conntrack-flush [-dry-run]
+[-proto P] IP...` does the same by hand.
+
+### Backups (`gateway.backup`)
+
+With `gateway_backup` not `off`, `observe` on and `sysupgrade` on the PATH,
+the hello lists `gateway.backup`. The request `{"redact": true}` (the
+default) runs `sysupgrade -b` into a temporary directory under `/tmp` and
+answers:
+
+```json
+{"filename":"backup-gateway-2026-09-23.tar.gz","createdAt":"2026-09-23T10:00:00Z",
+ "release":"OpenWrt 24.10.2","size":20480,"sha256":"…","redacted":true,
+ "redactions":[{"file":"/etc/config/wireless","option":"key"},{"file":"/etc/uhttpd.key","removed":true}],
+ "contentBase64":"H4sI…"}
+```
+
+- **Redaction** (plan 2 P10): in `/etc/config/*` every option or list whose
+  name is a secret (`key`, `key1`..`key4`, `password`, `private_key`,
+  `preshared_key`, `api_key`, `secret`, `psk`, `faskey`, `sae_password`, and
+  names containing `password`, `secret`, `passphrase`, `token`, or ending in
+  `_key` other than `public_key`) gets the value `REDACTED-BY-PERCH`, except
+  a value that is a file path or a boolean switch (`PasswordAuth 'on'`); `/etc/shadow` password hashes become `*`;
+  `key: value` / `key=value` lines of other text files with such a key are
+  redacted; private key files (`*.key`, `*host_key*`, `/etc/wireguard/*`,
+  anything containing `PRIVATE KEY-----`) are left out. `sha256` is the
+  digest of the archive as returned.
+- `{"redact": false}` needs `gateway_backup: full` on the router, else
+  -32000 `backup_redaction_required`. Other errors: `backup_failed`,
+  `backup_too_large` (over 8 MiB). A redacted archive is for reading and
+  comparing; restoring it would reset every secret.
+- `perch-collector backup [-full] -o FILE` writes one by hand.
+
+### Last good controller address
+
+With the WebSocket transport the collector resolves the controller's host
+name itself and dials each address in turn. The address of the connection
+whose hello the controller accepted is remembered (in memory and in
+`controller_address_cache`, written only when it changes). When the name
+does not resolve (the router's DNS broken by a bad change, the front
+resolver down, rebind protection), the collector dials that address instead
+and logs it once; the URL, the TLS server name and the `Host` header stay the
+controller's name, so certificate checks are unchanged. Not used with an
+HTTP proxy in the environment.
 
 ## Packaged deployments
 

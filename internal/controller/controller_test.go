@@ -626,7 +626,7 @@ func TestPushCarriesDHCPObservation(t *testing.T) {
 	if s.caps != `["gateway_stats","observe.dhcp"]` {
 		t.Errorf("capabilities %s", s.caps)
 	}
-	want := `{"dhcp":{"leases4":[{"mac":"02:00:00:00:10:21","ip":"192.168.1.21","hostname":"laptop","expires":0,"source":"dnsmasq"}],"leases6":[],"hosts":[]}}`
+	want := `{"full":true,"dhcp":{"leases4":[{"mac":"02:00:00:00:10:21","ip":"192.168.1.21","hostname":"laptop","expires":0,"source":"dnsmasq"}],"leases6":[],"hosts":[]}}`
 	if s.observe[0] != want {
 		t.Errorf("first push observe = %s\nwant %s", s.observe[0], want)
 	}

@@ -1,0 +1,17 @@
+mwan3.globals=globals
+mwan3.globals.mmx_mask='0x3F00'
+mwan3.wan=interface
+mwan3.wan.enabled='1'
+mwan3.wan.track_ip='203.0.113.1' '198.51.100.9'
+mwan3.wan.family='ipv4'
+mwan3.wanb=interface
+mwan3.wanb.enabled='0'
+mwan3.wanb.track_ip='192.0.2.1'
+mwan3.wanb.family='ipv4'
+mwan3.wan_m1=member
+mwan3.wan_m1.interface='wan'
+mwan3.wan_m1.metric='1'
+mwan3.balanced=policy
+mwan3.balanced.use_member='wan_m1' 'wanb_m1'
+mwan3.default_rule=rule
+mwan3.default_rule.use_policy='balanced'
