@@ -19,6 +19,7 @@ import (
 	"github.com/capthndsme/perch-collector/internal/controller"
 	"github.com/capthndsme/perch-collector/internal/gatewayops"
 	"github.com/capthndsme/perch-collector/internal/observe"
+	"github.com/capthndsme/perch-collector/internal/portal"
 )
 
 // gatewayFeatures are the managed gateway's observation and runtime
@@ -27,6 +28,8 @@ type gatewayFeatures struct {
 	observer  *observe.Observer
 	conntrack *gatewayops.Flusher
 	backup    *gatewayops.Backuper
+	// portal is the guest portal (main_portal.go), nil when off.
+	portal *portal.Engine
 }
 
 // buildGatewayFeatures resolves observe, dhcp_leases, conntrack_flush and

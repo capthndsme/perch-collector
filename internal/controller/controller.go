@@ -33,6 +33,7 @@ import (
 	"github.com/capthndsme/perch-collector/internal/gateway"
 	"github.com/capthndsme/perch-collector/internal/gatewayops"
 	"github.com/capthndsme/perch-collector/internal/observe"
+	"github.com/capthndsme/perch-collector/internal/portal"
 )
 
 // Protocol constants.
@@ -140,6 +141,9 @@ type Options struct {
 	ObserveRefresh time.Duration
 	// Conntrack serves net.conntrack_flush; nil = not offered.
 	Conntrack *gatewayops.Flusher
+	// Portal is the guest portal (portal.* RPCs, hello capability
+	// "portal"); nil = not offered.
+	Portal *portal.Engine
 	// Backup serves gateway.backup; nil = not offered.
 	Backup *gatewayops.Backuper
 	// AddressCache is the file keeping the controller's last good address
@@ -239,6 +243,9 @@ func New(o Options) (*Client, error) {
 	c.dispatcher.Register("collector.status", c.handleStatus)
 	c.dispatcher.Register("collector.protocols", c.handleProtocols)
 	c.registerGateway()
+	if o.Portal != nil {
+		o.Portal.Register(c.dispatcher)
+	}
 	if o.Conntrack != nil && o.Conntrack.Protected == nil {
 		o.Conntrack.Protected = c.connectionEndpoints
 	}
@@ -329,7 +336,10 @@ type helloParams struct {
 	TLS               *bool    `json:"tls,omitempty"`
 	BaseURL           string   `json:"baseUrl,omitempty"`
 	Capabilities      []string `json:"capabilities"`
-	System            *System  `json:"system,omitempty"`
+	// Portal details the "portal" capability (docs: ARCHITECTURE.md,
+	// "Guest portal").
+	Portal *portal.Hello `json:"portal,omitempty"`
+	System *System       `json:"system,omitempty"`
 }
 
 type helloResult struct {
@@ -360,6 +370,11 @@ func (c *Client) hello() helloParams {
 		p.Capabilities = append(p.Capabilities, CapabilityGatewayStats)
 	}
 	p.Capabilities = append(p.Capabilities, c.gatewayCapabilities()...)
+	if c.o.Portal != nil {
+		p.Capabilities = append(p.Capabilities, portal.Capability)
+		h := c.o.Portal.Hello()
+		p.Portal = &h
+	}
 	return p
 }
 
@@ -431,6 +446,12 @@ func (c *Client) onOpen(gen uint64, configs chan link.Schedule, note *helloNote)
 			return
 		}
 		c.helloAccepted(gen, res)
+		if c.o.Portal != nil {
+			// The portal calls the controller (portal.redeem, …) and
+			// notifies it only while this session is open.
+			c.o.Portal.SetAgent(s)
+			defer c.o.Portal.SetAgent(nil)
+		}
 		link.RunPusher(ctx, link.PushOptions{
 			Configs: configs,
 			Push:    func(_ context.Context, seq uint64) { c.push(s, seq, gen) },
