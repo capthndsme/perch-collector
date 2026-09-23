@@ -349,6 +349,36 @@ is gone (no session, or it ended under the call): a live session that does
 not answer within 8 s is `controller_unreachable`, because the controller may
 still be answering (it refuses what it could not start within 5 s).
 
+Paid Hotspot and click-through (hotspot*.go; controller contract in
+`docs/gateway/portal.md` §14). The router runs every checkout itself, so
+paid access keeps working through a controller outage:
+
+```
+guest: POST /portal/checkout {terminalId}   terminal free + online → checkout open (price table copied: locked)
+terminal: session → heartbeat (sees the checkout) → coins {checkoutRef, eventId, amount}   each coin resets the idle timer
+guest page polls GET /portal/checkout (checkout.js): running total, preview, seconds left
+done (guest or terminal) / idle timeout (60 s default) with credit → finalise
+  record (signed) → reference code = HMAC(checkoutKey, record) → local voucher (verifier)
+  grant with localRef in local group c:<checkoutRef> (placed like an offline redemption:
+  current, queue behind live time, swap over a data bucket) → journal checkout_finalized
+idle timeout with nothing paid → expired; paid but below the smallest rate → expired + checkout_unclaimed
+controller sync: the record becomes voucher v:<id> + grant; full authorize maps
+  localRef → grantId and c:<ref> → v:<id> (ended usage follows), local voucher dropped
+```
+
+A terminal authenticates each request with an HMAC of its token (never sent),
+a router-issued session (a replayed session request is refused by its nonce)
+and a strictly increasing sequence number; coins carry the terminal's own
+event id, so a retried coin counts once and a coin for a closed checkout is
+journaled once as unclaimed money. A reference code the controller has not
+acknowledged yet is redeemed locally (online or not) and moves the remaining
+entitlement to the new MAC (the old grant ends `moved`). Click-through grants
+are local groups `t:<localRef>` (→ `g:<grantId>`), limited per device by the
+uses the router records. State: tables `terminals`, `checkouts` (closed ones
+kept 24 h for receipts, at most 2000), `local_vouchers`, `clickthrough_uses`
+(30 days) in the portal store; coins, sessions and finalisations are
+grant-class writes, heartbeats counter-class.
+
 The controller hook is `controller.Options.Portal`: the client registers the
 portal.* handlers, adds the hello details, and hands the session to the engine
 (`SetAgent`) while it is open. `main_portal.go` builds it (portal auto = OpenWrt
