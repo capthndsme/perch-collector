@@ -21,6 +21,21 @@ perch-collector (the Perch Network Collector) is configured via a YAML file, CLI
 # Default: "" (auto-detect)
 interface: ""
 
+# Several networks at once (on the router; see "Several networks" below):
+# UCI network names, device names, or "auto" = every LAN-side network netifd
+# has (up, proto static or none, not a WAN). Set = `interface` is not
+# captured on its own. Default: [] (the single `interface`)
+capture_networks: []
+# Networks (or devices) left out of capture_networks. Default: []
+capture_exclude: []
+# Seconds between two reads of netifd for networks that appeared or went
+# away (also on SIGHUP). 5-3600. Default: 30
+capture_rescan: 30
+# Scope rule: "on" counts traffic routed between two local networks, and
+# traffic to the router's own LAN addresses, as LAN instead of WAN. "auto" =
+# on with capture_networks, off with the single interface. Default: auto
+routed_lan: auto
+
 # BPF filter expression applied to the capture.
 # Empty string means capture all traffic.
 # Examples:
@@ -260,6 +275,10 @@ Configuration values can also be set via environment variables. They take the hi
 | Variable | Maps to |
 |---|---|
 | `PERCH_COLLECTOR_INTERFACE` | `interface` |
+| `PERCH_COLLECTOR_CAPTURE_NETWORKS` | `capture_networks` (comma-separated; `auto`) |
+| `PERCH_COLLECTOR_CAPTURE_EXCLUDE` | `capture_exclude` (comma-separated) |
+| `PERCH_COLLECTOR_CAPTURE_RESCAN` | `capture_rescan` (seconds) |
+| `PERCH_COLLECTOR_ROUTED_LAN` | `routed_lan` (`auto`, `on`, `off`) |
 | `PERCH_COLLECTOR_LISTEN` | `listen` |
 | `PERCH_COLLECTOR_API_KEY` | `api_key` |
 | `PERCH_COLLECTOR_BPF_FILTER` | `bpf_filter` |
@@ -606,6 +625,108 @@ reads a missing key as "not reported", never as "no ports". `on` behaves like
 array once and exits without reading this configuration (README, "The
 Gateway agent's ports").
 
+### Several networks (`capture_networks`, gateway plan 1 section 8.3)
+
+A router with more than one LAN (a guest network, an IoT network, VLANs)
+carries each on its own L3 device: `br-lan`, `br-guest`, `br-lan.110`. With
+`capture_networks` the collector captures all of them, each with an engine
+(libpcap handle and nDPI instance) of its own, and follows the router as
+networks come and go:
+
+- **What `auto` selects.** Every netifd interface (`ubus call
+  network.interface dump`) that is up, has an L3 device, proto `static` or
+  `none`, and is not a WAN. A WAN holds a default route, sits in a firewall
+  zone with `masq` on, or is listed in `wan_interfaces`; a WAN is never
+  captured, even when named. Several networks on one device (an alias) share
+  one engine, attributed to the first by name that has an IPv4 address.
+- **Never twice.** A bridge port is never captured (its bridge is the L3
+  device), nor a device whose VLAN devices are captured as well (it would
+  see their frames a second time, tagged). `auto` never picks a device that
+  carries VLAN devices at all (a VLAN-filtering bridge): excluding a VLAN
+  must not make its frames show up on the trunk instead.
+- **Names or devices.** An entry that is not a netifd network is taken as a
+  device name (a host without netifd), and its network is its own name.
+  `capture_exclude` removes networks by network or device name.
+- **Following the router.** netifd is re-read every `capture_rescan` seconds
+  and on `SIGHUP` (the OpenWrt package sends one on every interface event:
+  `/etc/init.d/perch-collector rescan`). A new network gets an engine, a
+  network that went down or away loses its own; the others are never
+  touched, and nothing is reset. A device that cannot be opened is retried
+  every rescan; while netifd does not answer the running engines stay.
+- **The router's MACs and networks.** The pivot MACs are the MACs of every
+  LAN-side L3 device plus `gateway_macs`; the local subnets are the prefixes
+  of every LAN-side network that is up (IPv4, IPv6 addresses and the prefixes
+  assigned from a delegated one) plus `local_subnets`. Both follow the rescan.
+- **nDPI.** `ndpi_max_flows` is split across the engines running when an
+  engine starts (at least 4096 each, never more than the total): a flow
+  routed between two captured networks is seen on both, and one flow table
+  would feed it to nDPI twice.
+
+`capture_networks` unset (the default outside the package's new config)
+keeps the single `interface` exactly as before: one engine, the configured
+or detected gateway MAC, the interface's subnets and the old scope rule. Its
+frames are still tagged with the interface's network when netifd knows it,
+so the device rows gain `network` there too.
+
+**Scope rule (`routed_lan`, owner decision 8).** With it on, a frame through
+the router whose far address is local (a LAN-side prefix, or link-local)
+counts as **LAN**: `bytes_in_lan`/`bytes_out_lan` and a `top_lan_peers`
+entry for the local device, no destination row. That covers traffic routed
+between two local networks, which is seen once on each side and attributed
+to a different device on each (sender's `out_lan`, receiver's `in_lan`), and
+traffic to the router's own LAN addresses (DNS, LuCI), which used to count
+as WAN. Traffic to anything else, private WAN-side addresses included, stays
+WAN. `auto` turns it on with `capture_networks` only, so a single-interface
+collector's WAN/LAN split does not move without an explicit `routed_lan: on`.
+
+**Device rows** gain two fields, both left out when the capture does not know
+the network:
+
+```json
+{"mac":"02:00:00:99:30:11", …, "network":"iot", "networks":["iot"]}
+```
+
+`network` is the capture network where the MAC was last an endpoint of a
+frame, `networks` every one it was seen on (first-seen order, at most 8).
+
+**The networks report.** With gateway stats on and netifd answering, the
+`gateway` object gains `networks`: every LAN-side network (not loopback, not
+a WAN), up or down, captured or not. Absent = not reported (no netifd, an
+older collector); `[]` = none; the same rule as `ports`.
+
+```json
+"networks":[
+  {"name":"iot","device":"iot","proto":"static","up":true,
+   "ipv4":["192.168.30.1/24"],"ipv6":[],
+   "rxBytes":1804,"txBytes":52011,"rxRate":0,"txRate":12.4,
+   "captured":true,"devices":1,"activeDevices":1,
+   "capture":{"bytesInWan":0,"bytesOutWan":0,"bytesInLan":50120,"bytesOutLan":1200,
+              "packetsInWan":0,"packetsOutWan":0,"packetsInLan":35,"packetsOutLan":20,
+              "scope":"routed"}},
+  {"name":"office","device":"","proto":"static","up":false,"ipv4":[],"ipv6":[],
+   "captured":false,"devices":0,"activeDevices":0}]
+```
+
+- `rxBytes`/`txBytes`: the L3 device's `/proc/net/dev` counters, from the
+  router's side (rx = received from the network, i.e. its devices' uploads
+  and whatever is routed out of it; tx = sent into it). Cumulative, reset
+  when the device is recreated; absent while the device does not exist.
+- `rxRate`/`txRate`: bytes per second since the collector's previous read
+  of that device (at least a second apart); absent on the first read and
+  after a counter reset. The controller can derive its own from the counters.
+- `captured`, `devices` (device rows whose `network` is this one),
+  `activeDevices` (of those, a frame in the last 5 minutes).
+- `capture`: the capture's own counters of this network, from its devices'
+  side (In = received by the network's devices), split WAN/LAN by the scope
+  rule named in `scope` (`routed` or `legacy`). A frame between two devices
+  of one network counts once In and once Out; a routed frame Out on the
+  sender's network and In on the receiver's. Cumulative since the collector
+  started. Only on the network the device's frames are attributed to (an
+  alias on the same device shows `captured: true` without it).
+
+The hello's `captureInterface` and every `meta.capture_interface` name the
+captured devices, comma-separated, cut to 64 characters (`…,+2`).
+
 ### DHCP leases and static hosts (`observe.dhcp`)
 
 With `dhcp_leases` on (the default on OpenWrt), the collector reports what the
@@ -773,6 +894,17 @@ HTTP proxy in the environment.
 ## Packaged deployments
 
 The OpenWrt init script and the Docker image configure the daemon through
-`PERCH_COLLECTOR_*` variables only; no YAML file is needed. `GET /healthz` and
+`PERCH_COLLECTOR_*` variables only; no YAML file is needed.
+
+On OpenWrt, `list capture_networks` (the package's new config ships `'auto'`),
+`list capture_exclude`, `option capture_rescan` and `option routed_lan` map to
+the variables above. With `capture_networks` set the init script passes no
+capture device and no gateway MAC (the daemon reads them from netifd) and
+answers interface events with a `rescan` (SIGHUP) instead of a restart. An
+existing config keeps its `capture_network`/`capture_device` on upgrade (the
+conffile is kept), and with it the single-interface capture: switch with
+`uci delete perch-collector.main.capture_network; uci add_list
+perch-collector.main.capture_networks=auto; uci commit perch-collector;
+/etc/init.d/perch-collector restart`. `GET /healthz` and
 every `meta` block report the build `version` (set with
 `-ldflags "-X main.version=…"`).

@@ -3,7 +3,8 @@
 ## Overview
 
 perch-collector (the Perch Network Collector) is a single-binary daemon. It
-captures packet headers on a LAN interface, classifies each frame against the
+captures packet headers on a LAN interface (or, on the router, on every
+LAN-side network with `capture_networks`), classifies each frame against the
 configured gateway MAC(s), and maintains per-device traffic counters in
 memory with two parallel bounded peer lists per device — `top_peers` for WAN
 remotes and `top_lan_peers` for LAN neighbours. It hands them to the Perch
@@ -91,6 +92,7 @@ the router it adds the router's own health and its Ethernet ports
 ```
 perch-collector/
 ├── main.go                    # Entry point, `ports`/`dhcp` subcommands, wiring, gateway/subnet resolution, transport
+├── main_capture.go            # the capture set: single engine or netcap reconciler, classifier per engine
 ├── main_gateway.go            # observation + runtime actions wiring, `observe`/`conntrack-flush`/`backup` subcommands
 ├── collector.example.yaml     # Configuration template (copy to collector.yaml)
 ├── internal/
@@ -100,7 +102,12 @@ perch-collector/
 │   │   ├── gateway.go         # /proc/net/route + /proc/net/arp parsers
 │   │   └── subnets.go         # Interface CIDR enumeration + helpers
 │   ├── capture/
-│   │   └── capture.go         # libpcap capture; extracts Ethernet + IP
+│   │   └── capture.go         # libpcap capture of one device; extracts Ethernet + IP
+│   ├── netcap/                # multi-interface capture (capture_networks)
+│   │   ├── plan.go            # MakePlan: netifd + firewall + /sys → targets, local prefixes, router MACs
+│   │   ├── discover.go        # netifd dump, masq zones, SysFS
+│   │   ├── reconciler.go      # one engine per target, hot add/remove
+│   │   └── report.go          # gateway.networks
 │   ├── aggregator/
 │   │   └── aggregator.go      # Per-MAC counters + bounded peer min-heap
 │   ├── api/
@@ -129,9 +136,16 @@ perch-collector/
 
 ## Concurrency Model
 
-- **Capture goroutine** — single goroutine reads packets from the pcap handle
-  in a blocking loop and calls `Aggregator.Record()` (acquires a write lock
-  briefly).
+- **Capture goroutines** — one per captured device reads packets from its
+  pcap handle (reads time out every 250 ms so a stop is seen) and calls
+  `Aggregator.RecordPacket()` (acquires the shared write lock briefly). Each
+  has its own classifier, so nDPI's module and flow table are never shared
+  between two captures. The gateway-MAC set is an immutable map behind an
+  atomic pointer, read before the lock.
+- **Reconciler** (capture_networks) — one goroutine re-reads netifd every
+  `capture_rescan` seconds and on SIGHUP, starts and stops engines under its
+  own mutex and updates the aggregator's router MACs, local subnets and scope
+  prefixes before new engines start.
 - **API server** — `net/http` default goroutine pool. Handlers call
   `Aggregator.Snapshot()` / `GetDevice()` / `GetSummary()` (read lock).
 - **Flusher goroutine** — single goroutine with a ticker. Calls
@@ -193,6 +207,50 @@ ports read with the default-route WAN list, prints the JSON and exits, before
 logging, configuration, capture, the listener or any connection. The daemon
 itself takes flags only and refuses a leftover argument before capture
 starts, so a subcommand typed after a flag cannot start a second collector.
+
+## Several networks
+
+With `capture_networks` the collector on the router captures every
+LAN-side network (gateway plan 1 section 8.3; settings and wire format in
+CONFIG.md, "Several networks"):
+
+```
+Reconciler.Reconcile()  (start, every capture_rescan s, SIGHUP; the package
+                         sends SIGHUP on every netifd interface event)
+  Discoverer: ubus call network.interface dump (fresh) + uci show firewall
+              (masq zones, 30 s cache)
+  MakePlan (pure):
+    LAN side  = not loopback, no default route, not in a masq zone, not a
+                configured wan_interface
+    auto      = LAN side, up, L3 device, proto static|none, carries no VLAN
+                devices; minus capture_exclude; plus named networks/devices
+    refused   = WANs, bridge ports (/sys/.../master), devices whose captured
+                VLAN devices sit on them (/sys/.../upper_*)
+    one Target per L3 device (aliases share it)
+    LANPrefixes = every LAN-side prefix (v4, v6, assigned v6) → local subnets
+                  and the routed-LAN scope rule
+    GatewayMACs = every LAN-side L3 device's MAC → the aggregator's pivots
+  stop engines whose device left the plan or changed network
+  Apply(plan) → Aggregator.SetGatewayMACs / SetLocalSubnets / SetRoutedLAN
+  open new ones: capture.NewForNetwork(device, network, classifier of its
+                 own, ndpi_max_flows / engines, floor 4096), go Run()
+```
+
+Every frame carries its engine's network in `FlowInfo.Network`: the local
+device gets `network` (last) and `networks` (seen set, cap 8), and the
+per-network capture counters count it. The routed-LAN rule sits in
+`Aggregator.RecordPacket` ahead of the WAN cases: a frame through a pivot MAC
+whose far address is in the LAN prefixes (or link-local) is LAN scope on the
+local device only, never a device row for the router. A flow routed between
+two captured networks is thus seen twice, once per side, and each sighting
+lands on a different device and a different network. The single-interface
+mode keeps one engine and its resolution as before; `routed_lan auto` leaves
+the old rule there.
+
+The gateway report's `networks` (Reporter) re-uses the plan's LAN list
+(netifd, 5 s cache), adds `/proc/net/dev` counters and rates (per device,
+at least a second between two samples), the captured set and the
+aggregator's per-network device counts and capture counters.
 
 ## The observation channel
 
