@@ -130,6 +130,15 @@ func (w *watchState) rebase(hashes map[string]string) {
 	w.gen++
 	w.dirty = map[string]time.Time{}
 	w.triggered = false
+	// An own write the controller now sees in the baseline needs no echo
+	// any more. Left behind, it would make a later router edit that puts
+	// the file back to the same bytes look like Perch's own (origin perch:
+	// the controller does not read it).
+	for c, own := range w.own {
+		if hashes[c] == own.hash {
+			delete(w.own, c)
+		}
+	}
 }
 
 func clampSeconds(v *float64, def, lo, hi int) time.Duration {
@@ -369,6 +378,11 @@ func (p *Plane) scan(now time.Time, force bool) {
 	for _, r := range results {
 		prev, hadPrev := p.w.known[r.name]
 		p.w.known[r.name] = r.st
+		if own, ok := p.w.own[r.name]; ok && own.hash != r.st.hash {
+			// The file moved past Perch's write: whatever comes next is
+			// the router's, even the same bytes again.
+			delete(p.w.own, r.name)
+		}
 		if r.st.hash == p.w.reported[r.name] {
 			// Back where the controller last saw it (a reverted edit).
 			delete(p.w.dirty, r.name)

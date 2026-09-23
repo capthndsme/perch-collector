@@ -26,7 +26,7 @@ func reservationJSON(e *env, id string) string {
 
 func TestApplyConfirmOnAFreshSession(t *testing.T) {
 	e := newEnv(t)
-	pre := e.p.Hashes() // the controller's view before the apply
+
 	before := e.file("dhcp")
 	res, err := e.apply(reservationJSON(e, "a1"))
 	if err != nil {
@@ -103,15 +103,14 @@ func TestApplyConfirmOnAFreshSession(t *testing.T) {
 	if st := e.p.ApplyState(); st.State != StateIdle || e.p.RedialFast() {
 		t.Fatalf("%+v", st)
 	}
-	// Echo suppression: the watcher reports our commits as perch, apply a1.
-	notes := e.drainNotes(pre)
-	if len(notes) != 1 || !reflect.DeepEqual(notes[0].Changed, []string{"dhcp", LedgerConfig}) {
+	// The fresh session's hello carried the committed hashes: the commit
+	// needs no echo (the watcher reports nothing), and none is left behind
+	// to mislabel a later router edit (TestWatchOwnEchoAbsorbedByHello).
+	if notes := e.drainNotes(e.p.Hashes()); len(notes) != 0 {
 		t.Fatalf("%+v", notes)
 	}
-	for _, n := range notes {
-		if n.Origin != OriginPerch || n.ApplyID != "a1" {
-			t.Fatalf("own commit reported as %+v", n)
-		}
+	if len(e.p.w.own) != 0 {
+		t.Fatalf("echo left behind: %+v", e.p.w.own)
 	}
 }
 
