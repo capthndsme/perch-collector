@@ -713,7 +713,7 @@ older collector); `[]` = none; the same rule as `ports`.
    "captured":true,"devices":1,"activeDevices":1,
    "capture":{"bytesInWan":0,"bytesOutWan":0,"bytesInLan":50120,"bytesOutLan":1200,
               "packetsInWan":0,"packetsOutWan":0,"packetsInLan":35,"packetsOutLan":20,
-              "scope":"routed"}},
+              "scope":"routed","kernelDrops":0}},
   {"name":"office","device":"","proto":"static","up":false,"ipv4":[],"ipv6":[],
    "captured":false,"devices":0,"activeDevices":0}]
 ```
@@ -734,6 +734,13 @@ older collector); `[]` = none; the same rule as `ports`.
   sender's network and In on the receiver's. Cumulative since the collector
   started. Only on the network the device's frames are attributed to (an
   alias on the same device shows `captured: true` without it).
+- `capture.kernelDrops`: frames the kernel dropped for this network's
+  capture since that capture started (libpcap's ring buffer was full; the
+  capture counters miss them, the interface counters do not). It restarts at
+  0 when the capture restarts. On the lab router (a container) captures kept
+  up with 200 Mbit/s routed between two networks to within 0.3 % of iperf3;
+  unshaped veth traffic at ~1.7 Gbit/s lost about a fifth, all of it
+  reported here.
 
 The hello's `captureInterface` and every `meta.capture_interface` name the
 captured devices, comma-separated, cut to 64 characters (`…,+2`).
