@@ -679,7 +679,7 @@ func TestMultiGatewayPivot(t *testing.T) {
 
 func TestInterGatewayRelayFramesDropped(t *testing.T) {
 	// A frame whose src AND dst are both registered gateway MACs (typical of
-	// inter-router relay traffic, e.g. OpenWrt -> WanB on the way to wan0)
+	// inter-router relay traffic, e.g. OpenWrt -> the second WAN router on the way to wan0)
 	// must be dropped so neither side is double-counted.
 	gw1 := mustMAC(t, "02:00:00:00:00:01")
 	gw2 := mustMAC(t, "02:00:00:00:00:02")

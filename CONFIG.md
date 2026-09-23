@@ -306,7 +306,7 @@ as a WAN pivot. Frames between gateways are dropped to avoid double-counting.
 interface: "br-lan"
 gateway_macs:
   - "02:00:00:00:00:01"   # primary OpenWrt gateway
-  - "02:00:00:00:00:02"   # secondary WAN container (e.g. WanB)
+  - "02:00:00:00:00:02"   # a second WAN router's container
   - "02:00:00:00:00:03"   # WireGuard relay container
 top_peers_count: 50
 ```
