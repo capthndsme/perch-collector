@@ -40,7 +40,7 @@ type fallbackDialer struct {
 
 func newFallbackDialer(file string) *fallbackDialer {
 	d := &fallbackDialer{
-		base: &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second},
+		base: &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second, Control: markCS6},
 		file: file,
 		lookup: func(ctx context.Context, host string) ([]netip.Addr, error) {
 			return net.DefaultResolver.LookupNetIP(ctx, "ip", host)

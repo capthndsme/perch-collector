@@ -1,0 +1,11 @@
+#!/bin/sh
+# perch-qos first-boot / install defaults: a globals section (enabled, no
+# shaping until the controller sends buckets or devices) and the directory
+# of the device cache.
+uci -q get perch-qos.globals >/dev/null || {
+	uci -q set perch-qos.globals=globals
+	uci -q set perch-qos.globals.enabled=1
+	uci -q commit perch-qos
+}
+mkdir -p /etc/perch-qos
+exit 0

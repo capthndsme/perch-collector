@@ -156,11 +156,11 @@ func TestParseBatchOutputFailures(t *testing.T) {
 
 func TestCanonicalKeys(t *testing.T) {
 	for in, want := range map[string]string{
-		`{"eth_type":"ipv4","src_ip":"192.168.1.1"}`:                   "src_ip=192.168.1.1/32",
-		`{"eth_type":"ipv6","dst_ip":"FD00:10::/64"}`:                   "dst_ip=fd00:10::/64",
-		`{"dst_mac":"01:00:00:00:00:00/01:00:00:00:00:00"}`:             "dst_mac=01:00:00:00:00:00/01:00:00:00:00:00",
-		`{}`:                                                             "",
-		`{"src_mac":"02:00:00:00:00:0A","eth_type":"arp"}`:              "src_mac=02:00:00:00:00:0a",
+		`{"eth_type":"ipv4","src_ip":"192.168.1.1"}`:        "src_ip=192.168.1.1/32",
+		`{"eth_type":"ipv6","dst_ip":"FD00:10::/64"}`:       "dst_ip=fd00:10::/64",
+		`{"dst_mac":"01:00:00:00:00:00/01:00:00:00:00:00"}`: "dst_mac=01:00:00:00:00:00/01:00:00:00:00:00",
+		`{}`: "",
+		`{"src_mac":"02:00:00:00:00:0A","eth_type":"arp"}`: "src_mac=02:00:00:00:00:0a",
 	} {
 		var keys map[string]any
 		if err := json.Unmarshal([]byte(in), &keys); err != nil {

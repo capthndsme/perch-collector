@@ -29,6 +29,7 @@ import (
 	"github.com/capthndsme/perch-collector/internal/gateway"
 	"github.com/capthndsme/perch-collector/internal/netutil"
 	"github.com/capthndsme/perch-collector/internal/observe"
+	"github.com/capthndsme/perch-collector/internal/qos"
 )
 
 // version is stamped at build time: -ldflags "-X main.version=1.2.3".
@@ -42,6 +43,9 @@ func main() {
 	}
 	if len(os.Args) > 1 && os.Args[1] == "dhcp" {
 		os.Exit(dhcpCommand(os.Args[2:], os.Stdout, os.Stderr, &observe.Reader{}))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "qos" {
+		os.Exit(qosCommand(os.Args[2:], os.Stdout, os.Stderr, &qos.OS{}))
 	}
 	if len(os.Args) > 1 {
 		if code, ok := gatewayCommand(os.Args[1], os.Args[2:], os.Stdout, os.Stderr); ok {
@@ -191,6 +195,13 @@ func main() {
 	// OpenWrt). With it the runtime actions: conntrack flush and backups.
 	gw := buildGatewayFeatures(cfg, gateway.OnOpenWrt(hoststat.FS{}))
 
+	// Traffic shaping (perch-qos): per-device and bucket caps, run by this
+	// daemon so dynamic devices, schedules and quotas keep working while
+	// the controller is away.
+	qosCtx, stopQoS := context.WithCancel(context.Background())
+	defer stopQoS()
+	shaper, qosDone := buildQoS(qosCtx, cfg, gateway.OnOpenWrt(hoststat.FS{}))
+
 	// Build the announcer or the controller client (when the daemon has a
 	// server) before the API server starts, so its status can be part of
 	// every meta block without racing the first request. Either is only
@@ -202,7 +213,7 @@ func main() {
 	)
 	switch transport {
 	case config.TransportWebSocket:
-		ctl = buildController(cfg, agg, cls, gatewayStats, gw)
+		ctl = buildController(cfg, agg, cls, gatewayStats, gw, shaper)
 	case config.TransportPoll:
 		ann = buildAnnouncer(cfg)
 	}
@@ -267,6 +278,13 @@ func main() {
 
 	if ann != nil {
 		ann.Stop()
+	}
+	// The shaper's kernel objects stay: they keep enforcing while the
+	// daemon restarts. Its device cache is flushed on the way out.
+	stopQoS()
+	select {
+	case <-qosDone:
+	case <-time.After(3 * time.Second):
 	}
 	// Say goodbye (1001) so the controller knows this is a restart.
 	stopCtl()
@@ -333,7 +351,7 @@ func buildAnnouncer(cfg config.Config) *announce.Announcer {
 
 // buildController prepares the WebSocket client (transport websocket). The
 // socket carries everything the controller would otherwise poll.
-func buildController(cfg config.Config, agg *aggregator.Aggregator, cls classifier.Classifier, gatewayStats func() *gateway.Stats, gw gatewayFeatures) *controller.Client {
+func buildController(cfg config.Config, agg *aggregator.Aggregator, cls classifier.Classifier, gatewayStats func() *gateway.Stats, gw gatewayFeatures, shaper *qos.Engine) *controller.Client {
 	instanceID := resolveInstanceID(cfg)
 	if instanceID == "" {
 		log.Fatalf("controller: no usable instance id; cannot connect to %s", cfg.ServerURL)
@@ -349,6 +367,10 @@ func buildController(cfg config.Config, agg *aggregator.Aggregator, cls classifi
 	if lister, ok := cls.(classifier.CategoryLister); ok {
 		categories := lister.ProtocolCategories()
 		source.Protocols = func() []classifier.ProtocolCategory { return categories }
+	}
+	var shaping controller.QoS
+	if shaper != nil {
+		shaping = shaper
 	}
 	ctl, err := controller.New(controller.Options{
 		ServerURL:        cfg.ServerURL,
@@ -367,6 +389,7 @@ func buildController(cfg config.Config, agg *aggregator.Aggregator, cls classifi
 		Conntrack:        gw.conntrack,
 		Backup:           gw.backup,
 		AddressCache:     cfg.ControllerAddressCache,
+		QoS:              shaping,
 	})
 	if err != nil {
 		log.Fatalf("controller: %v", err)

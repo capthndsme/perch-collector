@@ -1,0 +1,12 @@
+#!/bin/sh
+# Re-apply the shaper when a network comes, goes or changes addresses
+# (IPv6 prefix delegation): the exemptions are the LAN prefixes, exactly.
+case "$ACTION" in
+	ifup|ifdown|ifupdate) ;;
+	*) exit 0 ;;
+esac
+/etc/init.d/perch-qos enabled || exit 0
+[ -e /tmp/perch-qos/stopped ] && exit 0
+[ -x /usr/bin/perch-collector ] || exit 0
+/usr/bin/perch-collector qos sync >/dev/null 2>&1 &
+exit 0

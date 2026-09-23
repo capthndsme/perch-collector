@@ -468,10 +468,37 @@ func (e *Engine) Reconcile(reason string, force bool) ApplyResult {
 	defer unlock()
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.reconcileLocked(reason, force)
+	res, _ := e.reconcileLocked(reason, force, false)
+	return res
 }
 
-func (e *Engine) reconcileLocked(reason string, force bool) ApplyResult {
+// Render plans without changing anything and returns the batch an apply
+// would run now (full: the whole tree, as on an empty kernel). It also
+// leaves the plan for StatusReport.
+func (e *Engine) Render(full bool) (string, error) {
+	unlock, err := e.sys.Lock(lockPath)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	res, b := e.reconcileLocked("render", true, true)
+	if len(res.Errors) > 0 {
+		return "", fmt.Errorf("%s", strings.Join(res.Errors, "; "))
+	}
+	if full && e.desired != nil {
+		b = Render(e.desired)
+	}
+	return b.Text(), nil
+}
+
+// Plan plans without changing anything (StatusReport's view of a CLI run).
+func (e *Engine) Plan() {
+	_, _ = e.Render(false)
+}
+
+func (e *Engine) reconcileLocked(reason string, force, dry bool) (ApplyResult, Batch) {
 	now := e.sys.Now()
 	e.refreshConfigLocked()
 	e.refreshLANsLocked(force)
@@ -479,7 +506,7 @@ func (e *Engine) reconcileLocked(reason string, force bool) ApplyResult {
 	synced := e.sys.ClockSynced()
 	fp := e.inputsFingerprintLocked(now, synced)
 	if !force && fp == e.inputsFP && now.Sub(e.verifiedAt) < verifyInterval && e.desired != nil {
-		return ApplyResult{At: now, Reason: reason, Active: e.desired.Active, Fingerprint: e.desired.Fingerprint, Unchanged: true}
+		return ApplyResult{At: now, Reason: reason, Active: e.desired.Active, Fingerprint: e.desired.Fingerprint, Unchanged: true}, Batch{}
 	}
 	st := e.loadState()
 	if e.epoch != "" && e.epoch != st.Epoch && e.daemon {
@@ -498,7 +525,7 @@ func (e *Engine) reconcileLocked(reason string, force bool) ApplyResult {
 	if err != nil {
 		res := ApplyResult{At: now, Reason: reason, Errors: []string{"reading tc: " + err.Error()}}
 		e.result = res
-		return res
+		return res, Batch{}
 	}
 	busy := map[uint16]bool{}
 	classBytes := map[uint16]uint64{}
@@ -527,10 +554,14 @@ func (e *Engine) reconcileLocked(reason string, force bool) ApplyResult {
 		res := ApplyResult{At: now, Reason: reason, Errors: issueStrings(cfg.Errors)}
 		e.result = res
 		e.inputsFP = fp
-		return res
+		return res, Batch{}
 	}
 	b := Diff(d, k, st.Devices)
 	res := ApplyResult{At: now, Reason: reason, Active: d.Active, Fingerprint: d.Fingerprint, Commands: len(b.Lines)}
+	if dry {
+		e.desired, e.epoch = d, st.Epoch
+		return res, b
+	}
 	if b.CreateIfbs {
 		for _, dir := range dirs {
 			if err := e.sys.EnsureIfb(dir.Ifb()); err != nil {
@@ -581,7 +612,7 @@ func (e *Engine) reconcileLocked(reason string, force bool) ApplyResult {
 		log.Printf("qos: applied %d tc commands (%s)", res.Commands, reason)
 	}
 	e.afterReconcileLocked(d, res, synced)
-	return res
+	return res, b
 }
 
 func issueStrings(list []Issue) []string {

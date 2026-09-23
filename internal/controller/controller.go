@@ -33,6 +33,7 @@ import (
 	"github.com/capthndsme/perch-collector/internal/gateway"
 	"github.com/capthndsme/perch-collector/internal/gatewayops"
 	"github.com/capthndsme/perch-collector/internal/observe"
+	"github.com/capthndsme/perch-collector/internal/qos"
 )
 
 // Protocol constants.
@@ -142,6 +143,11 @@ type Options struct {
 	Conntrack *gatewayops.Flusher
 	// Backup serves gateway.backup; nil = not offered.
 	Backup *gatewayops.Backuper
+	// QoS is the traffic shaper (qos.* and the push's `qos`); nil = off.
+	QoS QoS
+	// QoSAllowed gates qos.* (the managed-mode gate of the config plane);
+	// nil = allowed whenever perch-qos is installed.
+	QoSAllowed func() bool
 	// AddressCache is the file keeping the controller's last good address
 	// ("" = memory only). Used only with the default HTTP client.
 	AddressCache string
@@ -239,6 +245,7 @@ func New(o Options) (*Client, error) {
 	c.dispatcher.Register("collector.status", c.handleStatus)
 	c.dispatcher.Register("collector.protocols", c.handleProtocols)
 	c.registerGateway()
+	c.registerQoS()
 	if o.Conntrack != nil && o.Conntrack.Protected == nil {
 		o.Conntrack.Protected = c.connectionEndpoints
 	}
@@ -360,6 +367,9 @@ func (c *Client) hello() helloParams {
 		p.Capabilities = append(p.Capabilities, CapabilityGatewayStats)
 	}
 	p.Capabilities = append(p.Capabilities, c.gatewayCapabilities()...)
+	if c.qosOn() {
+		p.Capabilities = append(p.Capabilities, CapabilityQoS)
+	}
 	return p
 }
 
@@ -431,6 +441,7 @@ func (c *Client) onOpen(gen uint64, configs chan link.Schedule, note *helloNote)
 			return
 		}
 		c.helloAccepted(gen, res)
+		go c.forwardQoSEvents(ctx, s)
 		link.RunPusher(ctx, link.PushOptions{
 			Configs: configs,
 			Push:    func(_ context.Context, seq uint64) { c.push(s, seq, gen) },
@@ -489,6 +500,9 @@ type pushParams struct {
 	// A part is present only in the pushes that carry it: when it changed,
 	// at the start of a session, and every refresh.
 	Observe *observe.Section `json:"observe,omitempty"`
+	// QoS is the shaper's live state (gateway plan 3 section 6). Absent =
+	// not reported, never "no shaping".
+	QoS *qos.Section `json:"qos,omitempty"`
 }
 
 type pushMeta struct {
@@ -512,6 +526,7 @@ func (c *Client) push(s *link.Session, seq uint64, gen uint64) {
 	}
 	observed, commit := c.observeFor(gen)
 	p.Observe = observed
+	p.QoS = c.qosSection()
 	b, err := json.Marshal(p)
 	if err != nil {
 		c.log.Error("encoding a push", "err", err)

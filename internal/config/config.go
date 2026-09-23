@@ -212,6 +212,11 @@ type Config struct {
 	// already running. auto (default) = on with Observe.
 	ConntrackFlush string `yaml:"conntrack_flush"`
 
+	// QoS runs the traffic shaper (perch-qos: per-device and bucket caps,
+	// gateway plan 3). auto (default) = on when the perch-qos package is
+	// installed (/etc/config/perch-qos exists) on OpenWrt.
+	QoS string `yaml:"qos"`
+
 	// GatewayBackup is what gateway.backup hands out: "redacted" (the
 	// default: secrets replaced, private keys left out), "full" (the
 	// sysupgrade -b archive as is) or "off" (no backups).
@@ -330,6 +335,7 @@ func Defaults() Config {
 		Observe:                     GatewayStatsAuto,
 		ObserveRefresh:              DHCPLeasesRefreshDefault,
 		ConntrackFlush:              GatewayStatsAuto,
+		QoS:                         GatewayStatsAuto,
 		GatewayBackup:               GatewayBackupRedacted,
 		ControllerAddressCache:      DefaultControllerAddressCache,
 	}
@@ -440,6 +446,7 @@ func load(configPath string, cli cliOverrides) (Config, error) {
 	}
 	env.integer("OBSERVE_REFRESH", func(n int) { cfg.ObserveRefresh = n })
 	env.str("CONNTRACK_FLUSH", &cfg.ConntrackFlush)
+	env.str("QOS", &cfg.QoS)
 	env.str("GATEWAY_BACKUP", &cfg.GatewayBackup)
 	env.str("CONTROLLER_ADDRESS_CACHE", &cfg.ControllerAddressCache)
 	cfg.Deprecated = env.deprecated
@@ -846,6 +853,11 @@ func (c *Config) validateObserve() error {
 		return fmt.Errorf("conntrack_flush must be auto, on or off, got %q", c.ConntrackFlush)
 	}
 	c.ConntrackFlush = ct
+	qv, ok := normalizeAutoOnOff(c.QoS)
+	if !ok {
+		return fmt.Errorf("qos must be auto, on or off, got %q", c.QoS)
+	}
+	c.QoS = qv
 	switch strings.ToLower(strings.TrimSpace(c.GatewayBackup)) {
 	case "", GatewayBackupRedacted:
 		c.GatewayBackup = GatewayBackupRedacted
@@ -897,4 +909,16 @@ func (c Config) ConntrackFlushEnabled(observeOn bool) bool {
 		return false
 	}
 	return observeOn
+}
+
+// QoSEnabled resolves QoS; "auto" is on when perch-qos is installed on
+// OpenWrt (installed).
+func (c Config) QoSEnabled(installed bool) bool {
+	switch c.QoS {
+	case GatewayStatsOn:
+		return true
+	case GatewayStatsOff:
+		return false
+	}
+	return installed
 }

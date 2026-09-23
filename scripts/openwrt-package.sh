@@ -156,3 +156,10 @@ built=$(find "$WORK/bin/packages" -type f -name "$PKG*.$EXT" | head -1)
 dest="$OUT/${PKG}_${UPSTREAM}-r${PKG_RELEASE}_${ARCH}.$EXT"
 cp "$built" "$dest"
 echo "openwrt-package: $dest ($(stat -c %s "$dest") bytes)"
+# perch-qos (scripts only, architecture "all") comes out of the same Makefile.
+qos=$(find "$WORK/bin/packages" -type f -name "perch-qos*.$EXT" | head -1)
+if [ -n "$qos" ]; then
+  qdest="$OUT/perch-qos_${UPSTREAM}-r${PKG_RELEASE}_all.$EXT"
+  cp "$qos" "$qdest"
+  echo "openwrt-package: $qdest ($(stat -c %s "$qdest") bytes)"
+fi
