@@ -56,21 +56,32 @@ const (
 const RootKbit = 10_000_000
 
 // Filter priorities on a LAN device's clsact hooks. Lower runs first.
+//
+// A VLAN-tagged frame on a device is a VLAN device's frame on its way to or
+// from the port below it (lan.132 over lan): it was shaped, or will be, on
+// the VLAN device. The first two priorities let it pass, else a device's
+// MAC filter on both would shape and count it twice (2026-09-24: half the
+// cap, quotas used up at half the traffic). Before that fix the priorities
+// were ARP 1 … exempt v6 7; every old one is among these, so an upgrade
+// clears them.
 const (
-	PrefARP        = 1   // ARP: never shaped
-	PrefMulticast  = 2   // multicast and broadcast frames
-	PrefRouterV4   = 3   // to/from the router's own addresses
-	PrefRouterV6   = 4   //
-	PrefIncludeLan = 5   // MACs whose LAN traffic is shaped too (decision 13)
-	PrefExemptV4   = 6   // LAN↔LAN: the router's non-WAN prefixes, each exact
-	PrefExemptV6   = 7   //
+	PrefTaggedQ    = 1   // 802.1Q-tagged frames: a VLAN device's, pass
+	PrefTaggedAD   = 2   // 802.1ad (QinQ) likewise
+	PrefARP        = 3   // ARP: never shaped
+	PrefMulticast  = 4   // multicast and broadcast frames
+	PrefRouterV4   = 5   // to/from the router's own addresses
+	PrefRouterV6   = 6   //
+	PrefIncludeLan = 7   // MACs whose LAN traffic is shaped too (decision 13)
+	PrefExemptV4   = 8   // LAN↔LAN: the router's non-WAN prefixes, each exact
+	PrefExemptV6   = 9   //
 	PrefDevice     = 10  // one per MAC with an entry
 	PrefDefault    = 100 // the network default (flower without keys)
 )
 
 // ourPrefs are the priorities this agent owns on a LAN device.
-var ourPrefs = map[uint16]bool{PrefARP: true, PrefMulticast: true, PrefRouterV4: true, PrefRouterV6: true,
-	PrefIncludeLan: true, PrefExemptV4: true, PrefExemptV6: true, PrefDevice: true, PrefDefault: true}
+var ourPrefs = map[uint16]bool{PrefTaggedQ: true, PrefTaggedAD: true, PrefARP: true, PrefMulticast: true,
+	PrefRouterV4: true, PrefRouterV6: true, PrefIncludeLan: true, PrefExemptV4: true, PrefExemptV6: true,
+	PrefDevice: true, PrefDefault: true}
 
 // lanChain is the chain LAN↔LAN traffic continues in on a device whose
 // network default shapes LAN traffic too (a default with include_lan).
@@ -722,6 +733,8 @@ func Plan(in Inputs, st *State) *Desired {
 				ipKey, macKey = "dst_ip", "src_mac"
 			}
 			fs = append(fs,
+				DFilter{Hook: hook, Pref: PrefTaggedQ, Proto: "802.1Q", Handle: 1, Action: ActPass},
+				DFilter{Hook: hook, Pref: PrefTaggedAD, Proto: "802.1ad", Handle: 1, Action: ActPass},
 				DFilter{Hook: hook, Pref: PrefARP, Proto: "arp", Handle: 1, Action: ActPass},
 				DFilter{Hook: hook, Pref: PrefMulticast, Proto: "all", Handle: 1, Match: "dst_mac=01:00:00:00:00:00/01:00:00:00:00:00", Action: ActPass},
 			)

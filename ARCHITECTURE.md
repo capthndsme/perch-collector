@@ -883,11 +883,13 @@ download: WAN → ifb4<wan> [sqm CAKE] → route/de-NAT → LAN device egress (c
 upload:   LAN device ingress (clsact) → route/NAT → WAN egress [sqm CAKE]
 
 clsact filters on every LAN L3 device (flower everywhere, one hook per direction):
-  pref 1   arp                              pass
-  pref 2   dst_mac multicast/broadcast      pass
-  pref 3/4 the router's own v4/v6 addresses pass (src_ip on egress, dst_ip on ingress)
-  pref 5   MACs with includeLan             skbedit priority 1:<class> | mirred → ifb
-  pref 6/7 each LAN prefix, exactly (+ list exempt, fe80::/10)
+  pref 1/2 802.1Q / 802.1ad-tagged frames  pass  (a VLAN device's frames on the port below
+                                            it: shaped on the VLAN device, never twice)
+  pref 3   arp                              pass
+  pref 4   dst_mac multicast/broadcast      pass
+  pref 5/6 the router's own v4/v6 addresses pass (src_ip on egress, dst_ip on ingress)
+  pref 7   MACs with includeLan             skbedit priority 1:<class> | mirred → ifb
+  pref 8/9 each LAN prefix, exactly (+ list exempt, fe80::/10)
                                             pass  (goto chain 1 on a network whose default shapes LAN traffic)
   pref 10  one filter per MAC (handle = the MAC's allocated handle)
                                             classify | pass (unshaped) | drop (blocked)
