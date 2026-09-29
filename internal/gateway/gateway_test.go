@@ -259,6 +259,9 @@ func TestPortsFollowTheRoutesAndTheLink(t *testing.T) {
 	}
 
 	write := func(p, body string) {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(root.Root, p)), 0o755); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.WriteFile(filepath.Join(root.Root, p), []byte(body), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -275,6 +278,21 @@ func TestPortsFollowTheRoutesAndTheLink(t *testing.T) {
 	w0 := (*s.Ports)[3]
 	if w0.Carrier == nil || *w0.Carrier || w0.Operstate != "lowerlayerdown" || w0.CarrierChanges == nil || *w0.CarrierChanges != 3 {
 		t.Fatalf("wan0 state not read fresh: %+v", w0)
+	}
+
+	// Byte counters ride along for ports with a link (the veths' own), and
+	// not for wan0, which lost its link.
+	write("sys/class/net/lan0/statistics/rx_bytes", "11542336166\n")
+	write("sys/class/net/lan0/statistics/tx_bytes", "110655073351\n")
+	write("sys/class/net/wan0/statistics/rx_bytes", "5\n")
+	write("sys/class/net/wan0/statistics/tx_bytes", "6\n")
+	s = r.Read()
+	lan0, w0 := (*s.Ports)[2], (*s.Ports)[3]
+	if lan0.Name != "lan0" || lan0.RxBytes == nil || *lan0.RxBytes != 11542336166 || *lan0.TxBytes != 110655073351 || lan0.CounterScope != "port" {
+		t.Fatalf("lan0 counters: %+v", lan0)
+	}
+	if w0.RxBytes != nil || w0.CounterScope != "" {
+		t.Fatalf("wan0 without a link has counters: %+v", w0)
 	}
 }
 

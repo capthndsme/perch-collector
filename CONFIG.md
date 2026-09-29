@@ -708,14 +708,21 @@ controller's infrastructure view.
   {"name":"wan0","label":"wan0","role":"wan","medium":"virtual","mac":"02:00:00:00:00:31",
    "adminUp":true,"carrier":true,"operstate":"up","speedMbps":10000,"duplex":"full","carrierChanges":2},
   {"name":"lan0","label":"lan0","medium":"virtual","mac":"02:00:00:00:00:32",
-   "adminUp":true,"carrier":true,"operstate":"up","speedMbps":10000,"duplex":"full","carrierChanges":2}]
+   "adminUp":true,"carrier":true,"operstate":"up","speedMbps":10000,"duplex":"full","carrierChanges":2,
+   "rxBytes":11542336166,"txBytes":110655073351,"counterScope":"port"}]
 ```
 
 The ports come from `/sys/class/net`, with labels from the device tree and
 roles from OpenWrt's `/etc/board.json` for hardware ports. The interfaces the
 report counts as WAN (`wan_interfaces`, else the default routes) are role
 `wan`. A router in a container has no hardware port, so it reports its veths
-(`medium: "virtual"`). `[]` means the router has no port; the key is left out
+(`medium: "virtual"`). Since 1.1.0 a port with a link also carries its byte
+counters (`rxBytes` received from the cable, `txBytes` sent into it,
+cumulative) and `counterScope`: `port` when they cover every frame (a DSA
+switch port reads the switch's own counters), `cpu` when only what the
+router's CPU handled (a switch whose byte counters the collector does not
+know). The controller turns them into per-port traffic and the rates on its
+cables. `[]` means the router has no port; the key is left out
 with `ports: off` and while `/sys/class/net` cannot be listed. The controller
 reads a missing key as "not reported", never as "no ports". `on` behaves like
 `auto`; `1` and `0` (UCI) mean on and off. `perch-collector ports` prints the

@@ -432,7 +432,8 @@ between them in the controller.
   "wanSource": "default-route",
   "ports": [
     { "name": "wan", "label": "wan", "role": "wan", "medium": "copper", "mac": "02:00:00:00:00:11",
-      "adminUp": true, "carrier": true, "operstate": "up", "speedMbps": 1000, "duplex": "full", "carrierChanges": 3 },
+      "adminUp": true, "carrier": true, "operstate": "up", "speedMbps": 1000, "duplex": "full", "carrierChanges": 3,
+      "rxBytes": 693974698743, "txBytes": 1697321558462, "counterScope": "port" },
     { "name": "lan1", "label": "lan1", "role": "lan", "medium": "copper", "mac": "02:00:00:00:00:10",
       "adminUp": true, "carrier": false, "operstate": "lowerlayerdown", "carrierChanges": 0 }
   ]
@@ -459,9 +460,17 @@ between them in the controller.
   router has no port. A missing key means "not reported": ports are off, the
   collector is older, or `/sys/class/net` could not be listed. The controller
   keeps what it already knows in that case.
+- **Traffic.** A port with a link also carries its byte counters (`rxBytes`
+  received from the cable, `txBytes` sent into it, cumulative) and
+  `counterScope`. A DSA switch port's netdev only counts what reaches the CPU,
+  so its counters come from the switch itself (`ethtool -S`), scope `port`; a
+  switch whose byte counters the collector does not know keeps the netdev's,
+  scope `cpu`. The controller turns them into per-port traffic and the rates
+  on its cables.
 - **Cost.** Each report lists `/sys/class/net` and reads about seven small
-  files per port. The facts that do not change (kind, label, medium, MAC) are
-  cached for five minutes.
+  files per port, two more for the counters (a switch port: one ioctl). The
+  facts that do not change (kind, label, medium, MAC, the switch's counter
+  names) are cached for five minutes.
 - **Read-only check.** `perch-collector ports` prints the array and exits
   before it reads any configuration, starts a capture, listens or connects
   anywhere, so it can run next to the live daemon. Without the configuration

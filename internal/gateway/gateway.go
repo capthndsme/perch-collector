@@ -159,9 +159,10 @@ type Ports struct {
 }
 
 // NewPorts reads the ports of the host under fs ("" = the real /sys and
-// /etc).
+// /etc), with their byte counters (the controller's per-port traffic and the
+// rates on its cables; docs/infrastructure-view.md A6).
 func NewPorts(fs hoststat.FS) *Ports {
-	return &Ports{reader: hoststat.PortReader{FS: fs}}
+	return &Ports{reader: hoststat.PortReader{FS: fs, Options: hoststat.PortOptions{Counters: true}}}
 }
 
 // Read lists the ports in display order, with role "wan" on the interfaces
