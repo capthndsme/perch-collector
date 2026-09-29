@@ -35,18 +35,14 @@ func (p *Plane) writeLedger(entries []LedgerEntry, applyID string) error {
 	return nil
 }
 
-// writable: a config the controller may write (allowlisted, never the
-// denylist or the ledger).
+// writable: a config the controller may write (managed_config or an
+// installed sibling that is not read-only; never the denylist or the
+// ledger).
 func (p *Plane) writable(config string) bool {
 	if Denied(config) || config == LedgerConfig {
 		return false
 	}
-	for _, c := range p.Allowed() {
-		if c == config {
-			return true
-		}
-	}
-	return false
+	return p.writableAllowlist()[config]
 }
 
 // lazyBackend picks the router's write path on first use: rpcd's private

@@ -1,0 +1,28 @@
+{
+	"interface": [
+		{ "interface": "wanaddr", "up": true, "l3_device": "wan0", "device": "wan0", "proto": "static",
+		  "ipv4-address": [ { "address": "192.168.100.2", "mask": 24 }, { "address": "192.168.101.2", "mask": 24 } ], "route": [] },
+		{ "interface": "sidenet", "up": true, "l3_device": "eth0", "device": "eth0", "proto": "static",
+		  "ipv4-address": [ { "address": "192.168.200.1", "mask": 24 } ], "route": [] },
+		{ "interface": "wan3", "up": false, "device": "wan3", "proto": "dhcp", "route": [] },
+		{ "interface": "wan3_mgmt", "up": true, "l3_device": "wan3", "device": "wan3", "proto": "static",
+		  "ipv4-address": [ { "address": "192.168.254.2", "mask": 24 } ], "route": [] },
+		{ "interface": "wan3v6", "up": false, "proto": "dhcpv6", "route": [], "errors": [ { "subsystem": "interface", "code": "NO_DEVICE" } ] },
+		{ "interface": "lan", "up": true, "l3_device": "lan0", "device": "lan0", "proto": "static",
+		  "ipv4-address": [ { "address": "192.168.1.1", "mask": 24 } ],
+		  "route": [ { "target": "192.168.8.0", "mask": 22, "nexthop": "192.168.1.2" } ] },
+		{ "interface": "lan2", "up": true, "l3_device": "wan2", "device": "wan2", "proto": "dhcp", "metric": 2,
+		  "ipv4-address": [ { "address": "198.51.100.20", "mask": 24 } ],
+		  "route": [ { "target": "0.0.0.0", "mask": 0, "nexthop": "198.51.100.1" } ] },
+		{ "interface": "loopback", "up": true, "l3_device": "lo", "device": "lo", "proto": "static",
+		  "ipv4-address": [ { "address": "127.0.0.1", "mask": 8 } ], "route": [] },
+		{ "interface": "wan", "up": true, "l3_device": "wan0", "device": "wan0", "proto": "dhcp", "metric": 1,
+		  "ipv4-address": [ { "address": "203.0.113.10", "mask": 24 } ],
+		  "route": [ { "target": "0.0.0.0", "mask": 0, "nexthop": "203.0.113.1" } ] },
+		{ "interface": "wan6", "up": false, "device": "wan0", "proto": "dhcpv6", "route": [] },
+		{ "interface": "wgc", "up": true, "l3_device": "wgc", "proto": "wireguard",
+		  "ipv4-address": [ { "address": "192.168.77.10", "mask": 32 } ],
+		  "ipv6-address": [ { "address": "fd42:42:42::10", "mask": 128 } ],
+		  "route": [ { "target": "192.168.78.0", "mask": 24, "nexthop": "0.0.0.0" }, { "target": "2001:db8:77::", "mask": 48, "nexthop": "::" } ] }
+	]
+}

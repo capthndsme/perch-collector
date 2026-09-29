@@ -236,10 +236,12 @@ CONFIG.md, "Several networks"):
 Reconciler.Reconcile()  (start, every capture_rescan s, SIGHUP; the package
                          sends SIGHUP on every netifd interface event)
   Discoverer: ubus call network.interface dump (fresh) + uci show firewall
-              (masq zones, 30 s cache)
+              (masq zones) + uci show network (gateway, device), 30 s cache
   MakePlan (pure):
-    LAN side  = not loopback, no default route, not in a masq zone, not a
-                configured wan_interface
+    LAN side  = the side rule (side.go, gateway-sync protocol 8): not
+                loopback, not a tunnel proto (vpn), not an uplink (WAN proto,
+                default route, masq zone, UCI gateway, wan_interfaces), not a
+                static/none alias on an uplink's device or @uplink
     auto      = LAN side, up, L3 device, proto static|none, carries no VLAN
                 devices; minus capture_exclude; plus named networks/devices
     refused   = WANs, bridge ports (/sys/.../master), devices whose captured
@@ -505,13 +507,18 @@ the kit (`perch-agentkit/openwrt/uci`, `openwrt/pkgdb`, `openwrt/ubus`).
 **Router opt-in.** `config_access` none (default) / read / write, and the
 `managed_config` allowlist; see CONFIG.md. The effective allowlist adds the
 configs of installed sibling packages (`internal/gwconfig/siblings.go`,
-gateway README 7.7: `sqm-scripts` → `sqm`, `perch-qos` → `perch-qos`) unless
-`managed_config_auto '0'` or `list managed_config_exclude` opts them out; the
-package database is cached 30 s and re-read after a package job. Readable =
-the effective allowlist minus the denylist (`perch-collector perch-apd rpcd
-uhttpd dropbear luci`) plus the ledger `perch-managed`; nothing with access
-`none`. Writable = the effective allowlist minus the denylist (never the
-ledger, which only the agent writes); anything else is `config_not_allowed`.
+gateway README 7.7 and gateway-sync protocol 5: `sqm-scripts` → `sqm`,
+`perch-qos` → `perch-qos`, `miniupnpd-nftables|miniupnpd|miniupnpd-iptables`
+→ `upnpd`, `ddns-scripts` → `ddns`, and read-only `mwan3` → `mwan3`, `pbr` →
+`pbr`) unless `managed_config_auto '0'` or `list managed_config_exclude` opts
+them out; the package database is cached 30 s and re-read after a package
+job. Readable = the effective allowlist minus the denylist (`perch-collector
+perch-apd rpcd uhttpd dropbear luci`) plus the ledger `perch-managed`;
+nothing with access `none`. Writable = `managed_config` plus the installed
+siblings that are not read-only, minus the denylist (never the ledger, which
+only the agent writes); a read-only sibling is writable only when listed in
+`managed_config` (its `reason` is then `listed`); anything else is
+`config_not_allowed`.
 
 **Hello** (`collector.hello` params): the capability `gateway_config` joins
 `capabilities` whenever the plane exists, and
@@ -554,7 +561,7 @@ kick); `[]` or no block clears the controller's part.
 
 | Method | Params | Result |
 |---|---|---|
-| `gateway.capabilities` | `{}` | `{protocol, access, accessConfigured, allowedConfigs[], transportOk, allowInsecure, confirmMaxSeconds, siblingConfigs:[{config, package, installed, allowed, reason:"listed"\|"installed"\|"not_installed"\|"opted_out"}], backend:"ubus"\|"uci-cli"\|null, openwrt:{release,revision,target,arch,board}\|null, firewall:"fw4"\|"fw3"\|null, packageManager:"opkg"\|"apk"\|null, packages:{name:version}, configs[], hashes{}, uncommitted[], luciPending, apply:{state,…}, capture:{networks:[{network,device}]}, flash:{path,totalBytes,freeBytes}\|null, storage:{path,exists,mountPoint,fsType,device,medium,onRoot,readOnly,totalBytes,freeBytes}\|null, signing?:{…}, management:{network,device,controllerAddress,reportedAt}\|null, installAllowlist[]}` |
+| `gateway.capabilities` | `{}` | `{protocol, access, accessConfigured, allowedConfigs[], writableConfigs[], features[], transportOk, allowInsecure, confirmMaxSeconds, siblingConfigs:[{config, package, installed, allowed, readOnly, reason:"listed"\|"installed"\|"installed_read_only"\|"not_installed"\|"opted_out"}], backend:"ubus"\|"uci-cli"\|null, openwrt:{release,revision,target,arch,board}\|null, firewall:"fw4"\|"fw3"\|null, packageManager:"opkg"\|"apk"\|null, packages:{name:version}, configs[], hashes{}, uncommitted[], luciPending, apply:{state,…}, capture:{networks:[{network,device}]}, flash:{path,totalBytes,freeBytes}\|null, storage:{path,exists,mountPoint,fsType,device,medium,onRoot,readOnly,totalBytes,freeBytes}\|null, signing?:{…}, management:{network,device,controllerAddress,reportedAt}\|null, installAllowlist[]}` |
 | `gateway.config.read` | `{configs?:[…]}` (default: every readable config) | `{readAt, configs:[{name, hash, missing?, sections:[{name, type, anonymous, index, options:{k: string\|string[]}, secrets?:{k:"hmac:…"}, hash}]}], ledger:[{perchId, config, section, domain}], uncommitted[], luciPending}` |
 
 - `packages` lists only the kit's watch list (`firewall4 firewall dnsmasq

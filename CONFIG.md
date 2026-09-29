@@ -739,9 +739,15 @@ networks come and go:
 
 - **What `auto` selects.** Every netifd interface (`ubus call
   network.interface dump`) that is up, has an L3 device, proto `static` or
-  `none`, and is not a WAN. A WAN holds a default route, sits in a firewall
-  zone with `masq` on, or is listed in `wan_interfaces`; a WAN is never
-  captured, even when named. Several networks on one device (an alias) share
+  `none`, and is on the LAN side. The side rule (`internal/netcap/side.go`,
+  the same as the controller's): a tunnel proto (`wireguard`, `openvpn`,
+  `gre`…) is a VPN; an uplink has a WAN proto (`dhcp`, `dhcpv6`, `pppoe`,
+  `qmi`, `6in4`…), a default route, a firewall zone with `masq` on, a UCI
+  `gateway`, or is listed in `wan_interfaces`; a `static`/`none` network on
+  an uplink's device (or on `@<uplink>`) is a WAN alias, such as a modem's
+  management subnet on the WAN port; everything else is LAN. WANs and VPNs
+  are never captured, even when named, never listed as networks, and their
+  prefixes are never local. Several networks on one device (an alias) share
   one engine, attributed to the first by name that has an IPv4 address.
 - **Never twice.** A bridge port is never captured (its bridge is the L3
   device), nor a device whose VLAN devices are captured as well (it would
@@ -1312,12 +1318,17 @@ fresh connection or restored on its own. The protocol is in ARCHITECTURE.md
   this switch or re-point `server_url`), `perch-apd`, `rpcd`, `uhttpd`,
   `dropbear` and `luci` are never readable. **Sibling packages** (gateway
   README 7.7): an installed `sqm-scripts` brings `sqm` onto the allowlist by
-  itself, an installed `perch-qos` brings `perch-qos` (the package database
-  is looked at every 30 s and right after an install job). Opt out with
+  itself, an installed `perch-qos` brings `perch-qos`, `miniupnpd-nftables`
+  (or `miniupnpd`, `miniupnpd-iptables`) brings `upnpd`, `ddns-scripts`
+  brings `ddns` (the package database is looked at every 30 s and right
+  after an install job). `mwan3` and `pbr` join **read-only**: the
+  controller reads and watches them but can never write them, unless you
+  list them yourself (`list managed_config 'mwan3'`). Opt out with
   `option managed_config_auto '0'` (only `managed_config` then), or keep one
   off with `list managed_config_exclude 'sqm'`. The denylist always wins.
-  `gateway.capabilities` reports the effective list (`allowedConfigs`) and
-  each sibling's state (`siblingConfigs`). The controller has its own
+  `gateway.capabilities` reports the readable list (`allowedConfigs`), the
+  writable one (`writableConfigs`) and each sibling's state
+  (`siblingConfigs`). The controller has its own
   switch per gateway (mode `off`/`observe`/`managed`); the effective access
   is the lower of the two.
 - **Where.** On OpenWrt (`/etc/openwrt_release`) with `transport websocket`.
