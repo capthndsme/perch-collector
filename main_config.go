@@ -118,7 +118,7 @@ func configGuardCommand(args []string, stdout, stderr io.Writer, root string, ap
 		fmt.Fprintf(stderr, "unexpected argument %q\n\n%s", a, configGuardUsage)
 		return 2
 	}
-	res, err := gwconfig.Guard(root, nil, time.Now(), uci.Redactor{Key: []byte(apiKey())})
+	res, err := gwconfig.Guard(root, nil, time.Now(), gwconfig.NewRedactor(apiKey()))
 	if err != nil {
 		fmt.Fprintf(stderr, "perch-collector config-guard: %v\n", err)
 		return 1

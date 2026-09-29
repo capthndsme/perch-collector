@@ -124,6 +124,20 @@ type Options struct {
 	Run ubus.Runner
 	// LookupHost resolves the controller's name; nil = the default resolver.
 	LookupHost func(ctx context.Context, host string) ([]string, error)
+	// Features are more features the daemon serves outside the plane
+	// (runtime RPCs, observation parts), announced with the plane's own in
+	// gateway.capabilities.
+	Features []string
+}
+
+// RedactExtra are secret option names beyond the kit's: a mobile WAN's SIM
+// PIN and PUK (gateway-sync protocol 5), which its suffix rules miss.
+var RedactExtra = []string{"pincode", "pukcode"}
+
+// NewRedactor is the plane's redactor: fingerprints keyed by the api_key,
+// the kit's secret names plus RedactExtra. The boot guard uses it too.
+func NewRedactor(apiKey string) uci.Redactor {
+	return uci.Redactor{Key: []byte(apiKey), Extra: append([]string(nil), RedactExtra...)}
 }
 
 // Plane serves the config plane. Safe for concurrent use.
@@ -171,7 +185,7 @@ func New(o Options) *Plane {
 		o:      o,
 		files:  uci.Files{Dir: rooted(o.Root, uci.DefaultDir)},
 		ubus:   o.Ubus,
-		redact: uci.Redactor{Key: []byte(o.APIKey)},
+		redact: NewRedactor(o.APIKey),
 		poke:   make(chan struct{}, 1),
 		clock:  o.Clock,
 	}
@@ -302,6 +316,8 @@ type ApplyState struct {
 	Kind      string `json:"kind,omitempty"`
 	Deadline  string `json:"deadline,omitempty"`
 	Protected bool   `json:"protected,omitempty"`
+	// Checks: the pending apply's checks (gateway-sync protocol 1.5).
+	Checks *ChecksView `json:"checks,omitempty"`
 }
 
 // Hello is the gatewayConfig block of collector.hello (plan 1 section 4).

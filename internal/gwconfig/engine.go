@@ -46,6 +46,9 @@ type Hooks struct {
 	// PairState sends gateway.pair.state on the current session; false
 	// when there is none (the next hello's signing block tells).
 	PairState func(PairStateNote) bool
+	// Checks sends gateway.config.checks on the current session; false
+	// when there is none (the hello's apply.checks tells).
+	Checks func(ChecksNote) bool
 }
 
 // SessionRef identifies the session a request came in on.
@@ -248,6 +251,12 @@ func (p *Plane) Apply(ctx context.Context, a *ApplyParams, sess SessionRef, secu
 	case KindApply, KindRevert, KindAdopt:
 	default:
 		return nil, perr(CodeBadParams, "unknown kind %q", a.Kind)
+	}
+	if err := validateChecks(a.Checks); err != nil {
+		return nil, err
+	}
+	if err := checkUnsupported(a); err != nil {
+		return nil, err
 	}
 	if p.Mode() != ModeManaged {
 		return nil, &AccessError{Code: ErrNotManaged, Message: "the controller has not put this gateway in managed mode (agent.configure)"}
@@ -590,6 +599,11 @@ func stageError(err error) error {
 // Confirm runs gateway.config.confirm: on a session newer than the
 // apply's, the snapshot is dropped and the change stays.
 func (p *Plane) Confirm(id string, sess SessionRef) (map[string]any, error) {
+	return p.ConfirmWith(id, false, sess)
+}
+
+// ConfirmWith is Confirm with overrideChecks.
+func (p *Plane) ConfirmWith(id string, overrideChecks bool, sess SessionRef) (map[string]any, error) {
 	p.ap.mu.Lock()
 	if id != "" && id == p.ap.lastConfirmed {
 		h := p.ap.lastConfirmedHashes

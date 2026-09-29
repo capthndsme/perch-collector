@@ -74,6 +74,71 @@ type Capabilities struct {
 	// SiblingConfigs: installed sibling packages bring their config onto
 	// AllowedConfigs by themselves (README 7.7); why each is or is not there.
 	SiblingConfigs []SiblingConfig `json:"siblingConfigs"`
+	// Features are the plane features this build implements (gateway-sync
+	// protocol 4): the controller sends checks, generated values, the
+	// service op and the runtime RPCs only when theirs is listed.
+	Features []string `json:"features"`
+	// WritableConfigs are what writes may touch: AllowedConfigs (which keeps
+	// meaning readable) without the read-only siblings.
+	WritableConfigs []string `json:"writableConfigs"`
+}
+
+// Plane features (gateway.capabilities `features`). Absent = not built.
+const (
+	// FeatureChecksV1: apply `checks` (checks.go).
+	FeatureChecksV1 = "config.checks.v1"
+	// FeatureGenerateWGKey: {"$generate":"wg_private_key"} values.
+	FeatureGenerateWGKey = "config.generate.wg_key"
+	// FeaturePlainPublicKey: `public_key` options are read in clear (the
+	// kit's redactor no longer takes them for secrets).
+	FeaturePlainPublicKey = "config.plain_public_key"
+	// FeatureServiceV1: the service op.
+	FeatureServiceV1 = "config.service.v1"
+	// Runtime RPCs and observation parts outside the plane (the daemon
+	// passes them in Options.Features when it serves them).
+	FeatureUPnPDelete   = "upnp.delete"
+	FeatureDDNSUpdate   = "ddns.update"
+	FeatureIPv6Prefixes = "observe.ipv6_prefixes"
+)
+
+// builtFeatures are the plane's own features in this build.
+var builtFeatures = []string{}
+
+func hasFeature(list []string, f string) bool {
+	for _, x := range list {
+		if x == f {
+			return true
+		}
+	}
+	return false
+}
+
+// Features lists what this build implements, sorted: the plane's own, the
+// plain public key when the kit's redactor keeps `public_key` in clear, and
+// the daemon's (Options.Features).
+func (p *Plane) Features() []string {
+	out := append([]string(nil), builtFeatures...)
+	if !uci.IsSecret("public_key", p.redact.Extra...) {
+		out = append(out, FeaturePlainPublicKey)
+	}
+	for _, f := range p.o.Features {
+		if f != "" && !hasFeature(out, f) {
+			out = append(out, f)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// WritableConfigs are the allowed configs a write may touch, sorted.
+func (p *Plane) WritableConfigs() []string {
+	out := []string{}
+	for _, c := range p.Allowed() {
+		if p.writable(c) {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 func strPtr(s string) *string {
@@ -104,6 +169,8 @@ func (p *Plane) Capabilities(ctx context.Context, challenge string) *Capabilitie
 		Capture:          Capture{Networks: []CaptureNetwork{}},
 		InstallAllowlist: append(append([]string(nil), InstallAllowlist...), p.o.PackageAllow...),
 		SiblingConfigs:   p.SiblingConfigs(),
+		Features:         p.Features(),
+		WritableConfigs:  p.WritableConfigs(),
 	}
 	if p.o.Access == AccessWrite {
 		c.Signing = p.SigningFor(challenge)

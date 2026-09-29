@@ -16,6 +16,8 @@ const (
 	MethodPackageInstall = "gateway.package.install"
 	// NotifyResult is the agent's gateway.config.result notification.
 	NotifyResult = "gateway.config.result"
+	// NotifyChecks is the agent's gateway.config.checks notification.
+	NotifyChecks = "gateway.config.checks"
 )
 
 // WriteMethods are the methods ServeWrite handles.
@@ -55,11 +57,11 @@ func (p *Plane) ServeWrite(ctx context.Context, method string, raw json.RawMessa
 		}
 		return p.Apply(ctx, &a, sess, p.o.TransportOK)
 	case MethodConfirm:
-		var a ApplyIDParams
+		var a ConfirmParams
 		if err := decode(&a); err != nil {
 			return nil, err
 		}
-		return p.Confirm(a.ApplyID, sess)
+		return p.ConfirmWith(a.ApplyID, a.OverrideChecks, sess)
 	case MethodRollback:
 		var a ApplyIDParams
 		if err := decode(&a); err != nil {
