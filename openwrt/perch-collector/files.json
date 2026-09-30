@@ -1,0 +1,12 @@
+{
+  "product": "perch-collector",
+  "file": "perch-collector-files.tar.gz",
+  "members": [
+    {"name": "perch-collector.init", "source": "openwrt/perch-collector/files/perch-collector.init", "path": "/etc/init.d/perch-collector", "mode": "0755", "installKinds": ["swapped", "unowned"], "when": "always"},
+    {"name": "perch-collector.keep", "source": "openwrt/perch-collector/files/perch-collector.keep", "path": "/lib/upgrade/keep.d/perch-collector", "mode": "0644", "installKinds": ["swapped", "unowned"], "when": "always"},
+    {"name": "perch-qos.init", "source": "openwrt/perch-collector/files/perch-qos.init", "path": "/etc/init.d/perch-qos", "mode": "0755", "installKinds": ["swapped", "unowned"], "when": "if-exists"},
+    {"name": "perch-qos.hotplug", "source": "openwrt/perch-collector/files/perch-qos.hotplug", "path": "/etc/hotplug.d/iface/40-perch-qos", "mode": "0644", "installKinds": ["swapped", "unowned"], "when": "if-exists"},
+    {"name": "perch-qos.ntp-hotplug", "source": "openwrt/perch-collector/files/perch-qos.ntp-hotplug", "path": "/etc/hotplug.d/ntp/40-perch-qos", "mode": "0644", "installKinds": ["swapped", "unowned"], "when": "if-exists"},
+    {"name": "perch-qos.keep", "source": "openwrt/perch-collector/files/perch-qos.keep", "path": "/lib/upgrade/keep.d/perch-qos", "mode": "0644", "installKinds": ["swapped", "unowned"], "when": "if-exists"}
+  ]
+}

@@ -15,6 +15,18 @@
 # `classification_mode: ndpi`; it will log a warning and fall back to
 # port-based on startup.
 
+# Reproducible builds. The released binary is the static x86_64 nDPI build
+# (scripts/build-static.sh, perch-collector-linux-amd64-ndpi); the OpenWrt
+# packages build theirs in the SDK. build-static.sh fixes what makes it the
+# same byte for byte on any machine: a pinned Go image (GO_IMAGE, the exact Go
+# release, which the binary records: go version -m), a pinned nDPI tag, cgo
+# with the image's musl toolchain fully static, -trimpath, -buildvcs=false,
+# fixed -ldflags (VERSION exactly the release version and the variant; no
+# time, host or user), GOWORK only for an explicitly mounted kit. The owner's
+# scripts/sign-release.sh rebuilds a release so and refuses to sign unless it
+# matches (v1.0.0's static binary did, a week after CI built it). The port-mode
+# `make build` below is not a release artefact; the same rules apply (a clean
+# checkout at the commit, GOWORK=off, the same toolchain, VERSION given).
 BIN          ?= perch-collector
 IMAGE        ?= perch-collector
 PKG          := ./...
@@ -40,7 +52,7 @@ NDPI_ENV     := PKG_CONFIG_PATH=$(NDPI_PREFIX)/lib/pkgconfig$${PKG_CONFIG_PATH:+
                 CGO_LDFLAGS="$${CGO_LDFLAGS:--g -O2} -Wl,-rpath,$(NDPI_PREFIX)/lib"
 endif
 
-.PHONY: build build-ndpi test test-ndpi clean check-ndpi-deps docker
+.PHONY: build build-ndpi test test-ndpi clean check-ndpi-deps docker files
 
 build:
 	$(GO) build $(BUILD_FLAGS) -tags '$(GO_TAGS)' -ldflags '$(LDFLAGS)' -o $(BIN) .
@@ -71,6 +83,15 @@ check-ndpi-deps:
 	  echo "  make build-ndpi NDPI_PREFIX=\$$HOME/.local/ndpi5     # likewise make test-ndpi"; \
 	  exit 1; }
 	@echo "libndpi $$($(NDPI_ENV) pkg-config --modversion libndpi) detected (prefix $$($(NDPI_ENV) pkg-config --variable=prefix libndpi))"
+
+# The files bundle a self-update installs next to the binary on gateways no
+# package manages (the hand-installed static build): the init script, the keep
+# list and, where they exist, perch-qos's files (openwrt/perch-collector/files.json),
+# built by the kit's perch-release. CI attaches it to the release.
+PERCH_RELEASE ?= $(GO) run github.com/capthndsme/perch-agentkit/cmd/perch-release
+files:
+	@mkdir -p out
+	$(PERCH_RELEASE) bundle -spec openwrt/perch-collector/files.json -root . -o out/perch-collector-files.tar.gz
 
 clean:
 	rm -f $(BIN)

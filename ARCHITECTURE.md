@@ -1089,6 +1089,33 @@ ifb-pdn (down) and ifb-pup (up), the same tree with each direction's rates:
   kernel read (`testdata/kernel-weekday-noon.json`) keeps the parser and the
   diff tested without a namespace.
 
+## Self-update (`agent.update.*`, agent-updates design)
+
+The kit's `update` package does the work (trust checks on the signed release
+manifest, preflight, resumable downloads from the controller, the hand-off to a
+shell watchdog); `main_update.go` says what perch-collector is: service and
+program `perch-collector`, packages `perch-collector` and `perch-qos`, binary
+`/usr/bin/perch-collector`, state in `/etc/perch-collector/update`, run files in
+`/tmp/perch-update/perch-collector`, a flash-only rollback store (a broken
+gateway may not reach the controller to fetch the old version again), the files
+a release may write (init scripts, keep list, a hand-installed perch-qos's files
+where they exist; never a config), and the busy hook: the config plane's apply
+state (BUILD-PLAN agreement 3).
+
+- `internal/controller/update.go`: the hello's `update` block and the
+  `agent_update` capability, `agent.update.*` on the session's dispatcher, and
+  the notification sink (results not yet acknowledged go out on every session).
+- Start-up: `update.Startup` runs before the socket is dialed (a stale staging
+  is dropped; a new version in its check resumes a dead watchdog); a new version
+  dials only once the watchdog has set its plan to `probation`, so the hello the
+  controller confirms on says so.
+- The boot guard `/etc/init.d/perch-collector-guard` (START=15) is the kit's
+  script byte for byte: the update step (shell) first, then `perch-collector
+  config-guard`, so a broken new binary never runs the config plane's guard.
+- `scripts/build-static.sh` stamps the exact version (no suffix) and the
+  variant `ndpi-static`: the controller recognises the new process by its
+  version, and a release's static binary must name the same variant.
+
 ## Graceful Shutdown
 
 ```

@@ -125,6 +125,27 @@ To build against a local checkout of it, put both in a Go workspace
 Build a fresh binary next to the running one (`BIN=out/perch-collector.new`,
 then `mv`) when the daemon is live; the running process keeps its inode.
 
+### Releases and signing
+
+The static build is reproducible (`scripts/build-static.sh` and the Makefile say how):
+the same commit, `VERSION` and Go image give the same bytes. A self-update installs only
+a release whose `perch-manifest.json` the owner signed; CI attaches the manifest
+unsigned (`release.yml`) and never holds a key.
+
+```sh
+scripts/sign-release.sh 1.2.0          # download, rebuild (static + SDK packages), compare, sign, --upload
+scripts/local-release.sh 1.2.0-pre.5 --controller https://perch.example.com
+                                       # an unpublished build: static build, sign-release, upload
+make files                             # the files bundle (openwrt/perch-collector/files.json)
+```
+
+`sign-release.sh` refuses to sign unless its own rebuild of the manifest's commit matches
+what was published: the static binary byte for byte, every OpenWrt package by the files,
+modes, hashes, maintainer scripts and dependencies it installs, the bundle by its
+members. If only the static binary differs (Alpine's C toolchain moved since CI built
+it), `--own-static` signs a manifest naming your own build instead. signify-openbsd asks
+for the key's passphrase itself. `release.env` holds the next release's floor fields.
+
 ## Usage
 
 ```bash

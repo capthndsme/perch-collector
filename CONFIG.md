@@ -334,9 +334,23 @@ config_confirm_max: 600
 # Default: ""
 config_sign_key: ""
 
-# Packages the controller may install besides its own list.
+# Packages the controller may install besides its own list. perch-collector,
+# perch-qos and perch-apd are ignored here: only self-update installs them.
 # Default: []
 package_allow: []
+
+# Self-update (agent.update.*, the controller's Settings → Updates): the
+# controller may install a newer Perch Network Collector release. Only
+# releases signed with a trusted key (the built-in Perch release keys plus
+# update_keys: "RW…" signify/usign public key lines) are installed, every
+# file is checked here, and the previous version comes back unless the new
+# one reaches the controller again (also after a reboot, via the OpenWrt
+# boot guard). Allowed over plain http:// too. Only the WebSocket transport
+# carries it; a Docker install (PERCH_COLLECTOR_INSTALL=docker, the image's
+# default) reports it and updates with docker compose instead.
+# Default: true, []
+self_update: true
+update_keys: []
 
 # Where the collector would keep local state; only its storage type is
 # detected and reported today. Must be absolute.
@@ -411,6 +425,9 @@ Configuration values can also be set via environment variables. They take the hi
 | `PERCH_COLLECTOR_CONFIG_CONFIRM_MAX` | `config_confirm_max` (seconds) |
 | `PERCH_COLLECTOR_CONFIG_SIGN_KEY` | `config_sign_key` |
 | `PERCH_COLLECTOR_PACKAGE_ALLOW` | `package_allow` (comma-separated package names) |
+| `PERCH_COLLECTOR_SELF_UPDATE` | `self_update` (bool, default true) |
+| `PERCH_COLLECTOR_UPDATE_KEYS` | `update_keys` (comma-separated `RW…` key lines) |
+| `PERCH_COLLECTOR_INSTALL` | `docker` in the image: install kind `docker` (updated with docker compose, never in place) |
 | `PERCH_COLLECTOR_STORAGE_PATH` | `storage_path` |
 | `PERCH_COLLECTOR_CAPTURE_NETWORK` | `capture_network` |
 | `PERCH_COLLECTOR_QOS` | `qos` (`auto`, `on`, `off`) |
@@ -1591,6 +1608,36 @@ terminals:[{terminalId, portalId, online, lastSeenAt, status, checkout:
 {checkoutRef, state, amount, openedAt}|null}]}` every 30 s while terminals are
 configured, and at once when a session opens, a checkout opens or closes, or a
 terminal goes quiet.
+
+## Self-update (`self_update`, agent-updates design)
+
+With the WebSocket transport the collector reports an `update` block and, when
+nothing refuses, the capability `agent_update` in its `collector.hello`, and
+serves `agent.update.status`, `.stage`, `.install`, `.confirm`, `.abort` and
+`.ack` (formats: the controller's `docs/agent-updates.md`). What it does on the
+router:
+
+- Trust: a release manifest signed (Ed25519, signify/usign format) with a
+  trusted key, for `perch-collector`, this arch and variant (the static build
+  is `ndpi-static`) or this package manager, at or above the router's version
+  floor. Every downloaded file is checked against the manifest's SHA-256.
+- Install kinds: `package` (the package record's version is the running one:
+  `opkg install --force-downgrade` / `apk add --allow-untrusted` of
+  `perch-collector`, plus `perch-qos` when installed), `swapped` / `unowned`
+  (a binary swap of `/usr/bin/perch-collector`, e.g. the hand-installed static
+  build on an OpenWrt 23.05 container, with the release's init scripts and,
+  where they exist, a hand-installed perch-qos's files), `docker` and `other`
+  (nothing; the dashboard shows the command).
+- A config apply that is being made or waits for its confirm makes an update
+  wait (`busy_pending_apply`, reason `config_pending`).
+- The old files stay on flash (a hardlink) until the new version is confirmed;
+  the watchdog (`/etc/perch-collector/update/perch-update.sh`, written by the
+  version that planned the update) restores them on a timeout, a crash loop or
+  an abort, and `/etc/init.d/perch-collector-guard` restores them after a
+  reboot inside the check window, before its config plane step. Capture pauses
+  for the few seconds of the swap; the portal's nftables tables and the
+  shaper's tc tree stay in place.
+- Nothing writes `/etc/config/perch-collector` for an update.
 
 ## Packaged deployments
 

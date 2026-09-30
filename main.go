@@ -274,6 +274,9 @@ func main() {
 	ctlDone := make(chan struct{})
 	if ctl != nil {
 		go func() {
+			// A new version dials once the update watchdog has put it in
+			// probation (main_update.go).
+			waitProbation(ctlCtx, time.Minute)
 			ctl.Run(ctlCtx)
 			close(ctlDone)
 		}()
@@ -403,6 +406,10 @@ func buildController(cfg config.Config, agg *aggregator.Aggregator, captures *ca
 		shaping = shaper
 	}
 	plane := configPlane(cfg, captures.Captured(), gw.planeFeatures())
+	var updater controller.Updater // a nil interface when off, not a typed nil
+	if u := selfUpdater(cfg, plane); u != nil {
+		updater = u
+	}
 	ctl, err := controller.New(controller.Options{
 		ServerURL:            cfg.ServerURL,
 		InstanceID:           instanceID,
@@ -428,6 +435,7 @@ func buildController(cfg config.Config, agg *aggregator.Aggregator, captures *ca
 		QoS:                  shaping,
 		QoSAllowed:           qosAllowed(plane),
 		CaptureExclude:       captures.ControllerExclude,
+		Update:               updater,
 	})
 	if err != nil {
 		log.Fatalf("controller: %v", err)

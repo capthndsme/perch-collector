@@ -42,7 +42,8 @@ RUN ldconfig && ! ldd /usr/local/bin/perch-collector | grep 'not found'
 # nDPI setup. Override any of them with `-e` (see CONFIG.md for the full list).
 ENV PERCH_COLLECTOR_LISTEN=127.0.0.1:9800 \
     PERCH_COLLECTOR_CLASSIFICATION_MODE=ndpi \
-    PERCH_COLLECTOR_SNAP_LEN=1500
+    PERCH_COLLECTOR_SNAP_LEN=1500 \
+    PERCH_COLLECTOR_INSTALL=docker
 
 # Run with: --network host --cap-add NET_RAW --cap-add NET_ADMIN
 # The capture interface is auto-detected from the default route;
