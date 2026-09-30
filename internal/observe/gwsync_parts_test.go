@@ -283,6 +283,15 @@ func TestDDNSLastError(t *testing.T) {
 	if got := ddnsLastError([]byte(long + "\n")); len(got) > 200 || !strings.HasPrefix(got, "100200 ERROR") {
 		t.Fatalf("%q (%d bytes)", got, len(got))
 	}
+	// The cause, not the generic line ddns-scripts writes after it.
+	run := " 110106 ERROR : No or private or invalid IP '192.168.1.2' given! Please check your configuration\n" +
+		" 110106 ERROR : No update send to DDNS Provider\n 110106       : Waiting 600 seconds (Check Interval)\n"
+	if got := ddnsLastError([]byte(run)); !strings.Contains(got, "private or invalid IP") {
+		t.Errorf("cause: %q", got)
+	}
+	if got := ddnsLastError([]byte(" 1  WARN : Transfer failed - retry 1/5 in 60 seconds\n")); !strings.Contains(got, "Transfer failed") {
+		t.Errorf("a generic line alone still shows: %q", got)
+	}
 	if got := ddnsLastError([]byte(" 1  WARN : x\n 2  info : Forced update successful - IP: '203.0.113.10' send\n")); got != "" {
 		t.Fatalf("%q", got)
 	}

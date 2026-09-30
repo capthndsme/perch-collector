@@ -105,8 +105,23 @@ func parseDDNSConfig(secs []UCISection) ddnsConfig {
 	return c
 }
 
+// ddnsGenericErrors are the lines ddns-scripts writes after the cause of a
+// failure ("ERROR : No or private or invalid IP … given!" is followed by
+// "ERROR : No update send to DDNS Provider"): they never hide the cause.
+var ddnsGenericErrors = []string{"No update send to DDNS Provider", "Transfer failed - retry"}
+
+func ddnsGenericError(line string) bool {
+	for _, g := range ddnsGenericErrors {
+		if strings.Contains(line, g) {
+			return true
+		}
+	}
+	return false
+}
+
 // ddnsLastError is the last ERROR or WARN line of a service's log that
-// comes after its last successful update, trimmed to 200 bytes; "" = none.
+// comes after its last successful update (a generic follow-up line only
+// when no cause came before it), trimmed to 200 bytes; "" = none.
 func ddnsLastError(log []byte) string {
 	last := ""
 	for _, line := range strings.Split(string(log), "\n") {
@@ -114,7 +129,9 @@ func ddnsLastError(log []byte) string {
 		case strings.Contains(line, "Update successful") || strings.Contains(line, "update successful"):
 			last = ""
 		case strings.Contains(line, " ERROR ") || strings.Contains(line, "WARN"):
-			last = line
+			if !ddnsGenericError(line) || last == "" {
+				last = line
+			}
 		}
 	}
 	last = strings.TrimSpace(strings.ToValidUTF8(strings.Map(func(r rune) rune {
