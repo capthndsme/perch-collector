@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -128,6 +129,12 @@ type Options struct {
 	// (runtime RPCs, observation parts), announced with the plane's own in
 	// gateway.capabilities.
 	Features []string
+	// CheckDial connects a reach check's TCP fallback (device "" = by the
+	// routing table); nil = net.Dialer bound to the device (tests).
+	CheckDial func(ctx context.Context, network, addr, device string) error
+	// CheckResolve resolves a resolve check's name; nil = the pure Go
+	// resolver over /etc/resolv.conf (tests).
+	CheckResolve func(ctx context.Context, network, host string) ([]net.IP, error)
 }
 
 // RedactExtra are secret option names beyond the kit's: a mobile WAN's SIM
@@ -163,6 +170,10 @@ type Plane struct {
 
 	sibMu sync.Mutex
 	sib   siblingCache
+
+	// chk holds the pending apply's running checks (checks.go); lock order
+	// ap.mu before chk.mu.
+	chk checksHolder
 }
 
 // New prepares a plane.

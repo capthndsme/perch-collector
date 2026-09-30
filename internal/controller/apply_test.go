@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -76,6 +77,9 @@ func managedPlane(t *testing.T, root string, clock *testClock, transportOK bool)
 		Root: root, Ubus: noUbus, LookPath: func(string) (string, error) { return "", fmt.Errorf("none") },
 		Clock: clock, Backend: &gwconfig.FileBackend{Dir: filepath.Join(root, "etc/config")},
 		Run: func(context.Context, string, ...string) ([]byte, []byte, int, error) { return nil, nil, 1, nil },
+		CheckResolve: func(context.Context, string, string) ([]net.IP, error) {
+			return []net.IP{net.ParseIP("192.0.2.80")}, nil
+		},
 	})
 }
 
@@ -180,13 +184,17 @@ func TestApplyReconnectConfirmOnTheSocket(t *testing.T) {
 			apply := map[string]any{"applyId": "g1-a1", "kind": "apply", "confirmTimeoutSeconds": 90,
 				"base":   map[string]string{"dhcp": hashOf("dhcp")},
 				"ops":    []any{map[string]any{"op": "put", "config": "dhcp", "section": "perch_h1", "type": "host", "options": map[string]any{"name": "cam", "mac": "02:00:00:00:00:20", "ip": "192.168.1.20"}}},
-				"ledger": map[string]any{"set": []any{map[string]string{"perchId": "h1", "config": "dhcp", "section": "perch_h1", "domain": "dhcp_hosts"}}}}
+				"ledger": map[string]any{"set": []any{map[string]string{"perchId": "h1", "config": "dhcp", "section": "perch_h1", "domain": "dhcp_hosts"}}},
+				// gateway-sync checks: the router resolves a name before it
+				// accepts the confirm.
+				"checks": map[string]any{"v": 1, "timeoutSeconds": 30, "items": []any{map[string]any{"id": "dns", "kind": "resolve", "name": "example.com"}}}}
 			m := call(s1, 1, "gateway.config.apply", apply)
 			var res gwconfig.ApplyResult
 			json.Unmarshal(m.Result, &res)
-			if m.Error != nil || res.State != "pending_confirm" {
+			if m.Error != nil || res.State != "pending_confirm" || res.Checks == nil || res.Checks.State != "pending" || res.Checks.Baseline[0].State != "passed" {
 				t.Fatalf("%s %+v", m.Result, m.Error)
 			}
+			delete(apply, "checks")
 			// Confirm on the same session: refused.
 			m = call(s1, 2, "gateway.config.confirm", map[string]string{"applyId": "g1-a1"})
 			if m.Error == nil || errorCode(m.Error) != "not_reconnected" {
@@ -199,6 +207,27 @@ func TestApplyReconnectConfirmOnTheSocket(t *testing.T) {
 				t.Fatalf("%+v", s2.hello)
 			}
 			time.Sleep(100 * time.Millisecond)
+			if s2.hello.Apply.Checks == nil || s2.hello.Apply.Checks.State != "running" {
+				t.Fatalf("%+v", s2.hello.Apply)
+			}
+			// The checks have not run yet: the confirm waits for them.
+			m = call(s2, 7, "gateway.config.confirm", map[string]string{"applyId": "g1-a1"})
+			if errorCode(m.Error) != "checks_pending" {
+				t.Fatalf("%+v", m.Error)
+			}
+			clock.Advance(0)
+			for {
+				msg, _ := next(t, s2.fr, anyFrame, 5*time.Second)
+				if msg.Method != gwconfig.NotifyChecks {
+					continue
+				}
+				var n gwconfig.ChecksNote
+				json.Unmarshal(msg.Params, &n)
+				if n.ApplyID != "g1-a1" || n.State != "passed" || len(n.Items) != 1 || n.Items[0].State != "passed" {
+					t.Fatalf("%s", msg.Params)
+				}
+				break
+			}
 			m = call(s2, 3, "gateway.config.confirm", map[string]string{"applyId": "g1-a1"})
 			if m.Error != nil || !strings.Contains(string(m.Result), `"state":"confirmed"`) {
 				t.Fatalf("%s %+v", m.Result, m.Error)

@@ -541,8 +541,5 @@ func checkUnsupported(a *ApplyParams) error {
 			}
 		}
 	}
-	if a.Checks != nil && len(a.Checks.Items) > 0 && !hasFeature(builtFeatures, FeatureChecksV1) {
-		return perr(CodeUnsupported, "apply checks are not supported by this build (feature %s)", FeatureChecksV1)
-	}
 	return nil
 }

@@ -171,6 +171,22 @@ type fakeRouter struct {
 	pkgSize   map[string]int64
 	pkgDeps   map[string][]string
 	updateErr bool
+
+	// Checks (checks.go): netifd's status per interface (JSON; absent = no
+	// such interface), `ip [-6] route show default`, the targets that answer
+	// ping, `wg show <dev> latest-handshakes` per device.
+	ifStatus map[string]string
+	route4   string
+	route6   string
+	pingOK   map[string]bool
+	wgHS     map[string]string
+}
+
+// set changes the router's answers between two steps of a test.
+func (r *fakeRouter) set(f func(r *fakeRouter)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	f(r)
 }
 
 func (r *fakeRouter) log() []string {
@@ -185,19 +201,57 @@ func (r *fakeRouter) run(_ context.Context, name string, args ...string) ([]byte
 	r.mu.Unlock()
 	switch filepath.Base(name) {
 	case "ip":
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		switch strings.Join(args, " ") {
+		case "route show default":
+			return []byte(r.route4), nil, 0, nil
+		case "-6 route show default":
+			return []byte(r.route6), nil, 0, nil
+		}
 		if r.routeDev == "" {
 			return nil, []byte("RTNETLINK answers: Network is unreachable"), 2, nil
 		}
 		return []byte(args[len(args)-1] + " dev " + r.routeDev + " src 192.168.1.1 uid 0\n    cache\n"), nil, 0, nil
 	case "ubus":
+		r.mu.Lock()
+		defer r.mu.Unlock()
 		call := strings.Join(args, " ")
 		switch {
 		case strings.Contains(call, "call network.interface dump"):
 			return []byte(r.netDump), nil, 0, nil
 		case strings.Contains(call, "list uci"):
 			return nil, []byte("Command failed: Not found"), 4, nil
+		case strings.Contains(call, "call network.interface.") && strings.HasSuffix(call, " status"):
+			f := strings.Fields(call)
+			for i, w := range f {
+				if n, ok := strings.CutPrefix(w, "network.interface."); ok && i+1 < len(f) {
+					if st, ok := r.ifStatus[n]; ok {
+						return []byte(st), nil, 0, nil
+					}
+				}
+			}
+			return nil, []byte("Command failed: Not found"), 4, nil
 		}
 		return []byte("{}"), nil, 0, nil
+	case "ping":
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if r.pingOK[args[len(args)-1]] {
+			return []byte("1 packets transmitted, 1 packets received\n"), nil, 0, nil
+		}
+		return []byte("1 packets transmitted, 0 packets received\n"), nil, 1, nil
+	case "wg":
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if len(args) == 3 && args[0] == "show" && args[2] == "latest-handshakes" {
+			if out, ok := r.wgHS[args[1]]; ok {
+				return []byte(out), nil, 0, nil
+			}
+			return nil, []byte("Unable to access interface: No such device\n"), 1, nil
+		}
+		// Anything else (dump, private-key) would print a secret.
+		return []byte("PRIVATE-KEY-MATERIAL\n"), nil, 0, nil
 	case "opkg":
 		return r.opkg(args)
 	}
@@ -380,6 +434,7 @@ type env struct {
 	mu      sync.Mutex
 	recon   []string
 	results []Result
+	notes   []ChecksNote
 	reconCh chan string
 }
 
@@ -431,7 +486,19 @@ func (e *env) hook() {
 			e.mu.Unlock()
 			return true
 		},
+		Checks: func(n ChecksNote) bool {
+			e.mu.Lock()
+			e.notes = append(e.notes, n)
+			e.mu.Unlock()
+			return true
+		},
 	})
+}
+
+func (e *env) sentNotes() []ChecksNote {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]ChecksNote(nil), e.notes...)
 }
 
 func (e *env) sentResults() []Result {

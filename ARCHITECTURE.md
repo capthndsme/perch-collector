@@ -725,10 +725,64 @@ A failure before the first commit leaves nothing (`apply_failed`, or `busy`
 with `reason` `uncommitted`/`luci_pending` when rpcd refuses). A failure after
 it rolls back (`apply_failed` with `data.rolledBack: true` and `data.result`).
 
-**`gateway.config.confirm`** `{applyId}` → `{"state":"confirmed","applyId":…,"hashes":{…}}`.
+**`gateway.config.confirm`** `{applyId, overrideChecks?}` → `{"state":"confirmed","applyId":…,"hashes":{…}}`.
 Refused on the session the apply came on (`not_reconnected`): the proof is the
 fresh connection. Repeating it is fine. `deadline_passed` (+ `data.result` when
-known) once the window closed, `unknown_apply` otherwise.
+known) once the window closed, `unknown_apply` otherwise. While the apply's
+checks (below) have not passed: `checks_pending` / `checks_failed` with
+`data.checks`, unless `overrideChecks: true` (the admin's "Keep anyway"; the
+checks end as `overridden`).
+
+**Apply checks** (`internal/gwconfig/checks.go`, gateway-sync protocol 1;
+feature `config.checks.v1`). `gateway.config.apply` may carry
+
+```json
+"checks":{"v":1,"timeoutSeconds":60,"items":[
+  {"id":"up:wan","kind":"interface_up","network":"wan","family":4,"mustPass":true},
+  {"id":"route4","kind":"default_route","family":4},
+  {"id":"reach4","kind":"reach","targets":["$gateway:wan","1.1.1.1"],"tcpPort":443},
+  {"id":"dns","kind":"resolve","name":"example.com"},
+  {"id":"wg","kind":"wg_handshake","network":"wg0","withinSeconds":180}]}
+```
+
+(`v` 1, else `bad_params`; `timeoutSeconds` 10–900, clamped to the window minus
+20 s; 1–16 items, `id` `^[a-z0-9:_.-]{1,32}$`; `family` 4 or 6). How each kind
+passes: `interface_up` = `ubus call network.interface.<net> status` up with an
+address of the family (IPv6: an address or a delegated prefix);
+`default_route` = `ip [-6] route show default` (through the network's L3
+device when named); `reach` = one target answers `ping -c 1 -W 2 [-I dev]`, or
+a TCP connect to `tcpPort` (3 s, `SO_BINDTODEVICE` with `via`);
+`$gateway:<net>` is that interface's next hop, dropped when unknown;
+`resolve` = the pure Go resolver over `/etc/resolv.conf`; `wg_handshake` =
+`wg show <dev> latest-handshakes` (never `dump`). Sequence: every item runs
+once before anything is staged (the **baseline**: a failure is `skipped`,
+unless `mustPass`); the reply carries `"checks":{"state":"pending",
+"timeoutSeconds":60,"agentAdded"?:true,"baseline":[{id,state,detail,at}]}`;
+after the reload settled the budget starts and every item that has not passed
+runs every 3 s. All passed or skipped → `passed` (`allSkipped: true` when
+every optional item was skipped). Budget over with an item not passed →
+`failed`, and the apply is rolled back at once: result reason
+`checks_failed`, `detail` = the failed items, `checks` = their state. The
+hello's `apply` gains `checks` `{state, startedAt, timeoutSeconds,
+allSkipped?, items:[{id, state, detail, at}]}`; the notification
+**`gateway.config.checks`** `{applyId, state, startedAt, elapsedSeconds,
+allSkipped?, items}` goes out on every change of the set's state and at most
+every 5 s while running. `pending.json` keeps `checks` and `checkState`
+(written when an item passes and when the set's state changes): a restarted
+daemon re-runs what has not passed with what is left of the budget, fails at
+once when it is gone, and restores at once when the checks had failed; an
+older binary ignores both fields. **The agent's own net**: a job without
+`checks` that changes a `network` interface with a WAN proto or holding a
+default route now (or such an interface's device section) gets
+`{"v":1,"timeoutSeconds":90,"items":[{"id":"agent:route4","kind":"default_route","family":4}]}`
+(`agentAdded`); only an explicit `"checks":{"v":1,"items":[]}` turns it off.
+
+**`gateway.capabilities` `features`** lists what the build implements:
+`config.checks.v1`; `config.plain_public_key` when the kit's redactor keeps
+`public_key` in clear; the daemon's own (runtime RPCs). `$generate` values
+and the `service` op decode but are refused `unsupported` until their
+features exist. The redactor also hides `pincode` and `pukcode` (a mobile
+WAN's SIM codes).
 
 **`gateway.config.rollback`** `{applyId}` → `{"state":"rolling_back","applyId":…}`
 (the restore runs after the reply; its outcome comes as a result, reason
@@ -748,7 +802,8 @@ known) once the window closed, `unknown_apply` otherwise.
 
 `outcome` `rolled_back` | `failed` (the restore itself failed; the snapshot is
 kept as `rollback/failed-<id>`). `reason` `confirm_timeout` | `admin` |
-`reboot` | `commit_failed` | `reload_failed` | `install_failed`. `discarded`
+`reboot` | `commit_failed` | `reload_failed` | `install_failed` |
+`checks_failed` (a job with checks also carries `checks`). `discarded`
 = sections edited on the router during the window, which the rollback undid
 (`added` / `changed` / `removed` relative to what the job had committed;
 redacted like a read). `packages` = what a package job's rollback removed.
@@ -767,7 +822,10 @@ netifd's interface on it is the network. Protected sections: that interface,
 any interface on its device (or its parent bridge), the `device` section that
 is the device or its parent bridge, the `bridge-vlan`s on that bridge, the
 firewall zones listing the network, and firewall `defaults` (the controller's
-`apply_plan.ts` rules). Reported as `management` in the hello and capabilities.
+`apply_plan.ts` rules), plus WireGuard peers (`wireguard_<iface>` sections) of
+an interface on the path and any peer with `route_allowed_ips` whose
+`allowed_ips` cover the controller's address. Reported as `management` in the
+hello and capabilities.
 
 **Ledger** `/etc/config/perch-managed`: `config synced '<perchId>'` with
 `option config`, `option section`, `option domain`; written whole by the agent
@@ -875,7 +933,8 @@ as the package manager does (a minute or more with `update`).
 `apply_pending`|`luci_pending`|`uncommitted`), `foreign_staged` (+`config`,
 `changes`), `not_owned`, `name_taken`, `no_section`, `unknown_apply`,
 `deadline_passed`, `not_reconnected`, `apply_failed`, `package_not_allowed`,
-`no_package_manager`, `insufficient_flash`, `install_failed`, `invalid_config`. Bad params:
+`no_package_manager`, `insufficient_flash`, `install_failed`, `invalid_config`,
+`checks_pending`, `checks_failed` (+`checks`), `unsupported`. Bad params:
 -32602 with `data.error` `bad_params`.
 
 ## Traffic shaping (`internal/qos`, gateway plan 3 WP-E)

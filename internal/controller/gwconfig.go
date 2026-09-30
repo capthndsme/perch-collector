@@ -6,7 +6,7 @@ package controller
 // requests gateway.capabilities, gateway.config.read and the write methods
 // (apply, confirm, rollback, ack, package install), the pairing methods
 // (gateway.pair.*, pair.go), and the notifications gateway.config.changed,
-// gateway.config.result and gateway.pair.state. Everything is additive:
+// gateway.config.result, gateway.config.checks and gateway.pair.state. Everything is additive:
 // an older controller drops the unknown hello key, sends no gatewayConfig,
 // and never calls the methods.
 //
@@ -78,7 +78,8 @@ func (c *Client) registerConfigPlane() {
 			return res, nil
 		})
 	}
-	c.o.Config.SetHooks(gwconfig.Hooks{Reconnect: c.reconnectAfterApply, Result: c.notifyResult, PairState: c.notifyPairState})
+	c.o.Config.SetHooks(gwconfig.Hooks{Reconnect: c.reconnectAfterApply, Result: c.notifyResult, PairState: c.notifyPairState,
+		Checks: c.notifyChecks})
 }
 
 // configCapabilities are the hello capabilities of the config plane.
@@ -217,6 +218,21 @@ func (c *Client) notifyResult(r gwconfig.Result) bool {
 	}
 	if err := s.Notify(gwconfig.NotifyResult, r); err != nil {
 		c.log.Debug("gateway.config.result not sent", "err", err)
+		return false
+	}
+	return true
+}
+
+// notifyChecks is the plane's Checks hook: gateway.config.checks.
+func (c *Client) notifyChecks(n gwconfig.ChecksNote) bool {
+	c.mu.Lock()
+	s := c.configSession
+	c.mu.Unlock()
+	if s == nil {
+		return false
+	}
+	if err := s.Notify(gwconfig.NotifyChecks, n); err != nil {
+		c.log.Debug("gateway.config.checks not sent", "err", err)
 		return false
 	}
 	return true

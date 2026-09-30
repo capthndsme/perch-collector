@@ -47,6 +47,13 @@ type pendingRecord struct {
 	HashesAfter map[string]string `json:"hashesAfter,omitempty"`
 	Committed   bool              `json:"committed"`
 	Packages    *packageRecord    `json:"packages,omitempty"`
+	// Checks are the apply's effective checks (the controller's, or the
+	// agent's own net) and CheckState their last recorded state
+	// (checks.go): a restarted daemon re-runs what has not passed with what
+	// is left of the budget. Both optional: an older binary ignores them and
+	// restores at the deadline.
+	Checks     *Checks           `json:"checks,omitempty"`
+	CheckState *checkStateRecord `json:"checkState,omitempty"`
 }
 
 // packageRecord is the package part of a package job.

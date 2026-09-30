@@ -101,7 +101,8 @@ func (p *Plane) ApplyState() ApplyState {
 	st := ApplyState{State: StateIdle}
 	if p.ap.pending != nil && (p.ap.state == StatePendingConfirm || p.ap.state == StateRollingBack) {
 		st = ApplyState{State: p.ap.state, ApplyID: p.ap.pending.ApplyID, Kind: p.ap.pending.Kind,
-			Deadline: p.ap.pending.Deadline.UTC().Format(time.RFC3339), Protected: p.ap.pending.Protected}
+			Deadline: p.ap.pending.Deadline.UTC().Format(time.RFC3339), Protected: p.ap.pending.Protected,
+			Checks: p.checksViewOf(p.ap.pending)}
 	} else if p.ap.state == StateApplying {
 		st.State = StateApplying
 	}
@@ -160,9 +161,16 @@ func (p *Plane) Start() {
 	case !now.Before(rec.Deadline):
 		log.Printf("config plane: apply %s passed its deadline while the daemon was down; restoring", rec.ApplyID)
 		p.rollbackPending(rec.ApplyID, ReasonConfirmTimeout, true)
+	case rec.CheckState != nil && rec.CheckState.State == CheckFailed:
+		// The checks had failed and the daemon stopped before the restore.
+		log.Printf("config plane: apply %s had failed its checks; restoring", rec.ApplyID)
+		p.rollbackPendingDetail(rec.ApplyID, ReasonChecksFailed, "the checks had failed when the daemon stopped")
 	default:
 		log.Printf("config plane: apply %s still waits for its confirm (deadline %s)", rec.ApplyID, rec.Deadline.UTC().Format(time.RFC3339))
 		p.armTimer(rec)
+		// Checks that had not passed run again with what is left of their
+		// budget (a restart never counts as a pass).
+		p.startChecks(rec)
 	}
 }
 
@@ -236,7 +244,8 @@ func (p *Plane) confirmSeconds(req *float64, protected bool) int {
 
 func (p *Plane) pendingResult(rec *pendingRecord) *ApplyResult {
 	return &ApplyResult{State: StatePendingConfirm, ApplyID: rec.ApplyID, Deadline: rec.Deadline.UTC().Format(time.RFC3339),
-		ConfirmTimeoutSeconds: rec.ConfirmSeconds, Protected: rec.Protected, Hashes: rec.HashesAfter}
+		ConfirmTimeoutSeconds: rec.ConfirmSeconds, Protected: rec.Protected, Hashes: rec.HashesAfter,
+		Checks: p.checksReply(rec)}
 }
 
 // Apply runs gateway.config.apply. secure: the transport is verified TLS,
@@ -418,6 +427,15 @@ func (p *Plane) apply(ctx context.Context, a *ApplyParams, sess SessionRef, secu
 	}
 	rec := &pendingRecord{ApplyID: a.ApplyID, Kind: a.Kind, CreatedAt: now, Deadline: now.Add(time.Duration(secs) * time.Second),
 		ConfirmSeconds: secs, Protected: protected, Configs: snap}
+	// Checks: the controller's or the agent's own net, with their baseline
+	// taken now, before anything is staged (checks.go).
+	if c, agentAdded := p.effectiveChecks(ctx, a, sim, current); c != nil {
+		rec.Checks = c
+		rec.CheckState = p.runBaseline(ctx, c, secs, agentAdded)
+		// The window runs from the commit, not from before the baseline.
+		now = p.clock.Now()
+		rec.CreatedAt, rec.Deadline = now, now.Add(time.Duration(secs)*time.Second)
+	}
 	if err := p.prepare(rec); err != nil {
 		return nil, err
 	}
@@ -530,11 +548,14 @@ func (p *Plane) afterCommit(id string) {
 	_ = p.backend.Settle(ctx)
 	cancel()
 	p.ap.mu.Lock()
-	still := p.ap.pending != nil && p.ap.pending.ApplyID == id && p.ap.state == StatePendingConfirm
+	rec := p.ap.pending
+	still := rec != nil && rec.ApplyID == id && p.ap.state == StatePendingConfirm
 	p.ap.mu.Unlock()
 	if !still {
 		return
 	}
+	// The checks' budget starts once the reload settled.
+	p.startChecks(rec)
 	if h := p.hooksNow(); h.Reconnect != nil {
 		h.Reconnect("reconnecting after apply " + id)
 	}
@@ -632,11 +653,16 @@ func (p *Plane) ConfirmWith(id string, overrideChecks bool, sess SessionRef) (ma
 		p.ap.mu.Unlock()
 		return nil, perr(CodeDeadlinePassed, "the confirm window of apply %s has closed", id)
 	}
+	if err := p.checksGate(rec, overrideChecks); err != nil {
+		p.ap.mu.Unlock()
+		return nil, err
+	}
 	if p.ap.stop != nil {
 		p.ap.stop()
 	}
 	p.ap.pending, p.ap.state, p.ap.stop = nil, StateIdle, nil
 	p.ap.mu.Unlock()
+	p.stopChecks(id, nil)
 	p.store().finish(id)
 	hashes := p.Hashes()
 	p.ap.mu.Lock()
@@ -678,6 +704,16 @@ func (p *Plane) Ack(ids []string) (map[string]any, error) {
 
 // rollbackPending rolls back the pending apply id, if it still is.
 func (p *Plane) rollbackPending(id, reason string, reload bool) {
+	p.rollbackPendingWith(id, reason, reload, "")
+}
+
+// rollbackPendingDetail rolls back the pending apply id now, with a detail
+// for the result (the checks' failure).
+func (p *Plane) rollbackPendingDetail(id, reason, detail string) {
+	p.rollbackPendingWith(id, reason, true, detail)
+}
+
+func (p *Plane) rollbackPendingWith(id, reason string, reload bool, detail string) {
 	p.ap.mu.Lock()
 	rec := p.ap.pending
 	if rec == nil || rec.ApplyID != id || p.ap.state != StatePendingConfirm {
@@ -691,14 +727,19 @@ func (p *Plane) rollbackPending(id, reason string, reload bool) {
 		p.ap.stop = nil
 	}
 	p.ap.mu.Unlock()
-	p.rollback(rec, reason, reload, "")
+	p.rollback(rec, reason, reload, detail)
 }
 
 // rollback restores an apply's snapshot, records the outcome and tells the
 // controller. reload: have procd reload the restored configs' services
 // (not at boot, where they start after the guard).
 func (p *Plane) rollback(rec *pendingRecord, reason string, reload bool, detail string) Result {
+	// The checks end first: nothing may record them once the files are back.
+	checks := p.stopChecks(rec.ApplyID, rec)
 	res := restore(p.store(), rec, reason, detail, p.redact, p.o.Root, p.pkgRunner(), p.clock.Now())
+	if checks != nil {
+		res.Result.Checks = checks
+	}
 	if rec.Packages != nil {
 		p.refreshSiblings()
 	}
@@ -757,7 +798,7 @@ type restoreOutcome struct {
 // job installed, and put the snapshotted files back.
 func restore(st store, rec *pendingRecord, reason, detail string, redact uci.Redactor, root string, run ubus.Runner, now time.Time) restoreOutcome {
 	out := restoreOutcome{Result: Result{ApplyID: rec.ApplyID, Kind: rec.Kind, Outcome: OutcomeRolledBack, Reason: reason,
-		At: now.UTC().Format(time.RFC3339), Detail: detail}}
+		At: now.UTC().Format(time.RFC3339), Detail: detail, Checks: rec.CheckState.view()}}
 	if rec.Committed {
 		out.Result.Discarded = discarded(st, rec, redact)
 	}
