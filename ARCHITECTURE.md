@@ -753,7 +753,15 @@ address of the family (IPv6: an address or a delegated prefix);
 device when named); `reach` = one target answers `ping -c 1 -W 2 [-I dev]`, or
 a TCP connect to `tcpPort` (3 s, `SO_BINDTODEVICE` with `via`);
 `$gateway:<net>` is that interface's next hop, dropped when unknown;
-`resolve` = the pure Go resolver over `/etc/resolv.conf`; `wg_handshake` =
+`resolve` = the pure Go resolver over `/etc/resolv.conf` (the router's
+dnsmasq) asked an A query for a **fresh name**, `perch-<12 hex>.<name>.`,
+new on every probe: no cache on the way (dnsmasq, a forwarder behind it, the
+ISP's modem) can hold it, so an address or "no such name" (NXDOMAIN/NODATA)
+proves the upstream answered and passes, while a timeout, SERVFAIL or REFUSED
+fails. Asking `<name>` itself could pass from dnsmasq's cache with the WAN
+down. A name under a domain the router answers itself (`localhost`, `local`,
+`home.arpa`, dnsmasq's `domain`/`local`) fails without a query; `name` may be
+at most 234 characters (room for the label); `wg_handshake` =
 `wg show <dev> latest-handshakes` (never `dump`). Sequence: every item runs
 once before anything is staged (the **baseline**: a failure is `skipped`,
 unless `mustPass`); the reply carries `"checks":{"state":"pending",

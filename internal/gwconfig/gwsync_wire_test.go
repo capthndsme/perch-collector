@@ -217,8 +217,10 @@ func TestValidateChecks(t *testing.T) {
 		"tcpPort":                           item(`{"id":"a","kind":"reach","targets":["1.1.1.1"],"tcpPort":70000}`),
 		"invalid name":                      item(`{"id":"a","kind":"resolve","name":"-bad-.example.com"}`),
 		"invalid name ":                     item(`{"id":"a","kind":"resolve","name":""}`),
-		"withinSeconds":                     item(`{"id":"a","kind":"wg_handshake","network":"wg0","withinSeconds":10}`),
-		"publicKey":                         item(`{"id":"a","kind":"wg_handshake","network":"wg0","publicKey":"short","withinSeconds":60}`),
+		// 235 characters: no room for the probe's fresh label (19).
+		"invalid name  ": item(`{"id":"a","kind":"resolve","name":"` + strings.Repeat("a.", 116) + `com"}`),
+		"withinSeconds":  item(`{"id":"a","kind":"wg_handshake","network":"wg0","withinSeconds":10}`),
+		"publicKey":      item(`{"id":"a","kind":"wg_handshake","network":"wg0","publicKey":"short","withinSeconds":60}`),
 	}
 	many := &Checks{V: 1, TimeoutSeconds: 60}
 	for i := 0; i < 17; i++ {
@@ -235,6 +237,10 @@ func TestValidateChecks(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := validateChecks(item(`{"id":"dns.v6","kind":"resolve","name":"example.com.","family":6}`)); err != nil {
+		t.Fatal(err)
+	}
+	// 234 characters (and a final dot): a fresh label still fits in 253.
+	if err := validateChecks(item(`{"id":"dns","kind":"resolve","name":"` + strings.Repeat("a.", 116) + `co."}`)); err != nil {
 		t.Fatal(err)
 	}
 }

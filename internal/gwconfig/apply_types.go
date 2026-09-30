@@ -351,7 +351,7 @@ type Checks struct {
 //	interface_up   network                      netifd has it up with an address of family
 //	default_route  [network]                    a default route of family (through network's L3 device)
 //	reach          targets [tcpPort] [via]      one target answers ICMP (or a TCP connect to tcpPort)
-//	resolve        name                         the router's resolver returns an address of family
+//	resolve        name                         the router's resolver answers a fresh label under name (checks.go)
 //	wg_handshake   network [publicKey] withinSeconds  a peer (that peer) had a handshake that recently
 type CheckItem struct {
 	ID       string `json:"id"`
@@ -494,7 +494,9 @@ func validateChecks(c *Checks) error {
 				return err
 			}
 		case CheckResolve:
-			if len(it.Name) > 253 || !hostNameRe.MatchString(it.Name) {
+			// The probe asks a fresh label under the name (checks.go), so
+			// the name leaves room for it.
+			if len(strings.TrimSuffix(it.Name, ".")) > 253-FreshLabelLen || !hostNameRe.MatchString(it.Name) {
 				return perr(CodeBadParams, "%s: invalid name %q", where, it.Name)
 			}
 		case CheckWGHandshake:

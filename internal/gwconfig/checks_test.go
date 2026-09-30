@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -45,15 +46,41 @@ type netState struct {
 	mu      sync.Mutex
 	dns     bool
 	tcpOpen map[string]bool
+	// The router's resolver as dnsmasq behaves: it answers example.com from
+	// its cache whether the upstream is reachable or not, keeps the negative
+	// answers it got, and asks the upstream (dns) for anything else, which
+	// answers "no such name" (or an address, for a wildcard zone).
+	wildcard bool
+	negative map[string]bool
+	asked    []string
 }
 
-func (n *netState) resolve(_ context.Context, _, host string) ([]net.IP, error) {
+func (n *netState) resolve(_ context.Context, network, host string) ([]net.IP, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	if !n.dns {
-		return nil, &net.DNSError{Err: "server misbehaving", Name: host}
+	n.asked = append(n.asked, network+" "+host)
+	name := strings.TrimSuffix(host, ".")
+	switch {
+	case name == "example.com":
+		return []net.IP{net.ParseIP("192.0.2.80")}, nil
+	case n.negative[name]:
+		return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
+	case !n.dns:
+		return nil, &net.DNSError{Err: "server misbehaving", Name: host, IsTemporary: true}
+	case n.wildcard:
+		return []net.IP{net.ParseIP("192.0.2.81")}, nil
 	}
-	return []net.IP{net.ParseIP("192.0.2.80")}, nil
+	if n.negative == nil {
+		n.negative = map[string]bool{}
+	}
+	n.negative[name] = true
+	return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
+}
+
+func (n *netState) questions() []string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return append([]string(nil), n.asked...)
 }
 
 func (n *netState) dial(_ context.Context, _, addr, _ string) error {
@@ -178,7 +205,7 @@ func TestChecksPassThenConfirm(t *testing.T) {
 	if d := *st.Checks.Items[2].Detail; !strings.HasSuffix(d, "answered (icmp)") {
 		t.Fatal(d)
 	}
-	if d := *st.Checks.Items[3].Detail; d != "example.com → 192.0.2.80" {
+	if d := *st.Checks.Items[3].Detail; !regexp.MustCompile(`^perch-[0-9a-f]{12}\.example\.com: no such name \(the upstream answered\)$`).MatchString(d) {
 		t.Fatal(d)
 	}
 	notes := e.sentNotes()
@@ -207,7 +234,8 @@ func TestChecksFailRollBackBeforeTheDeadline(t *testing.T) {
 	if _, err := e.apply(wanJob(e, "c2", wanChecks)); err != nil {
 		t.Fatal(err)
 	}
-	// The job took the uplink down.
+	// The job took the uplink down. The router's resolver still answers
+	// example.com from its cache (netState): dns fails all the same.
 	wanUplinkDown(e, ns)
 	e.waitReconnect()
 	e.clock.Advance(0)
@@ -622,7 +650,6 @@ func TestProbes(t *testing.T) {
 		{`{"id":"a","kind":"wg_handshake","network":"wg0","publicKey":"TrMvSoP4jYQlY6RIzBgbssQqY3vxI2Pi+y71lOWWXX0=","withinSeconds":600}`, false, "no handshake within 600 s"},
 		{`{"id":"a","kind":"wg_handshake","network":"wg0","publicKey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","withinSeconds":600}`, false, "peer not configured on wg0"},
 		{`{"id":"a","kind":"wg_handshake","network":"wg9","withinSeconds":600}`, false, "wg9: no WireGuard interface"},
-		{`{"id":"a","kind":"resolve","name":"example.com","family":6}`, true, "example.com → 192.0.2.80"},
 	}
 	for _, c := range cases {
 		ok, d := probe(c.item)
@@ -639,10 +666,62 @@ func TestProbes(t *testing.T) {
 	if ok, d := probe(`{"id":"a","kind":"reach","family":6,"targets":["$gateway:wan6","2001:db8::1"]}`); !ok || d != "fe80::1 answered (icmp)" {
 		t.Fatalf("%v %q", ok, d)
 	}
-	ns.set(false)
-	if ok, d := probe(`{"id":"a","kind":"resolve","name":"example.com"}`); ok || d != "example.com: server misbehaving" {
-		t.Fatalf("%v %q", ok, d)
+	// resolve asks a fresh label under the name, never the name itself: the
+	// router's cache answers example.com whether the WAN is up or not.
+	fresh := regexp.MustCompile(`^perch-[0-9a-f]{12}\.example\.com(: no such name \(the upstream answered\)| → 192\.0\.2\.81|: server misbehaving)$`)
+	var seen []string
+	for _, c := range []struct {
+		dns, wildcard bool
+		item          string
+		ok            bool
+		tail          string
+	}{
+		{true, false, `{"id":"a","kind":"resolve","name":"example.com"}`, true, ": no such name (the upstream answered)"},
+		{true, false, `{"id":"a","kind":"resolve","name":"Example.COM.","family":6}`, true, ": no such name (the upstream answered)"},
+		{true, true, `{"id":"a","kind":"resolve","name":"example.com"}`, true, " → 192.0.2.81"},
+		// The upstream is gone: the cached name would still answer, and the
+		// negative answers the earlier probes got are cached too.
+		{false, false, `{"id":"a","kind":"resolve","name":"example.com"}`, false, ": server misbehaving"},
+		{false, false, `{"id":"a","kind":"resolve","name":"example.com","family":6}`, false, ": server misbehaving"},
+	} {
+		ns.set(c.dns)
+		ns.mu.Lock()
+		ns.wildcard = c.wildcard
+		ns.mu.Unlock()
+		ok, d := probe(c.item)
+		if ok != c.ok || !fresh.MatchString(d) || !strings.HasSuffix(d, c.tail) {
+			t.Errorf("%s (dns %v): %v %q", c.item, c.dns, ok, d)
+		}
+		seen = append(seen, strings.SplitN(d, ":", 2)[0])
 	}
+	asked := ns.questions()
+	labels := map[string]bool{}
+	for _, q := range asked {
+		if !strings.HasPrefix(q, "ip4 perch-") || !strings.HasSuffix(q, ".example.com.") {
+			t.Errorf("asked %q: want an A query for a rooted fresh label", q)
+		}
+		labels[q] = true
+	}
+	if len(asked) != 5 || len(labels) != 5 {
+		t.Errorf("every probe asks a new name: %v (details %v)", asked, seen)
+	}
+	// A name the router answers itself proves nothing and is not asked.
+	put(t, e.root, "etc/config/dhcp", fixDHCP+"\nconfig dnsmasq\n\toption domain 'lan'\n\toption local '/lan/'\n")
+	for name, want := range map[string]string{
+		"router.lan":     "router.lan: the router answers lan itself; the check needs an internet name",
+		"lan":            "lan: the router answers lan itself; the check needs an internet name",
+		"printer.local":  "printer.local: the router answers local itself; the check needs an internet name",
+		"nas.home.arpa.": "nas.home.arpa.: the router answers home.arpa itself; the check needs an internet name",
+		"localhost":      "localhost: the router answers localhost itself; the check needs an internet name",
+	} {
+		if ok, d := probe(`{"id":"a","kind":"resolve","name":"` + name + `"}`); ok || d != want {
+			t.Errorf("%s: %v %q", name, ok, d)
+		}
+	}
+	if n := len(ns.questions()); n != 5 {
+		t.Errorf("a local name was asked: %v", ns.questions())
+	}
+	ns.set(false)
 	var sawVia, sawLinkLocal, sawSecret bool
 	for _, c := range e.router.log() {
 		if strings.HasPrefix(c, "ping -c 1 -W 2 -I wan0 192.0.2.7") {

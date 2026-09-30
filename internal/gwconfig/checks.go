@@ -3,7 +3,11 @@ package gwconfig
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -909,31 +913,94 @@ func (p *Plane) dialCheck(ctx context.Context, addr, dev string) error {
 	return c.Close()
 }
 
-func (p *Plane) probeResolve(ctx context.Context, it CheckItem) (bool, string) {
-	network := "ip4"
-	if it.family() == 6 {
-		network = "ip6"
+// The resolve check asks for a name nobody has asked before: a fresh label
+// under the check's name. Resolving the name itself proves nothing: the
+// router's dnsmasq (or a forwarder behind it, or the ISP's modem) answers a
+// name it has cached while the WAN is down. A fresh name is in no cache, so
+// any answer came from the internet: an address (a wildcard zone) or "no such
+// name" (NXDOMAIN/NODATA) passes; a timeout, SERVFAIL or REFUSED (dnsmasq
+// without a reachable upstream) fails. The label is new on every probe, so
+// neither the baseline's nor an earlier round's negative answer is reused.
+// The query is always an A query: the answer to a fresh name proves the
+// upstream was reached whatever the record type, and dnsmasq's filter_aaaa
+// answers AAAA queries itself.
+const (
+	freshLabelPrefix = "perch-"
+	freshLabelHex    = 12
+	// FreshLabelLen is the fresh label and its dot: a check's name may be at
+	// most 253 - FreshLabelLen long.
+	FreshLabelLen   = len(freshLabelPrefix) + freshLabelHex + 1
+	resolveProbeMax = 5 * time.Second
+)
+
+// freshName is a new label under name, rooted (no search domain is tried).
+func freshName(name string) (query, shown string) {
+	b := make([]byte, freshLabelHex/2)
+	if _, err := rand.Read(b); err != nil {
+		// crypto/rand does not fail on Linux; a clock-derived label is
+		// still unique per probe.
+		binary.BigEndian.PutUint32(b[len(b)-4:], uint32(time.Now().UnixNano()))
 	}
-	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	shown = freshLabelPrefix + hex.EncodeToString(b) + "." + name
+	return shown + ".", shown
+}
+
+// localDomain is the domain of name that the router answers itself ("" when
+// none): localhost, mDNS and home.arpa (RFC 6761/8375), and dnsmasq's own
+// domain and local=/…/ domains (UCI dhcp). A fresh name there is answered
+// "no such name" without asking anyone.
+func (p *Plane) localDomain(name string) string {
+	local := []string{"localhost", "local", "home.arpa"}
+	if l, err := p.files.Load("dhcp"); err == nil && l.Config != nil {
+		for _, s := range l.Config.OfType("dnsmasq") {
+			for _, opt := range []string{"domain", "local"} {
+				v, _ := s.Get(opt)
+				for _, d := range v.Items {
+					if d = strings.ToLower(strings.Trim(d, "/.")); d != "" && !strings.Contains(d, "/") {
+						local = append(local, d)
+					}
+				}
+			}
+		}
+	}
+	for _, d := range local {
+		if name == d || strings.HasSuffix(name, "."+d) {
+			return d
+		}
+	}
+	return ""
+}
+
+func (p *Plane) probeResolve(ctx context.Context, it CheckItem) (bool, string) {
+	name := strings.ToLower(strings.TrimSuffix(it.Name, "."))
+	if d := p.localDomain(name); d != "" {
+		return false, it.Name + ": the router answers " + d + " itself; the check needs an internet name"
+	}
+	query, shown := freshName(name)
+	ctx, cancel := context.WithTimeout(ctx, resolveProbeMax)
 	defer cancel()
 	var ips []net.IP
 	var err error
 	if p.o.CheckResolve != nil {
-		ips, err = p.o.CheckResolve(ctx, network, it.Name)
+		ips, err = p.o.CheckResolve(ctx, "ip4", query)
 	} else {
-		ips, err = (&net.Resolver{PreferGo: true}).LookupIP(ctx, network, it.Name)
+		ips, err = (&net.Resolver{PreferGo: true}).LookupIP(ctx, "ip4", query)
 	}
-	if err != nil || len(ips) == 0 {
-		why := "no address"
-		if err != nil {
-			why = err.Error()
-			if de, ok := err.(*net.DNSError); ok {
-				why = de.Err
-			}
+	var de *net.DNSError
+	switch {
+	case err == nil && len(ips) > 0:
+		return true, shown + " → " + ips[0].String()
+	case errors.As(err, &de) && de.IsNotFound:
+		return true, shown + ": no such name (the upstream answered)"
+	case err == nil:
+		return false, shown + ": empty answer"
+	case errors.As(err, &de):
+		if de.IsTimeout {
+			return false, shown + ": no answer (timeout)"
 		}
-		return false, it.Name + ": " + why
+		return false, shown + ": " + de.Err
 	}
-	return true, it.Name + " → " + ips[0].String()
+	return false, shown + ": " + err.Error()
 }
 
 func (p *Plane) probeWGHandshake(ctx context.Context, it CheckItem) (bool, string) {
