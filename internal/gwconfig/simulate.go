@@ -64,6 +64,10 @@ type simulation struct {
 	// made (generate.go), genSlots their config/section/option.
 	generated []Generated
 	genSlots  map[string]bool
+	// wgPeers: WireGuard interfaces whose peer sections (`wireguard_<iface>`)
+	// an op put or deleted. netifd's reload compares interface sections
+	// only, so the agent sets those interfaces up again (wgrefresh.go).
+	wgPeers map[string]bool
 }
 
 func genSlot(config, section, option string) string {
@@ -184,6 +188,7 @@ func simulate(in simInput) (*simulation, error) {
 		puts:     map[string][]string{},
 		deleted:  map[string][]string{},
 		genSlots: map[string]bool{},
+		wgPeers:  map[string]bool{},
 	}
 	led := &ledgerIndex{entries: append([]LedgerEntry(nil), in.ledger...)}
 	// owned: sections adopted or created by this apply, per config.
@@ -313,6 +318,10 @@ func simulate(in simInput) (*simulation, error) {
 			sim.usesSecrets = sim.usesSecrets || usedSecret
 			mark(sim.touched, op.Config, op.Section)
 			mark(owned, op.Config, op.Section)
+			notePeer(sim, op.Config, op.Type)
+			if sec != nil {
+				notePeer(sim, op.Config, sec.Type)
+			}
 			switch {
 			case sec == nil:
 				ns := &uci.Section{Name: op.Section, Type: op.Type, Options: opts}
@@ -370,6 +379,7 @@ func simulate(in simInput) (*simulation, error) {
 			}
 			addStep(op.Config, step{kind: stepDeleteSection, section: op.Section})
 			mark(sim.touched, op.Config, op.Section)
+			notePeer(sim, op.Config, sec.Type)
 			sim.deleted[op.Config] = appendUnique(sim.deleted[op.Config], op.Section)
 			for {
 				j := led.bySection(op.Config, op.Section)

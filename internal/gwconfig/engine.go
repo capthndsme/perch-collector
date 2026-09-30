@@ -432,7 +432,7 @@ func (p *Plane) apply(ctx context.Context, a *ApplyParams, sess SessionRef, secu
 		snap = append(snap, LedgerConfig)
 	}
 	rec := &pendingRecord{ApplyID: a.ApplyID, Kind: a.Kind, CreatedAt: now, Deadline: now.Add(time.Duration(secs) * time.Second),
-		ConfirmSeconds: secs, Protected: protected, Configs: snap, Generated: sim.generated}
+		ConfirmSeconds: secs, Protected: protected, Configs: snap, Generated: sim.generated, WGPeers: sortedSet(sim.wgPeers)}
 	// Checks: the controller's or the agent's own net, with their baseline
 	// taken now, before anything is staged (checks.go).
 	if c, agentAdded := p.effectiveChecks(ctx, a, sim, current); c != nil {
@@ -560,6 +560,7 @@ func (p *Plane) afterCommit(id string) {
 	if !still {
 		return
 	}
+	p.refreshWireguard(id, rec.WGPeers)
 	// The checks' budget starts once the reload settled.
 	p.startChecks(rec)
 	if h := p.hooksNow(); h.Reconnect != nil {
@@ -764,6 +765,7 @@ func (p *Plane) rollback(rec *pendingRecord, reason string, reload bool, detail 
 			}
 		}
 		cancel()
+		p.refreshWireguard(rec.ApplyID, rec.WGPeers)
 	}
 	for _, c := range res.restored {
 		p.RecordOwn(c, p.store().currentHash(c), rec.ApplyID)

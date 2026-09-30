@@ -258,7 +258,7 @@ func (r *fakeRouter) run(_ context.Context, name string, args ...string) ([]byte
 	case "opkg":
 		return r.opkg(args)
 	}
-	if name == "/etc/init.d/network" {
+	if name == "/etc/init.d/network" || name == "/sbin/ifup" {
 		return nil, nil, 0, nil
 	}
 	return nil, []byte("not found"), 127, nil

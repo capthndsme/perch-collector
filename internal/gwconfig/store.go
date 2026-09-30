@@ -47,6 +47,9 @@ type pendingRecord struct {
 	HashesAfter map[string]string `json:"hashesAfter,omitempty"`
 	Committed   bool              `json:"committed"`
 	Packages    *packageRecord    `json:"packages,omitempty"`
+	// WGPeers are the WireGuard interfaces set up again after the commit
+	// and after a rollback (their peers changed; wgrefresh.go).
+	WGPeers []string `json:"wgPeers,omitempty"`
 	// Checks are the apply's effective checks (the controller's, or the
 	// agent's own net) and CheckState their last recorded state
 	// (checks.go): a restarted daemon re-runs what has not passed with what
