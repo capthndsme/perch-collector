@@ -163,13 +163,15 @@ func (s *recStager) Commit(ctx context.Context, config string) error {
 type fakeRouter struct {
 	root string
 
-	mu        sync.Mutex
-	routeDev  string // "" = no route
-	netDump   string
-	calls     []string
-	pkgFail   map[string]bool // opkg install of this name fails (after installing its deps)
-	pkgSize   map[string]int64
-	pkgDeps   map[string][]string
+	mu       sync.Mutex
+	routeDev string // "" = no route
+	netDump  string
+	calls    []string
+	pkgFail  map[string]bool // opkg install of this name fails (after installing its deps)
+	pkgSize  map[string]int64
+	pkgDeps  map[string][]string
+	// pkgFiles are files (relative to root) an install of the package writes.
+	pkgFiles  map[string][]string
 	updateErr bool
 
 	// Checks (checks.go): netifd's status per interface (JSON; absent = no
@@ -255,6 +257,9 @@ func (r *fakeRouter) run(_ context.Context, name string, args ...string) ([]byte
 	case "opkg":
 		return r.opkg(args)
 	}
+	if name == "/etc/init.d/network" {
+		return nil, nil, 0, nil
+	}
 	return nil, []byte("not found"), 127, nil
 }
 
@@ -329,6 +334,11 @@ func (r *fakeRouter) opkg(args []string) ([]byte, []byte, int, error) {
 				fmt.Fprintf(&out, "Installing %s (1.0-r1) to root...\n", x)
 				if !dry {
 					have[x] = true
+					for _, f := range r.pkgFiles[x] {
+						path := filepath.Join(r.root, f)
+						_ = os.MkdirAll(filepath.Dir(path), 0o755)
+						_ = os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755)
+					}
 				}
 			}
 		}

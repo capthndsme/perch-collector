@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -75,6 +76,10 @@ type PackageInstallResult struct {
 	NeedBytes *int64            `json:"needBytes"`
 	FreeBytes uint64            `json:"freeBytes"`
 	Hashes    map[string]string `json:"hashes,omitempty"`
+	// RestartsNetwork: the install added netifd protocol handlers, so the
+	// agent restarts netifd (every interface goes down and up) before it
+	// reconnects to confirm.
+	RestartsNetwork bool `json:"restartsNetwork,omitempty"`
 }
 
 // Flash check: the estimate of an install is the sum of the package files'
@@ -92,7 +97,17 @@ const (
 	pkgUpdateTimeout  = 3 * time.Minute
 	pkgInstallTimeout = 10 * time.Minute
 	pkgRemoveTimeout  = 2 * time.Minute
+	// netifdRestartTimeout bounds `/etc/init.d/network restart` after an
+	// install that brought a protocol handler.
+	netifdRestartTimeout = 90 * time.Second
 )
+
+// netifd loads its protocol handlers (/lib/netifd/proto/*.sh) when it
+// starts: an interface of a protocol a package just added (wireguard-tools'
+// wireguard.sh) stays "proto none, NO_DEVICE" until netifd restarts. A
+// package job that adds a handler restarts netifd after its reply, inside
+// its confirm window: the agent confirms only once the network is back.
+const netifdProtoDir = "/lib/netifd/proto"
 
 var packageNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9+._-]{0,63}$`)
 
@@ -284,6 +299,7 @@ func (p *Plane) installPackages(ctx context.Context, a *PackageInstallParams, na
 	if err := p.prepare(rec); err != nil {
 		return nil, err
 	}
+	handlersBefore := p.protoHandlers()
 	args := append([]string{"install"}, want...)
 	if manager == pkgdb.Apk {
 		args = append([]string{"add"}, want...)
@@ -306,11 +322,51 @@ func (p *Plane) installPackages(ctx context.Context, a *PackageInstallParams, na
 		return nil, p.failCommittedReason(rec, ReasonInstallFailed, err.Error())
 	}
 	log.Printf("config plane: package job %s installed %v; confirm by %s", a.ApplyID, rec.Packages.Installed, rec.Deadline.UTC().Format(time.RFC3339))
-	go p.afterCommit(a.ApplyID)
+	handlers := addedHandlers(handlersBefore, p.protoHandlers())
+	go p.afterPackageCommit(a.ApplyID, handlers)
 	res.State, res.Deadline, res.ConfirmTimeoutSeconds = StatePendingConfirm, rec.Deadline.UTC().Format(time.RFC3339), secs
+	res.RestartsNetwork = len(handlers) > 0
 	res.Install = rec.Packages.Installed
 	res.Hashes = p.Hashes()
 	return res, nil
+}
+
+// protoHandlers lists netifd's protocol handler scripts.
+func (p *Plane) protoHandlers() map[string]bool {
+	out := map[string]bool{}
+	entries, err := os.ReadDir(rooted(p.o.Root, netifdProtoDir))
+	if err != nil {
+		return out
+	}
+	for _, e := range entries {
+		out[e.Name()] = true
+	}
+	return out
+}
+
+func addedHandlers(before, after map[string]bool) []string {
+	var out []string
+	for n := range after {
+		if !before[n] {
+			out = append(out, n)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// afterPackageCommit restarts netifd when the install added protocol
+// handlers (after the reply is on the wire), then waits for the agent's
+// reconnect like any apply.
+func (p *Plane) afterPackageCommit(id string, handlers []string) {
+	if len(handlers) > 0 {
+		time.Sleep(replyGrace)
+		log.Printf("config plane: package job %s added netifd protocol handlers %v; restarting netifd to load them", id, handlers)
+		if _, err := runPkg(context.Background(), p.pkgRunner(), netifdRestartTimeout, "/etc/init.d/network", "restart"); err != nil {
+			log.Printf("config plane: package job %s: %v", id, err)
+		}
+	}
+	p.afterCommit(id)
 }
 
 // newPackages lists what is installed now and was not before.

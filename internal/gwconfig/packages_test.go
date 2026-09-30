@@ -42,9 +42,42 @@ func TestPackageInstallConfirmed(t *testing.T) {
 	if !e.router.installed()["wireguard-tools"] {
 		t.Fatal("confirmed install kept")
 	}
+	if strings.Contains(log, "/etc/init.d/network") {
+		t.Fatal("no protocol handler was added: netifd keeps running\n" + log)
+	}
 	// Installing it again is a noop.
 	if res, err := e.install("p2", "wireguard-tools"); err != nil || res.State != StateNoop || strings.Join(res.AlreadyInstalled, ",") != "wireguard-tools" {
 		t.Fatalf("%+v %v", res, err)
+	}
+}
+
+func TestPackageInstallRestartsNetifdForANewProtocol(t *testing.T) {
+	e := newEnv(t)
+	withWireguard(e)
+	e.router.pkgFiles = map[string][]string{"wireguard-tools": {"lib/netifd/proto/wireguard.sh"}}
+	res, err := e.install("p1", "wireguard-tools")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.RestartsNetwork {
+		t.Fatalf("%+v", res)
+	}
+	e.waitReconnect()
+	log := e.router.log()
+	installed, restarted := -1, -1
+	for i, c := range log {
+		switch c {
+		case "opkg install wireguard-tools":
+			installed = i
+		case "/etc/init.d/network restart":
+			restarted = i
+		}
+	}
+	if installed < 0 || restarted < installed {
+		t.Fatalf("netifd restarts after the install, before the reconnect:\n%s", strings.Join(log, "\n"))
+	}
+	if _, err := e.p.Confirm("p1", SessionRef{Gen: 2}); err != nil {
+		t.Fatal(err)
 	}
 }
 
