@@ -690,7 +690,7 @@ Result:
 ledger changed: adopting named sections, ledger edits; no window, nothing
 reloaded); `noop` (nothing to change; `hashes` = all readable); `dry_run`
 (`changes:[{config,section,op,option?,value?}]`: rpcd's `uci changes`, secret
-values `<redacted>`; nothing kept). A retried apply with the pending job's id
+values `<redacted>`, generated ones `<generated>`; nothing kept). A retried apply with the pending job's id
 returns the pending reply again. The window is `confirmTimeoutSeconds`
 (default 90) clamped to 30..`config_confirm_max`; a job that touches the
 management path gets at least 300 s (`protected: true`, whether the controller
@@ -785,12 +785,28 @@ default route now (or such an interface's device section) gets
 `{"v":1,"timeoutSeconds":90,"items":[{"id":"agent:route4","kind":"default_route","family":4}]}`
 (`agentAdded`); only an explicit `"checks":{"v":1,"items":[]}` turns it off.
 
+**Generated values** (`internal/gwconfig/generate.go`, gateway-sync protocol
+2; feature `config.generate.wg_key`). A `put` option may be
+`{"$generate":"wg_private_key"}`: the router makes a WireGuard private key
+(`wgtypes.GeneratePrivateKey` of `golang.zx2c4.com/wireguard/wgctrl`, only
+that package: `crypto/rand` and `x/crypto/curve25519`, clamped like `wg
+genkey`) while it simulates the job, so the commit is verified against the
+exact value. Only on option `private_key` of a `network` `interface` whose
+resulting `proto` is `wireguard` (a kept `proto` counts); anything else is
+`bad_params` with `data.reason` `generate_not_allowed`. The reply (and a
+retried apply's) carries the public half only:
+`"generated":[{"config":"network","section":"wg0","option":"private_key","publicKey":"<44 chars>"}]`;
+`pending.json` keeps the same list. Nothing secret crosses the wire, so it
+works on a signed plain-HTTP session. A dry run stages and shows
+`<generated>` and makes no key; the value is never logged; reads show its
+fingerprint like any secret; a rollback drops it with the snapshot.
+
 **`gateway.capabilities` `features`** lists what the build implements:
-`config.checks.v1`; `config.plain_public_key` when the kit's redactor keeps
-`public_key` in clear; the daemon's own (runtime RPCs). `$generate` values
-and the `service` op decode but are refused `unsupported` until their
-features exist. The redactor also hides `pincode` and `pukcode` (a mobile
-WAN's SIM codes).
+`config.checks.v1`, `config.generate.wg_key`; `config.plain_public_key` when
+the kit's redactor keeps `public_key` in clear; the daemon's own (runtime
+RPCs and observation, below). The `service` op decodes but is refused
+`unsupported` (mwan3/pbr stay read-only, owner decision). The redactor also
+hides `pincode` and `pukcode` (a mobile WAN's SIM codes).
 
 **`gateway.config.rollback`** `{applyId}` → `{"state":"rolling_back","applyId":…}`
 (the restore runs after the reply; its outcome comes as a result, reason

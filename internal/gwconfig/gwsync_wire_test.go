@@ -265,11 +265,6 @@ func TestUnbuiltFeaturesAreRefused(t *testing.T) {
 	if code(err) != CodeUnsupported {
 		t.Fatal(err)
 	}
-	_, err = e.apply(`{"applyId":"s2","base":` + mustJSON(e.base("network")) + `,"ops":[{"op":"put","config":"network","section":"wg0","type":"interface",
-	  "options":{"proto":"wireguard","private_key":{"$generate":"wg_private_key"}}}]}`)
-	if code(err) != CodeUnsupported {
-		t.Fatal(err)
-	}
 	_, err = e.apply(`{"applyId":"s3","base":{},"ops":[],"checks":{"v":2,"items":[]}}`)
 	if code(err) != CodeBadParams || !strings.Contains(err.Error(), "checks version 2 is not supported") {
 		t.Fatal(err)

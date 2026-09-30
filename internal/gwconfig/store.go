@@ -54,6 +54,9 @@ type pendingRecord struct {
 	// restores at the deadline.
 	Checks     *Checks           `json:"checks,omitempty"`
 	CheckState *checkStateRecord `json:"checkState,omitempty"`
+	// Generated are the public halves of the job's generated values
+	// (generate.go), for a retried apply's reply; never a private value.
+	Generated []Generated `json:"generated,omitempty"`
 }
 
 // packageRecord is the package part of a package job.

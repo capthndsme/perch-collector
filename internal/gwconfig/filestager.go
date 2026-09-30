@@ -250,16 +250,19 @@ func redactDelta(line string) string {
 
 // changesOf lists a stager's staged changes for configs, sorted by apply
 // order.
-func changesOf(ctx context.Context, st uci.Stager, configs []string) ([]ChangeEntry, error) {
+func changesOf(ctx context.Context, st uci.Stager, sim *simulation) ([]ChangeEntry, error) {
 	out := []ChangeEntry{}
-	for _, c := range configs {
+	for _, c := range sim.configs {
 		list, err := st.Changes(ctx, c)
 		if err != nil {
 			return nil, err
 		}
 		for _, ch := range list {
 			v := ch.Value
-			if ch.Option != "" && uci.IsSecret(ch.Option) {
+			switch {
+			case ch.Option != "" && sim.isGenerated(c, ch.Section, ch.Option):
+				v = GeneratedPlaceholder
+			case ch.Option != "" && uci.IsSecret(ch.Option):
 				v = "<redacted>"
 			}
 			out = append(out, ChangeEntry{Config: c, Section: ch.Section, Op: ch.Op, Option: ch.Option, Value: v})

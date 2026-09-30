@@ -174,6 +174,9 @@ type Plane struct {
 	// chk holds the pending apply's running checks (checks.go); lock order
 	// ap.mu before chk.mu.
 	chk checksHolder
+
+	// genValue makes {"$generate"} values (generate.go); tests replace it.
+	genValue keyGen
 }
 
 // New prepares a plane.
@@ -193,12 +196,13 @@ func New(o Options) *Plane {
 		o.Access = AccessNone
 	}
 	p := &Plane{
-		o:      o,
-		files:  uci.Files{Dir: rooted(o.Root, uci.DefaultDir)},
-		ubus:   o.Ubus,
-		redact: NewRedactor(o.APIKey),
-		poke:   make(chan struct{}, 1),
-		clock:  o.Clock,
+		o:        o,
+		files:    uci.Files{Dir: rooted(o.Root, uci.DefaultDir)},
+		ubus:     o.Ubus,
+		redact:   NewRedactor(o.APIKey),
+		poke:     make(chan struct{}, 1),
+		clock:    o.Clock,
+		genValue: generateValue,
 	}
 	p.ap.state = StateIdle
 	if o.Backend != nil {

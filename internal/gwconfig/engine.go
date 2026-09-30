@@ -245,7 +245,7 @@ func (p *Plane) confirmSeconds(req *float64, protected bool) int {
 func (p *Plane) pendingResult(rec *pendingRecord) *ApplyResult {
 	return &ApplyResult{State: StatePendingConfirm, ApplyID: rec.ApplyID, Deadline: rec.Deadline.UTC().Format(time.RFC3339),
 		ConfirmTimeoutSeconds: rec.ConfirmSeconds, Protected: rec.Protected, Hashes: rec.HashesAfter,
-		Checks: p.checksReply(rec)}
+		Checks: p.checksReply(rec), Generated: rec.Generated}
 }
 
 // Apply runs gateway.config.apply. secure: the transport is verified TLS,
@@ -338,7 +338,13 @@ func (p *Plane) apply(ctx context.Context, a *ApplyParams, sess SessionRef, secu
 	if err != nil {
 		return nil, perr(CodeApplyFailed, "reading the ledger: %v", err)
 	}
-	sim, err := simulate(simInput{current: current, ledger: ledgerNow, params: a, writable: p.writable})
+	// A dry run stages a placeholder for a generated value: no key is made
+	// for a job that is not kept.
+	gen := p.genValue
+	if a.DryRun {
+		gen = placeholderValue
+	}
+	sim, err := simulate(simInput{current: current, ledger: ledgerNow, params: a, writable: p.writable, generate: gen})
 	if err != nil {
 		return nil, err
 	}
@@ -386,7 +392,7 @@ func (p *Plane) apply(ctx context.Context, a *ApplyParams, sess SessionRef, secu
 			}
 			err = stage(ctx, stager, sim)
 			if err == nil {
-				changes, err = changesOf(ctx, stager, sim.configs)
+				changes, err = changesOf(ctx, stager, sim)
 			}
 			_ = stager.Close(ctx)
 			if err != nil {
@@ -426,7 +432,7 @@ func (p *Plane) apply(ctx context.Context, a *ApplyParams, sess SessionRef, secu
 		snap = append(snap, LedgerConfig)
 	}
 	rec := &pendingRecord{ApplyID: a.ApplyID, Kind: a.Kind, CreatedAt: now, Deadline: now.Add(time.Duration(secs) * time.Second),
-		ConfirmSeconds: secs, Protected: protected, Configs: snap}
+		ConfirmSeconds: secs, Protected: protected, Configs: snap, Generated: sim.generated}
 	// Checks: the controller's or the agent's own net, with their baseline
 	// taken now, before anything is staged (checks.go).
 	if c, agentAdded := p.effectiveChecks(ctx, a, sim, current); c != nil {

@@ -537,11 +537,6 @@ func checkUnsupported(a *ApplyParams) error {
 		if op.Op == OpService {
 			return perr(CodeUnsupported, "ops[%d]: the service op is not supported by this build (feature %s)", i, FeatureServiceV1)
 		}
-		for name, v := range op.Options {
-			if v.Generate != "" {
-				return perr(CodeUnsupported, "ops[%d]: option %s: generated values are not supported by this build (feature %s)", i, name, FeatureGenerateWGKey)
-			}
-		}
 	}
 	return nil
 }
