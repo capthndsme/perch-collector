@@ -173,6 +173,7 @@ type fakeRouter struct {
 	// pkgFiles are files (relative to root) an install of the package writes.
 	pkgFiles  map[string][]string
 	updateErr bool
+	noLists   bool // no package lists at all (RAM after a reboot, update failed)
 
 	// Checks (checks.go): netifd's status per interface (JSON; absent = no
 	// such interface), `ip [-6] route show default`, the targets that answer
@@ -320,7 +321,7 @@ func (r *fakeRouter) opkg(args []string) ([]byte, []byte, int, error) {
 		have := r.installed()
 		var out strings.Builder
 		for _, n := range names {
-			if _, ok := r.pkgSize[n]; !ok {
+			if _, ok := r.pkgSize[n]; !ok || r.noLists {
 				return []byte("Unknown package '" + n + "'.\n"), nil, 255, nil
 			}
 			for _, x := range r.closure(n) {

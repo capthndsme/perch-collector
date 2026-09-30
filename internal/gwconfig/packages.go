@@ -239,9 +239,13 @@ func (p *Plane) installPackages(ctx context.Context, a *PackageInstallParams, na
 	}
 	run := p.pkgRunner()
 	update := []string{"update"}
-	if _, err := runPkg(ctx, run, pkgUpdateTimeout, manager, update...); err != nil {
-		e := perr(CodeInstallFailed, "updating the package lists: %v", err)
-		return nil, e
+	// One feed mirror that does not answer fails the whole update although
+	// the other lists are fresh (seen: two of a CDN's four addresses
+	// unreachable, most installs refused): go on with the lists at hand and
+	// let the simulation decide; it fails when a package is not in them.
+	_, updateErr := runPkg(ctx, run, pkgUpdateTimeout, manager, update...)
+	if updateErr != nil {
+		log.Printf("config plane: package job %s: %v; trying with the package lists at hand", a.ApplyID, updateErr)
 	}
 	sim := append([]string{"install", "--noaction"}, want...)
 	if manager == pkgdb.Apk {
@@ -249,6 +253,9 @@ func (p *Plane) installPackages(ctx context.Context, a *PackageInstallParams, na
 	}
 	out, err := runPkg(ctx, run, pkgInstallTimeout, manager, sim...)
 	if err != nil {
+		if updateErr != nil {
+			return nil, perr(CodeInstallFailed, "updating the package lists: %v; then: %v", updateErr, err)
+		}
 		return nil, perr(CodeInstallFailed, "%v", err)
 	}
 	for _, m := range installingRe.FindAllStringSubmatch(out, -1) {

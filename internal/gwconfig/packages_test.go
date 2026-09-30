@@ -81,6 +81,21 @@ func TestPackageInstallRestartsNetifdForANewProtocol(t *testing.T) {
 	}
 }
 
+func TestPackageInstallGoesOnWhenOneFeedFails(t *testing.T) {
+	e := newEnv(t)
+	withWireguard(e)
+	// `opkg update` fails on one mirror; the lists it has name the package.
+	e.router.updateErr = true
+	res, err := e.install("p1", "wireguard-tools")
+	if err != nil || res.State != StatePendingConfirm {
+		t.Fatalf("%+v %v", res, err)
+	}
+	e.waitReconnect()
+	if _, err := e.p.Confirm("p1", SessionRef{Gen: 2}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPackageInstallRolledBackAtTheDeadline(t *testing.T) {
 	e := newEnv(t)
 	withWireguard(e)
@@ -139,12 +154,12 @@ func TestPackageInstallRefusals(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.router.pkgSize["wireguard-tools"] = 28000
-	// Package lists unreachable.
-	e.router.updateErr = true
-	if _, err := e.install("p1", "wireguard-tools"); code(err) != CodeInstallFailed {
+	// Package lists unreachable and none at hand.
+	e.router.updateErr, e.router.noLists = true, true
+	if _, err := e.install("p1", "wireguard-tools"); code(err) != CodeInstallFailed || !strings.Contains(err.Error(), "updating the package lists") {
 		t.Fatal(err)
 	}
-	e.router.updateErr = false
+	e.router.updateErr, e.router.noLists = false, false
 	// A dry run installs nothing.
 	res, err := e.p.InstallPackages(context.Background(), &PackageInstallParams{ApplyID: "p2", Packages: []string{"wireguard-tools"}, DryRun: true}, SessionRef{Gen: 1})
 	if err != nil || res.State != StateDryRun || len(res.Install) != 3 || e.router.installed()["wireguard-tools"] {
