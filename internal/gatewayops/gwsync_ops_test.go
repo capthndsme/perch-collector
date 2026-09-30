@@ -121,8 +121,11 @@ func TestUPnPDeleteRemovesOrphanRules(t *testing.T) {
 	}}
 	u := &UPnP{Root: root, Run: r.run}
 	res, err := u.Delete(context.Background(), UPnPDeleteParams{Mappings: []UPnPMappingRef{{Proto: "TCP", ExtPort: 45000}}})
-	if err != nil || res.Deleted != 1 || res.NotFound != 0 {
+	if err != nil || res.Deleted != 1 || res.NotFound != 0 || !res.Restarted {
 		t.Fatalf("%+v %v", res, err)
+	}
+	if last := r.calls[len(r.calls)-1]; filepath.Base(last[0]) != "miniupnpd" || last[1] != "restart" {
+		t.Fatalf("miniupnpd restarts last: %v", r.calls)
 	}
 	var deletes []string
 	for _, c := range r.calls {

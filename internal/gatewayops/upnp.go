@@ -188,11 +188,21 @@ func (u *UPnP) Delete(ctx context.Context, p UPnPDeleteParams) (res *UPnPDeleteR
 		if res == nil {
 			return
 		}
-		for k := range u.removeOrphanRules(ctx, run, want) {
+		orphans := u.removeOrphanRules(ctx, run, want)
+		for k := range orphans {
 			if !found[k] {
 				found[k] = true
 				res.Deleted++
 				res.NotFound--
+			}
+		}
+		// miniupnpd still lists what it read from the rules at its start:
+		// one restart makes its list match.
+		if len(orphans) > 0 && !res.Restarted {
+			cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
+			if _, _, code, err := run(cctx, rootPath(u.Root, UPnPInit), "restart"); err == nil && code == 0 {
+				res.Restarted = true
 			}
 		}
 	}()
