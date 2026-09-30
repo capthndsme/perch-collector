@@ -40,13 +40,15 @@ func qosAllowed(plane *gwconfig.Plane) func() bool {
 }
 
 // configPlane builds the config plane when the collector runs on OpenWrt;
-// nil elsewhere (a collector on a server has no UCI to offer).
-func configPlane(cfg config.Config, captured func() map[string]string) *gwconfig.Plane {
+// nil elsewhere (a collector on a server has no UCI to offer). features are
+// the daemon's own for gateway.capabilities (runtime actions, observation).
+func configPlane(cfg config.Config, captured func() map[string]string, features []string) *gwconfig.Plane {
 	if !gateway.OnOpenWrt(hoststat.FS{}) {
 		return nil
 	}
 	o := planeOptions(cfg)
 	o.CapturedNetworks = captured
+	o.Features = features
 	p := gwconfig.New(o)
 	switch {
 	case p.Access() == gwconfig.AccessNone:

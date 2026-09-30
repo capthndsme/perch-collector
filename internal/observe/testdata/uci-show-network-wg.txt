@@ -1,0 +1,17 @@
+network.loopback=interface
+network.loopback.device='lo'
+network.loopback.proto='static'
+network.lan=interface
+network.lan.device='br-lan'
+network.lan.proto='static'
+network.wg0=interface
+network.wg0.proto='wireguard'
+network.wg0.private_key='IKTRYYo3faMCh5xRWnOZ44SwQyEibYdDKmOrPS5bT38='
+network.wg0.listen_port='51820'
+network.wg0.addresses='192.168.9.1/24'
+network.@wireguard_wg0[0]=wireguard_wg0
+network.@wireguard_wg0[0].description='phone'
+network.@wireguard_wg0[0].public_key='gOfqWazSdGuRFxc3JgwDl1c5VSDMWqgEn37hewWbwhY='
+network.@wireguard_wg0[0].preshared_key='U9OX5Ao2njHPS5azWQJW0dMASTbBHRh3DNSbZkAvI2Y='
+network.@wireguard_wg0[0].allowed_ips='192.168.9.2/32'
+network.@wireguard_wg0[0].persistent_keepalive='25'

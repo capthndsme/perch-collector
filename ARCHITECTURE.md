@@ -131,7 +131,7 @@ perch-collector/
 │   ├── gwconfig/              # Config plane: access, read + redaction, capabilities, storage, change watch
 │   ├── gateway/
 │   │   └── gateway.go         # Router health from /proc (conntrack, TCP, load, memory, WAN) + ports from /sys
-│   ├── observe/               # Observation channel: dhcp, neighbors, interfaces, upnp, mwan3, resolver, system
+│   ├── observe/               # Observation channel: dhcp, neighbors, interfaces, upnp, mwan3, resolver, system, wireguard, ddns
 │   │   ├── observer.go        # parts, Section, per-part read intervals and fingerprints, Pacer
 │   │   └── env.go, uci.go     # fixture-tree root, uci/ubus runner, `uci show` parser
 │   ├── portal/                # Guest portal: nftables enforcement, grant store, tick, guest pages
@@ -284,8 +284,10 @@ shared, so DHCP leases and neighbours are tagged with their network.
 push (every metricsIntervalSeconds)
   for each part the Observer has:
     Observer.Read(part)          cached per part (neighbours 60 s, interfaces 5 s,
-                                 upnp/mwan3 15 s, resolver/system 60 s; dhcp watches
-                                 its files); value + fingerprint without uptimes
+                                 upnp/mwan3 15 s, wireguard 30 s, resolver/system/ddns
+                                 60 s; dhcp watches its files); value + fingerprint
+                                 without what ticks (uptimes, prefix lifetimes,
+                                 WireGuard byte counters)
     Pacer.Due(session, part, fp) first in the session, changed (neighbours: ≥ 60 s
                                  after the last send), or refresh due
   → observe {full?, <due parts>} in collector.push; Pacer.Sent after the write
@@ -294,16 +296,28 @@ GET /api/v1/summary              Observer.Section(all, cached) for polled collec
 ```
 
 Readers only read: files under `Env.Root` (a fixture tree in tests), the
-`uci` and `ubus` CLIs through `Env.Run`, rtnetlink for the neighbour table,
-`/proc` for processes and sockets. A part that cannot be read is absent from
-the push (the controller keeps its data), never an empty report.
+`uci`, `ubus` and `wg` CLIs through `Env.Run`, rtnetlink for the neighbour
+table, `/proc` for processes and sockets. A part that cannot be read is absent
+from the push (the controller keeps its data), never an empty report. The
+`wireguard` reader (`observe/wireguard.go`) runs only `wg show all <field>` for
+the eight fields that print no secret, never `dump`, `private-key` or
+`preshared-keys`, and keeps nothing of `uci show network` but interface names
+and peer descriptions; the `ddns` reader (`observe/ddns.go`) keeps a
+service's name, `enabled` and host name, never its credentials, and turns
+ddns-scripts' uptime stamps into Unix times with a boot time it keeps while
+the clock agrees within 2 s (no flicker).
 
 The runtime actions sit beside it in `internal/gatewayops`: the conntrack
 flush dumps the table over ctnetlink, deletes matching flows by their
 original tuple and skips the collector's own controller connection (its
 endpoints come from the controller dialer); the backup runs `sysupgrade -b`
 into a temporary directory and rewrites the tar.gz with secrets redacted.
-Both run one at a time. Capabilities, dispatch and the observe section live
+Both run one at a time. `upnp.go` deletes miniupnpd mappings by content from
+its lease file (atomic rewrite, one restart) and `ddns.go` starts one
+ddns-scripts section (`start-stop-daemon -b`); those two are
+write-gated by the config plane (`gwconfig.Plane.GateWrite`: access write,
+verified TLS or a signed request) and announced in `gateway.capabilities`
+`features` (CONFIG.md, "UPnP mapping delete and DDNS update now"). Capabilities, dispatch and the observe section live
 in `internal/controller/gateway.go`, apart from `controller.go`, so the
 config plane's hello fields and requests stay separate.
 

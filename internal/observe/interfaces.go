@@ -36,19 +36,39 @@ type Interface struct {
 	// Error is netifd's first error code for the interface, if any
 	// ("NO_DEVICE", …).
 	Error string `json:"error,omitempty"`
-	// IPv6Assigned are the prefixes netifd assigned to this (LAN)
-	// interface from a delegated prefix (ipv6-prefix-assignment), as
-	// prefix/len. Not on the wire of the interfaces part (it predates
-	// them); the multi-capture reconciler counts them as local.
-	IPv6Assigned []string `json:"-"`
+	// IPv6Prefixes are the prefixes delegated to this (upstream) interface
+	// (netifd's ipv6-prefix), IPv6Assigned what netifd assigned to this
+	// (LAN) interface from one (ipv6-prefix-assignment), as prefix/len; the
+	// multi-capture reconciler counts the assigned ones as local. At most
+	// MaxIPv6Prefixes each (feature observe.ipv6_prefixes).
+	IPv6Prefixes []IPv6Prefix `json:"ipv6Prefixes"`
+	IPv6Assigned []string     `json:"ipv6Assigned"`
 }
 
-// MaxInterfaces caps the interfaces part.
-const MaxInterfaces = 256
+// IPv6Prefix is a delegated prefix with its lifetimes as Unix times (null
+// = infinite). The lifetimes are not part of the fingerprint: netifd
+// reports them as seconds left, so they wobble by a second between reads.
+type IPv6Prefix struct {
+	Prefix         string `json:"prefix"`
+	PreferredUntil *int64 `json:"preferredUntil"`
+	ValidUntil     *int64 `json:"validUntil"`
+}
+
+// Caps of the interfaces part.
+const (
+	MaxInterfaces   = 256
+	MaxIPv6Prefixes = 16
+)
 
 // ParseInterfaceDump reads `ubus call network.interface dump`. The loopback
 // interface is left out.
 func ParseInterfaceDump(data []byte) ([]Interface, bool) {
+	return ParseInterfaceDumpAt(data, time.Now())
+}
+
+// ParseInterfaceDumpAt is ParseInterfaceDump with the clock that turns the
+// prefixes' remaining lifetimes into Unix times.
+func ParseInterfaceDumpAt(data []byte, now time.Time) ([]Interface, bool) {
 	var doc struct {
 		Interface []struct {
 			Interface string `json:"interface"`
@@ -75,6 +95,12 @@ func ParseInterfaceDump(data []byte) ([]Interface, bool) {
 				Address string `json:"address"`
 				Mask    int    `json:"mask"`
 			} `json:"ipv6-prefix-assignment"`
+			Prefix []struct {
+				Address   string `json:"address"`
+				Mask      int    `json:"mask"`
+				Preferred *int64 `json:"preferred"`
+				Valid     *int64 `json:"valid"`
+			} `json:"ipv6-prefix"`
 			DNS    []string `json:"dns-server"`
 			Errors []struct {
 				Code string `json:"code"`
@@ -90,7 +116,8 @@ func ParseInterfaceDump(data []byte) ([]Interface, bool) {
 		if name == "" || name == "loopback" || it.Proto == "none" && it.L3Device == "lo" {
 			continue
 		}
-		i := Interface{Network: name, Proto: cleanName(it.Proto), Up: it.Up, IPv4: []string{}, IPv6: []string{}, DNSServers: []string{}}
+		i := Interface{Network: name, Proto: cleanName(it.Proto), Up: it.Up, IPv4: []string{}, IPv6: []string{}, DNSServers: []string{},
+			IPv6Prefixes: []IPv6Prefix{}, IPv6Assigned: []string{}}
 		i.Device = cleanName(it.L3Device)
 		if i.Device == "" {
 			i.Device = cleanName(it.Device)
@@ -109,9 +136,16 @@ func ParseInterfaceDump(data []byte) ([]Interface, bool) {
 			}
 		}
 		for _, a := range it.Assign {
-			if p, ok := prefixString(a.Address, a.Mask, true); ok && len(i.IPv6Assigned) < 32 {
+			if p, ok := prefixString(a.Address, a.Mask, true); ok && len(i.IPv6Assigned) < MaxIPv6Prefixes {
 				i.IPv6Assigned = append(i.IPv6Assigned, p)
 			}
+		}
+		for _, a := range it.Prefix {
+			p, ok := prefixString(a.Address, a.Mask, true)
+			if !ok || len(i.IPv6Prefixes) >= MaxIPv6Prefixes {
+				continue
+			}
+			i.IPv6Prefixes = append(i.IPv6Prefixes, IPv6Prefix{Prefix: p, PreferredUntil: until(now, a.Preferred), ValidUntil: until(now, a.Valid)})
 		}
 		for _, r := range it.Route {
 			if r.Mask != 0 {
@@ -150,6 +184,16 @@ func ParseInterfaceDump(data []byte) ([]Interface, bool) {
 	}
 	sort.Slice(out, func(a, b int) bool { return out[a].Network < out[b].Network })
 	return capList(out, MaxInterfaces), true
+}
+
+// until turns netifd's seconds left into a Unix time; nil (infinite) when
+// netifd reports none.
+func until(now time.Time, left *int64) *int64 {
+	if left == nil || *left < 0 || *left >= 0xffffffff {
+		return nil
+	}
+	v := now.Unix() + *left
+	return &v
 }
 
 func prefixString(addr string, mask int, v6 bool) (string, bool) {
@@ -241,7 +285,7 @@ func (r *InterfaceReader) Read() ([]Interface, bool) {
 	}
 	r.at = now
 	if out, err := r.Env.run("ubus", "call", "network.interface", "dump"); err == nil {
-		if list, ok := ParseInterfaceDump(out); ok {
+		if list, ok := ParseInterfaceDumpAt(out, now); ok {
 			r.last, r.ok = list, true
 		}
 	}
@@ -262,7 +306,7 @@ func (e *Env) Interfaces() ([]Interface, bool) {
 	if err != nil {
 		return nil, false
 	}
-	return ParseInterfaceDump(out)
+	return ParseInterfaceDumpAt(out, e.now())
 }
 
 // UCI runs `uci -q show <pkg>` and parses it; ok is false when uci failed.

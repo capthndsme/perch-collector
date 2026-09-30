@@ -18,6 +18,7 @@ import (
 	"github.com/capthndsme/perch-collector/internal/config"
 	"github.com/capthndsme/perch-collector/internal/controller"
 	"github.com/capthndsme/perch-collector/internal/gatewayops"
+	"github.com/capthndsme/perch-collector/internal/gwconfig"
 	"github.com/capthndsme/perch-collector/internal/observe"
 	"github.com/capthndsme/perch-collector/internal/portal"
 )
@@ -28,8 +29,29 @@ type gatewayFeatures struct {
 	observer  *observe.Observer
 	conntrack *gatewayops.Flusher
 	backup    *gatewayops.Backuper
+	// upnp and ddns are the runtime actions gateway.upnp.delete and
+	// gateway.ddns.update (on OpenWrt; the config plane gates them).
+	upnp *gatewayops.UPnP
+	ddns *gatewayops.DDNS
 	// portal is the guest portal (main_portal.go), nil when off.
 	portal *portal.Engine
+}
+
+// planeFeatures are the features outside the config plane that
+// gateway.capabilities announces (gateway-sync protocol 4): the runtime
+// actions this daemon serves and the interfaces part's IPv6 prefixes.
+func (gw gatewayFeatures) planeFeatures() []string {
+	var out []string
+	if gw.upnp != nil {
+		out = append(out, gwconfig.FeatureUPnPDelete)
+	}
+	if gw.ddns != nil {
+		out = append(out, gwconfig.FeatureDDNSUpdate)
+	}
+	if gw.observer != nil && gw.observer.Interfaces != nil {
+		out = append(out, gwconfig.FeatureIPv6Prefixes)
+	}
+	return out
 }
 
 // buildGatewayFeatures resolves observe, dhcp_leases, conntrack_flush and
@@ -70,6 +92,12 @@ func buildGatewayFeatures(cfg config.Config, onOpenWrt bool) gatewayFeatures {
 			gw.conntrack = f
 			log.Printf("conntrack: the controller may flush a device's connections (net.conntrack_flush)")
 		}
+	}
+	if onOpenWrt {
+		// Served only with the config plane (the websocket transport), and
+		// only with config_access write: no switch of their own.
+		gw.upnp = &gatewayops.UPnP{}
+		gw.ddns = &gatewayops.DDNS{}
 	}
 	if observeOn && cfg.GatewayBackup != config.GatewayBackupOff {
 		if gatewayops.SysupgradeAvailable() {
@@ -116,9 +144,9 @@ const observeUsage = `usage: perch-collector observe [part...]
 
 Prints the observation the collector sends its controller (the observe
 section of a push) as JSON, and exits: every part, or the named ones
-(dhcp, neighbors, interfaces, upnp, mwan3, resolver, system). Read-only; no
-configuration, no capture, no listener; the resolver part resolves no
-controller name.
+(dhcp, neighbors, interfaces, upnp, mwan3, resolver, system, wireguard,
+ddns). Read-only; no configuration, no capture, no listener; the resolver
+part resolves no controller name.
 `
 
 func observeCommand(args []string, stdout, stderr io.Writer, env *observe.Env) int {

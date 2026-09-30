@@ -1,0 +1,7 @@
+ 100301       : Registered IP '203.0.113.9' detected
+ 100302 ERROR : IP update not accepted by DDNS Provider
+ 100302  WARN : PID '4242' exit WITH ERROR '1' at 2026-10-01 10:03
+ 100900  note : PID '4242' started at 2026-10-01 10:09
+ 100901       : Update needed - L: '203.0.113.10' <> R: '203.0.113.9'
+ 100901  info : Update successful - IP '203.0.113.10' send
+ 100902       : Waiting 600 seconds (Check Interval)

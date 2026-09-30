@@ -17,7 +17,9 @@ import (
 	"time"
 
 	"github.com/capthndsme/perch-collector/internal/config"
+	"github.com/capthndsme/perch-collector/internal/gatewayops"
 	"github.com/capthndsme/perch-collector/internal/gwconfig"
+	"github.com/capthndsme/perch-collector/internal/observe"
 )
 
 func TestGatewayConfigCommand(t *testing.T) {
@@ -161,5 +163,22 @@ func TestPairCommand(t *testing.T) {
 	}
 	if code, _, errOut := run("reject"); code != 1 || !strings.Contains(errOut, "no pairing") {
 		t.Fatalf("%d %q", code, errOut)
+	}
+}
+
+// gateway.capabilities announces the runtime actions and the IPv6 prefixes
+// only when this daemon serves them (gateway-sync protocol 4).
+func TestPlaneFeatures(t *testing.T) {
+	if f := (gatewayFeatures{}).planeFeatures(); len(f) != 0 {
+		t.Fatalf("nothing built: %v", f)
+	}
+	gw := gatewayFeatures{upnp: &gatewayops.UPnP{}, ddns: &gatewayops.DDNS{},
+		observer: observe.NewObserver(&observe.Env{Root: t.TempDir()}, map[observe.Part]bool{observe.PartInterfaces: true}, "")}
+	if f := strings.Join(gw.planeFeatures(), " "); f != "upnp.delete ddns.update observe.ipv6_prefixes" {
+		t.Fatalf("%s", f)
+	}
+	gw.observer = observe.NewObserver(&observe.Env{Root: t.TempDir()}, map[observe.Part]bool{observe.PartSystem: true}, "")
+	if f := strings.Join(gw.planeFeatures(), " "); f != "upnp.delete ddns.update" {
+		t.Fatalf("without the interfaces part: %s", f)
 	}
 }

@@ -11,13 +11,15 @@ import (
 
 // UPnP is the upnp part: miniupnpd's state and its port mappings (the
 // lease file). Enabled is UCI `upnpd.config.enabled`; Running is the
-// process. A router without miniupnpd reports installed false and no
-// mappings.
+// process; SecureMode is UCI `secure_mode` (on when unset, like the init
+// script: a client may only map ports to itself). A router without
+// miniupnpd reports installed false and no mappings.
 type UPnP struct {
-	Installed bool          `json:"installed"`
-	Enabled   bool          `json:"enabled"`
-	Running   bool          `json:"running"`
-	Mappings  []UPnPMapping `json:"mappings"`
+	Installed  bool          `json:"installed"`
+	Enabled    bool          `json:"enabled"`
+	Running    bool          `json:"running"`
+	SecureMode bool          `json:"secureMode"`
+	Mappings   []UPnPMapping `json:"mappings"`
 }
 
 // UPnPMapping is one port mapping a LAN client opened. Expires is a Unix
@@ -112,11 +114,12 @@ func validUTF8Tail(s string) bool {
 type UPnPReader struct {
 	Env *Env
 
-	mu        sync.Mutex
-	uciStamp  string
-	enabled   bool
-	leaseFile string
-	installed bool
+	mu         sync.Mutex
+	uciStamp   string
+	enabled    bool
+	secureMode bool
+	leaseFile  string
+	installed  bool
 }
 
 // Read returns the part.
@@ -125,7 +128,7 @@ func (r *UPnPReader) Read() *UPnP {
 	defer r.mu.Unlock()
 	if st := r.Env.stamp("/etc/config/upnpd"); st != r.uciStamp {
 		r.uciStamp = st
-		r.enabled, r.leaseFile = false, DefaultUPnPLeaseFile
+		r.enabled, r.secureMode, r.leaseFile = false, true, DefaultUPnPLeaseFile
 		if st != "-" {
 			if secs, ok := r.Env.uciShow("upnpd"); ok {
 				for _, s := range secs {
@@ -133,6 +136,7 @@ func (r *UPnPReader) Read() *UPnP {
 						continue
 					}
 					r.enabled = s.Bool("enabled", false)
+					r.secureMode = s.Bool("secure_mode", true)
 					if f := s.First("upnp_lease_file"); f != "" {
 						r.leaseFile = f
 					}
@@ -144,6 +148,7 @@ func (r *UPnPReader) Read() *UPnP {
 	u := &UPnP{Mappings: []UPnPMapping{}}
 	u.Installed = r.Env.exists("/usr/sbin/miniupnpd") || r.Env.exists("/etc/init.d/miniupnpd")
 	u.Enabled = u.Installed && r.enabled
+	u.SecureMode = u.Installed && r.secureMode
 	u.Running = r.Env.processRunning("miniupnpd")
 	if data, err := r.Env.read(r.leaseFile); err == nil {
 		u.Mappings = capList(ParseUPnPLeases(data), MaxUPnPMappings)
