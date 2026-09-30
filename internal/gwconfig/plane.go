@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -124,6 +125,26 @@ type Options struct {
 	Run ubus.Runner
 	// LookupHost resolves the controller's name; nil = the default resolver.
 	LookupHost func(ctx context.Context, host string) ([]string, error)
+	// Features are more features the daemon serves outside the plane
+	// (runtime RPCs, observation parts), announced with the plane's own in
+	// gateway.capabilities.
+	Features []string
+	// CheckDial connects a reach check's TCP fallback (device "" = by the
+	// routing table); nil = net.Dialer bound to the device (tests).
+	CheckDial func(ctx context.Context, network, addr, device string) error
+	// CheckResolve resolves a resolve check's name; nil = the pure Go
+	// resolver over /etc/resolv.conf (tests).
+	CheckResolve func(ctx context.Context, network, host string) ([]net.IP, error)
+}
+
+// RedactExtra are secret option names beyond the kit's: a mobile WAN's SIM
+// PIN and PUK (gateway-sync protocol 5), which its suffix rules miss.
+var RedactExtra = []string{"pincode", "pukcode"}
+
+// NewRedactor is the plane's redactor: fingerprints keyed by the api_key,
+// the kit's secret names plus RedactExtra. The boot guard uses it too.
+func NewRedactor(apiKey string) uci.Redactor {
+	return uci.Redactor{Key: []byte(apiKey), Extra: append([]string(nil), RedactExtra...)}
 }
 
 // Plane serves the config plane. Safe for concurrent use.
@@ -149,6 +170,13 @@ type Plane struct {
 
 	sibMu sync.Mutex
 	sib   siblingCache
+
+	// chk holds the pending apply's running checks (checks.go); lock order
+	// ap.mu before chk.mu.
+	chk checksHolder
+
+	// genValue makes {"$generate"} values (generate.go); tests replace it.
+	genValue keyGen
 }
 
 // New prepares a plane.
@@ -168,12 +196,13 @@ func New(o Options) *Plane {
 		o.Access = AccessNone
 	}
 	p := &Plane{
-		o:      o,
-		files:  uci.Files{Dir: rooted(o.Root, uci.DefaultDir)},
-		ubus:   o.Ubus,
-		redact: uci.Redactor{Key: []byte(o.APIKey)},
-		poke:   make(chan struct{}, 1),
-		clock:  o.Clock,
+		o:        o,
+		files:    uci.Files{Dir: rooted(o.Root, uci.DefaultDir)},
+		ubus:     o.Ubus,
+		redact:   NewRedactor(o.APIKey),
+		poke:     make(chan struct{}, 1),
+		clock:    o.Clock,
+		genValue: generateValue,
 	}
 	p.ap.state = StateIdle
 	if o.Backend != nil {
@@ -302,6 +331,8 @@ type ApplyState struct {
 	Kind      string `json:"kind,omitempty"`
 	Deadline  string `json:"deadline,omitempty"`
 	Protected bool   `json:"protected,omitempty"`
+	// Checks: the pending apply's checks (gateway-sync protocol 1.5).
+	Checks *ChecksView `json:"checks,omitempty"`
 }
 
 // Hello is the gatewayConfig block of collector.hello (plan 1 section 4).

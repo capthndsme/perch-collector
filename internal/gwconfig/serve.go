@@ -16,6 +16,8 @@ const (
 	MethodPackageInstall = "gateway.package.install"
 	// NotifyResult is the agent's gateway.config.result notification.
 	NotifyResult = "gateway.config.result"
+	// NotifyChecks is the agent's gateway.config.checks notification.
+	NotifyChecks = "gateway.config.checks"
 )
 
 // WriteMethods are the methods ServeWrite handles.
@@ -25,17 +27,8 @@ var WriteMethods = []string{MethodApply, MethodConfirm, MethodRollback, MethodAc
 // write gate (access write; verified TLS, or the router's opt-in and a
 // valid signature), decode the params and run the method.
 func (p *Plane) ServeWrite(ctx context.Context, method string, raw json.RawMessage, sess SessionRef) (any, error) {
-	// Refusals by the router's settings come before any signature check.
-	if p.o.Access != AccessWrite || (!p.o.TransportOK && !p.o.AllowInsecure) {
-		if err := p.writeGate(false); err != nil {
-			return nil, err
-		}
-	}
-	params, signed, err := p.Unwrap(method, raw, sess)
+	params, err := p.GateWrite(method, raw, sess)
 	if err != nil {
-		return nil, err
-	}
-	if err := p.RequireWrite(signed); err != nil {
 		return nil, err
 	}
 	decode := func(v any) error {
@@ -55,11 +48,11 @@ func (p *Plane) ServeWrite(ctx context.Context, method string, raw json.RawMessa
 		}
 		return p.Apply(ctx, &a, sess, p.o.TransportOK)
 	case MethodConfirm:
-		var a ApplyIDParams
+		var a ConfirmParams
 		if err := decode(&a); err != nil {
 			return nil, err
 		}
-		return p.Confirm(a.ApplyID, sess)
+		return p.ConfirmWith(a.ApplyID, a.OverrideChecks, sess)
 	case MethodRollback:
 		var a ApplyIDParams
 		if err := decode(&a); err != nil {
@@ -80,4 +73,28 @@ func (p *Plane) ServeWrite(ctx context.Context, method string, raw json.RawMessa
 		return p.InstallPackages(ctx, &a, sess)
 	}
 	return nil, fmt.Errorf("gwconfig: %s is not a write method", method)
+}
+
+// GateWrite is the write gate of a method with write power: the config
+// plane's write methods, and the managed gateway's runtime actions that are
+// not config (gateway.upnp.delete, gateway.ddns.update: gateway-sync
+// protocol 6.2). Access write; then verified TLS, or the router's
+// config_allow_insecure opt-in plus a request signed for this method and
+// session. It returns the params (a signed envelope's payload). Refusals
+// are *AccessError / *PlaneError, like the write methods'.
+func (p *Plane) GateWrite(method string, raw json.RawMessage, sess SessionRef) (json.RawMessage, error) {
+	// Refusals by the router's settings come before any signature check.
+	if p.o.Access != AccessWrite || (!p.o.TransportOK && !p.o.AllowInsecure) {
+		if err := p.writeGate(false); err != nil {
+			return nil, err
+		}
+	}
+	params, signed, err := p.Unwrap(method, raw, sess)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.RequireWrite(signed); err != nil {
+		return nil, err
+	}
+	return params, nil
 }

@@ -151,6 +151,11 @@ type Options struct {
 	Portal *portal.Engine
 	// Backup serves gateway.backup; nil = not offered.
 	Backup *gatewayops.Backuper
+	// UPnP and DDNS serve gateway.upnp.delete and gateway.ddns.update
+	// (gateway.go), write-gated by the config plane; nil, or no Config =
+	// not offered.
+	UPnP *gatewayops.UPnP
+	DDNS *gatewayops.DDNS
 	// QoS is the traffic shaper (qos.* and the push's `qos`); nil = off.
 	QoS QoS
 	// QoSAllowed gates qos.* (the managed-mode gate of the config plane);

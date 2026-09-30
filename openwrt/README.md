@@ -209,10 +209,18 @@ has no such problem, which is why it is the default.
 For an x86_64 OpenWrt LXC or VM, the release's `perch-collector-linux-amd64-ndpi`
 (or `scripts/build-static.sh` in the collector repo, using only Docker) is a
 static binary with libpcap and nDPI 5.0 inside, for any OpenWrt version. Copy it
-to `/usr/bin/perch-collector` together with the three files under `files/`
-(init → `/etc/init.d/perch-collector`, config → `/etc/config/perch-collector`,
+to `/usr/bin/perch-collector` together with the four files under `files/`
+(init → `/etc/init.d/perch-collector`, guard init →
+`/etc/init.d/perch-collector-guard`, config → `/etc/config/perch-collector`,
 defaults → `/etc/uci-defaults/90-perch-collector`), run the defaults script
-once, set `server_url`, then `enable` and `start`.
+once, set `server_url`, then `enable` and `start`. With `config_access
+'write'`, add the config plane's overdue watchdog to root's crontab too (the
+package's postinst does this):
+
+```sh
+echo '* * * * * /usr/bin/perch-collector config-guard --overdue 2>&1 | logger -t perch-collector-guard' >> /etc/crontabs/root
+/etc/init.d/cron enable; /etc/init.d/cron restart
+```
 
 Coming from the earlier `metricslite-collector` package: copy `api_key`,
 `instance_id`, `server_url` and any capture options from
@@ -264,7 +272,7 @@ copy the six `files/perch-qos.*` to those paths.
 ## Files
 
 ```
-openwrt/perch-collector/Makefile                 feed package (golang-package.mk, nDPI 5.0 built and linked statically)
+openwrt/perch-collector/Makefile                 feed package (golang-package.mk, nDPI 5.0 built and linked statically; postinst adds the overdue watchdog's crontab line, prerm removes it)
 openwrt/sdk.env                                  OpenWrt releases and architectures the release builds
 scripts/openwrt-package.sh                       one package for one architecture and release, with the SDK's Docker image
 openwrt/perch-collector/files/*.init             procd init: UCI → environment, key generation, interface triggers

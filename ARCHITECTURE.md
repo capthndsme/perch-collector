@@ -131,7 +131,7 @@ perch-collector/
 │   ├── gwconfig/              # Config plane: access, read + redaction, capabilities, storage, change watch
 │   ├── gateway/
 │   │   └── gateway.go         # Router health from /proc (conntrack, TCP, load, memory, WAN) + ports from /sys
-│   ├── observe/               # Observation channel: dhcp, neighbors, interfaces, upnp, mwan3, resolver, system
+│   ├── observe/               # Observation channel: dhcp, neighbors, interfaces, upnp, mwan3, resolver, system, wireguard, ddns
 │   │   ├── observer.go        # parts, Section, per-part read intervals and fingerprints, Pacer
 │   │   └── env.go, uci.go     # fixture-tree root, uci/ubus runner, `uci show` parser
 │   ├── portal/                # Guest portal: nftables enforcement, grant store, tick, guest pages
@@ -236,10 +236,12 @@ CONFIG.md, "Several networks"):
 Reconciler.Reconcile()  (start, every capture_rescan s, SIGHUP; the package
                          sends SIGHUP on every netifd interface event)
   Discoverer: ubus call network.interface dump (fresh) + uci show firewall
-              (masq zones, 30 s cache)
+              (masq zones) + uci show network (gateway, device), 30 s cache
   MakePlan (pure):
-    LAN side  = not loopback, no default route, not in a masq zone, not a
-                configured wan_interface
+    LAN side  = the side rule (side.go, gateway-sync protocol 8): not
+                loopback, not a tunnel proto (vpn), not an uplink (WAN proto,
+                default route, masq zone, UCI gateway, wan_interfaces), not a
+                static/none alias on an uplink's device or @uplink
     auto      = LAN side, up, L3 device, proto static|none, carries no VLAN
                 devices; minus capture_exclude; plus named networks/devices
     refused   = WANs, bridge ports (/sys/.../master), devices whose captured
@@ -282,8 +284,10 @@ shared, so DHCP leases and neighbours are tagged with their network.
 push (every metricsIntervalSeconds)
   for each part the Observer has:
     Observer.Read(part)          cached per part (neighbours 60 s, interfaces 5 s,
-                                 upnp/mwan3 15 s, resolver/system 60 s; dhcp watches
-                                 its files); value + fingerprint without uptimes
+                                 upnp/mwan3 15 s, wireguard 30 s, resolver/system/ddns
+                                 60 s; dhcp watches its files); value + fingerprint
+                                 without what ticks (uptimes, prefix lifetimes,
+                                 WireGuard byte counters)
     Pacer.Due(session, part, fp) first in the session, changed (neighbours: ≥ 60 s
                                  after the last send), or refresh due
   → observe {full?, <due parts>} in collector.push; Pacer.Sent after the write
@@ -292,16 +296,28 @@ GET /api/v1/summary              Observer.Section(all, cached) for polled collec
 ```
 
 Readers only read: files under `Env.Root` (a fixture tree in tests), the
-`uci` and `ubus` CLIs through `Env.Run`, rtnetlink for the neighbour table,
-`/proc` for processes and sockets. A part that cannot be read is absent from
-the push (the controller keeps its data), never an empty report.
+`uci`, `ubus` and `wg` CLIs through `Env.Run`, rtnetlink for the neighbour
+table, `/proc` for processes and sockets. A part that cannot be read is absent
+from the push (the controller keeps its data), never an empty report. The
+`wireguard` reader (`observe/wireguard.go`) runs only `wg show all <field>` for
+the eight fields that print no secret, never `dump`, `private-key` or
+`preshared-keys`, and keeps nothing of `uci show network` but interface names
+and peer descriptions; the `ddns` reader (`observe/ddns.go`) keeps a
+service's name, `enabled` and host name, never its credentials, and turns
+ddns-scripts' uptime stamps into Unix times with a boot time it keeps while
+the clock agrees within 2 s (no flicker).
 
 The runtime actions sit beside it in `internal/gatewayops`: the conntrack
 flush dumps the table over ctnetlink, deletes matching flows by their
 original tuple and skips the collector's own controller connection (its
 endpoints come from the controller dialer); the backup runs `sysupgrade -b`
 into a temporary directory and rewrites the tar.gz with secrets redacted.
-Both run one at a time. Capabilities, dispatch and the observe section live
+Both run one at a time. `upnp.go` deletes miniupnpd mappings by content from
+its lease file (atomic rewrite, one restart) and `ddns.go` starts one
+ddns-scripts section (`start-stop-daemon -b`); those two are
+write-gated by the config plane (`gwconfig.Plane.GateWrite`: access write,
+verified TLS or a signed request) and announced in `gateway.capabilities`
+`features` (CONFIG.md, "UPnP mapping delete and DDNS update now"). Capabilities, dispatch and the observe section live
 in `internal/controller/gateway.go`, apart from `controller.go`, so the
 config plane's hello fields and requests stay separate.
 
@@ -505,13 +521,18 @@ the kit (`perch-agentkit/openwrt/uci`, `openwrt/pkgdb`, `openwrt/ubus`).
 **Router opt-in.** `config_access` none (default) / read / write, and the
 `managed_config` allowlist; see CONFIG.md. The effective allowlist adds the
 configs of installed sibling packages (`internal/gwconfig/siblings.go`,
-gateway README 7.7: `sqm-scripts` → `sqm`, `perch-qos` → `perch-qos`) unless
-`managed_config_auto '0'` or `list managed_config_exclude` opts them out; the
-package database is cached 30 s and re-read after a package job. Readable =
-the effective allowlist minus the denylist (`perch-collector perch-apd rpcd
-uhttpd dropbear luci`) plus the ledger `perch-managed`; nothing with access
-`none`. Writable = the effective allowlist minus the denylist (never the
-ledger, which only the agent writes); anything else is `config_not_allowed`.
+gateway README 7.7 and gateway-sync protocol 5: `sqm-scripts` → `sqm`,
+`perch-qos` → `perch-qos`, `miniupnpd-nftables|miniupnpd|miniupnpd-iptables`
+→ `upnpd`, `ddns-scripts` → `ddns`, and read-only `mwan3` → `mwan3`, `pbr` →
+`pbr`) unless `managed_config_auto '0'` or `list managed_config_exclude` opts
+them out; the package database is cached 30 s and re-read after a package
+job. Readable = the effective allowlist minus the denylist (`perch-collector
+perch-apd rpcd uhttpd dropbear luci`) plus the ledger `perch-managed`;
+nothing with access `none`. Writable = `managed_config` plus the installed
+siblings that are not read-only, minus the denylist (never the ledger, which
+only the agent writes); a read-only sibling is writable only when listed in
+`managed_config` (its `reason` is then `listed`); anything else is
+`config_not_allowed`.
 
 **Hello** (`collector.hello` params): the capability `gateway_config` joins
 `capabilities` whenever the plane exists, and
@@ -554,7 +575,7 @@ kick); `[]` or no block clears the controller's part.
 
 | Method | Params | Result |
 |---|---|---|
-| `gateway.capabilities` | `{}` | `{protocol, access, accessConfigured, allowedConfigs[], transportOk, allowInsecure, confirmMaxSeconds, siblingConfigs:[{config, package, installed, allowed, reason:"listed"\|"installed"\|"not_installed"\|"opted_out"}], backend:"ubus"\|"uci-cli"\|null, openwrt:{release,revision,target,arch,board}\|null, firewall:"fw4"\|"fw3"\|null, packageManager:"opkg"\|"apk"\|null, packages:{name:version}, configs[], hashes{}, uncommitted[], luciPending, apply:{state,…}, capture:{networks:[{network,device}]}, flash:{path,totalBytes,freeBytes}\|null, storage:{path,exists,mountPoint,fsType,device,medium,onRoot,readOnly,totalBytes,freeBytes}\|null, signing?:{…}, management:{network,device,controllerAddress,reportedAt}\|null, installAllowlist[]}` |
+| `gateway.capabilities` | `{}` | `{protocol, access, accessConfigured, allowedConfigs[], writableConfigs[], features[], transportOk, allowInsecure, confirmMaxSeconds, siblingConfigs:[{config, package, installed, allowed, readOnly, reason:"listed"\|"installed"\|"installed_read_only"\|"not_installed"\|"opted_out"}], backend:"ubus"\|"uci-cli"\|null, openwrt:{release,revision,target,arch,board}\|null, firewall:"fw4"\|"fw3"\|null, packageManager:"opkg"\|"apk"\|null, packages:{name:version}, configs[], hashes{}, uncommitted[], luciPending, apply:{state,…}, capture:{networks:[{network,device}]}, flash:{path,totalBytes,freeBytes}\|null, storage:{path,exists,mountPoint,fsType,device,medium,onRoot,readOnly,totalBytes,freeBytes}\|null, signing?:{…}, management:{network,device,controllerAddress,reportedAt}\|null, installAllowlist[]}` |
 | `gateway.config.read` | `{configs?:[…]}` (default: every readable config) | `{readAt, configs:[{name, hash, missing?, sections:[{name, type, anonymous, index, options:{k: string\|string[]}, secrets?:{k:"hmac:…"}, hash}]}], ledger:[{perchId, config, section, domain}], uncommitted[], luciPending}` |
 
 - `packages` lists only the kit's watch list (`firewall4 firewall dnsmasq
@@ -683,7 +704,7 @@ Result:
 ledger changed: adopting named sections, ledger edits; no window, nothing
 reloaded); `noop` (nothing to change; `hashes` = all readable); `dry_run`
 (`changes:[{config,section,op,option?,value?}]`: rpcd's `uci changes`, secret
-values `<redacted>`; nothing kept). A retried apply with the pending job's id
+values `<redacted>`, generated ones `<generated>`; nothing kept). A retried apply with the pending job's id
 returns the pending reply again. The window is `confirmTimeoutSeconds`
 (default 90) clamped to 30..`config_confirm_max`; a job that touches the
 management path gets at least 300 s (`protected: true`, whether the controller
@@ -718,10 +739,88 @@ A failure before the first commit leaves nothing (`apply_failed`, or `busy`
 with `reason` `uncommitted`/`luci_pending` when rpcd refuses). A failure after
 it rolls back (`apply_failed` with `data.rolledBack: true` and `data.result`).
 
-**`gateway.config.confirm`** `{applyId}` → `{"state":"confirmed","applyId":…,"hashes":{…}}`.
+**`gateway.config.confirm`** `{applyId, overrideChecks?}` → `{"state":"confirmed","applyId":…,"hashes":{…}}`.
 Refused on the session the apply came on (`not_reconnected`): the proof is the
 fresh connection. Repeating it is fine. `deadline_passed` (+ `data.result` when
-known) once the window closed, `unknown_apply` otherwise.
+known) once the window closed, `unknown_apply` otherwise. While the apply's
+checks (below) have not passed: `checks_pending` / `checks_failed` with
+`data.checks`, unless `overrideChecks: true` (the admin's "Keep anyway"; the
+checks end as `overridden`).
+
+**Apply checks** (`internal/gwconfig/checks.go`, gateway-sync protocol 1;
+feature `config.checks.v1`). `gateway.config.apply` may carry
+
+```json
+"checks":{"v":1,"timeoutSeconds":60,"items":[
+  {"id":"up:wan","kind":"interface_up","network":"wan","family":4,"mustPass":true},
+  {"id":"route4","kind":"default_route","family":4},
+  {"id":"reach4","kind":"reach","targets":["$gateway:wan","1.1.1.1"],"tcpPort":443},
+  {"id":"dns","kind":"resolve","name":"example.com"},
+  {"id":"wg","kind":"wg_handshake","network":"wg0","withinSeconds":180}]}
+```
+
+(`v` 1, else `bad_params`; `timeoutSeconds` 10–900, clamped to the window minus
+20 s; 1–16 items, `id` `^[a-z0-9:_.-]{1,32}$`; `family` 4 or 6). How each kind
+passes: `interface_up` = `ubus call network.interface.<net> status` up with an
+address of the family (IPv6: an address or a delegated prefix);
+`default_route` = `ip [-6] route show default` (through the network's L3
+device when named); `reach` = one target answers `ping -c 1 -W 2 [-I dev]`, or
+a TCP connect to `tcpPort` (3 s, `SO_BINDTODEVICE` with `via`);
+`$gateway:<net>` is that interface's next hop, dropped when unknown;
+`resolve` = the pure Go resolver over `/etc/resolv.conf` (the router's
+dnsmasq) asked an A query for a **fresh name**, `perch-<12 hex>.<name>.`,
+new on every probe: no cache on the way (dnsmasq, a forwarder behind it, the
+ISP's modem) can hold it, so an address or "no such name" (NXDOMAIN/NODATA)
+proves the upstream answered and passes, while a timeout, SERVFAIL or REFUSED
+fails. Asking `<name>` itself could pass from dnsmasq's cache with the WAN
+down. A name under a domain the router answers itself (`localhost`, `local`,
+`home.arpa`, dnsmasq's `domain`/`local`) fails without a query; `name` may be
+at most 234 characters (room for the label); `wg_handshake` =
+`wg show <dev> latest-handshakes` (never `dump`). Sequence: every item runs
+once before anything is staged (the **baseline**: a failure is `skipped`,
+unless `mustPass`); the reply carries `"checks":{"state":"pending",
+"timeoutSeconds":60,"agentAdded"?:true,"baseline":[{id,state,detail,at}]}`;
+after the reload settled the budget starts and every item that has not passed
+runs every 3 s. All passed or skipped → `passed` (`allSkipped: true` when
+every optional item was skipped). Budget over with an item not passed →
+`failed`, and the apply is rolled back at once: result reason
+`checks_failed`, `detail` = the failed items, `checks` = their state. The
+hello's `apply` gains `checks` `{state, startedAt, timeoutSeconds,
+allSkipped?, items:[{id, state, detail, at}]}`; the notification
+**`gateway.config.checks`** `{applyId, state, startedAt, elapsedSeconds,
+allSkipped?, items}` goes out on every change of the set's state and at most
+every 5 s while running. `pending.json` keeps `checks` and `checkState`
+(written when an item passes and when the set's state changes): a restarted
+daemon re-runs what has not passed with what is left of the budget, fails at
+once when it is gone, and restores at once when the checks had failed; an
+older binary ignores both fields. **The agent's own net**: a job without
+`checks` that changes a `network` interface with a WAN proto or holding a
+default route now (or such an interface's device section) gets
+`{"v":1,"timeoutSeconds":90,"items":[{"id":"agent:route4","kind":"default_route","family":4}]}`
+(`agentAdded`); only an explicit `"checks":{"v":1,"items":[]}` turns it off.
+
+**Generated values** (`internal/gwconfig/generate.go`, gateway-sync protocol
+2; feature `config.generate.wg_key`). A `put` option may be
+`{"$generate":"wg_private_key"}`: the router makes a WireGuard private key
+(`wgtypes.GeneratePrivateKey` of `golang.zx2c4.com/wireguard/wgctrl`, only
+that package: `crypto/rand` and `x/crypto/curve25519`, clamped like `wg
+genkey`) while it simulates the job, so the commit is verified against the
+exact value. Only on option `private_key` of a `network` `interface` whose
+resulting `proto` is `wireguard` (a kept `proto` counts); anything else is
+`bad_params` with `data.reason` `generate_not_allowed`. The reply (and a
+retried apply's) carries the public half only:
+`"generated":[{"config":"network","section":"wg0","option":"private_key","publicKey":"<44 chars>"}]`;
+`pending.json` keeps the same list. Nothing secret crosses the wire, so it
+works on a signed plain-HTTP session. A dry run stages and shows
+`<generated>` and makes no key; the value is never logged; reads show its
+fingerprint like any secret; a rollback drops it with the snapshot.
+
+**`gateway.capabilities` `features`** lists what the build implements:
+`config.checks.v1`, `config.generate.wg_key`; `config.plain_public_key` when
+the kit's redactor keeps `public_key` in clear; the daemon's own (runtime
+RPCs and observation, below). The `service` op decodes but is refused
+`unsupported` (mwan3/pbr stay read-only, owner decision). The redactor also
+hides `pincode` and `pukcode` (a mobile WAN's SIM codes).
 
 **`gateway.config.rollback`** `{applyId}` → `{"state":"rolling_back","applyId":…}`
 (the restore runs after the reply; its outcome comes as a result, reason
@@ -741,7 +840,8 @@ known) once the window closed, `unknown_apply` otherwise.
 
 `outcome` `rolled_back` | `failed` (the restore itself failed; the snapshot is
 kept as `rollback/failed-<id>`). `reason` `confirm_timeout` | `admin` |
-`reboot` | `commit_failed` | `reload_failed` | `install_failed`. `discarded`
+`reboot` | `commit_failed` | `reload_failed` | `install_failed` |
+`checks_failed` (a job with checks also carries `checks`). `discarded`
 = sections edited on the router during the window, which the rollback undid
 (`added` / `changed` / `removed` relative to what the job had committed;
 redacted like a read). `packages` = what a package job's rollback removed.
@@ -755,12 +855,44 @@ new process may confirm. The boot guard `perch-collector config-guard`
 the reboot case before any service reads the configs, without reloading;
 the daemon then reports the outcome.
 
+**The overdue watchdog** (`internal/gwconfig/overdue.go`, gateway-sync
+protocol 7) covers a daemon that is gone while the router runs on (procd gave
+up on a crash loop, `service perch-collector stop`): nothing else would
+restore its apply until the next reboot. The daemon holds an exclusive
+`flock` on `/var/run/perch-collector/plane.lock` for its whole life
+(`HoldPlaneLock`, taken in `main_config.go` before `Plane.Start` reads
+`pending.json`, waiting while a guard holds it). `perch-collector
+config-guard --overdue`, from cron every minute:
+
+```
+no pending.json                          -> exit 0, silent
+lock held (the daemon runs, or is SIGSTOPped: flock belongs to the open file)
+                                         -> exit 0, silent
+take the lock, read pending.json again
+now <= deadline + 60 s                   -> exit 0, silent (the daemon's timer comes first)
+restore (the boot guard's restore: discarded edits, package removal, files)
+reason: no marker -> reboot, not committed -> commit_failed, else confirm_timeout;
+detail "restored by the overdue watchdog"
+config.change per restored config in apply order (ubus service event, the
+daemon's reload), result -> results.json, snapshot dropped, lock released
+```
+
+The next daemon start finds no `pending.json` and reports the result in its
+hello. The boot guard takes the same lock (a running daemon's apply is never
+its business). The package's postinst adds the crontab line once (`* * * * *
+/usr/bin/perch-collector config-guard --overdue 2>&1 | logger -t
+perch-collector-guard`), enables and restarts cron; removing the package
+removes it. A hand-installed router adds it by hand (openwrt/README.md).
+
 **Management path.** `ip route get <server_url host>` gives the device;
 netifd's interface on it is the network. Protected sections: that interface,
 any interface on its device (or its parent bridge), the `device` section that
 is the device or its parent bridge, the `bridge-vlan`s on that bridge, the
 firewall zones listing the network, and firewall `defaults` (the controller's
-`apply_plan.ts` rules). Reported as `management` in the hello and capabilities.
+`apply_plan.ts` rules), plus WireGuard peers (`wireguard_<iface>` sections) of
+an interface on the path and any peer with `route_allowed_ips` whose
+`allowed_ips` cover the controller's address. Reported as `management` in the
+hello and capabilities.
 
 **Ledger** `/etc/config/perch-managed`: `config synced '<perchId>'` with
 `option config`, `option section`, `option domain`; written whole by the agent
@@ -868,7 +1000,8 @@ as the package manager does (a minute or more with `update`).
 `apply_pending`|`luci_pending`|`uncommitted`), `foreign_staged` (+`config`,
 `changes`), `not_owned`, `name_taken`, `no_section`, `unknown_apply`,
 `deadline_passed`, `not_reconnected`, `apply_failed`, `package_not_allowed`,
-`no_package_manager`, `insufficient_flash`, `install_failed`, `invalid_config`. Bad params:
+`no_package_manager`, `insufficient_flash`, `install_failed`, `invalid_config`,
+`checks_pending`, `checks_failed` (+`checks`), `unsupported`. Bad params:
 -32602 with `data.error` `bad_params`.
 
 ## Traffic shaping (`internal/qos`, gateway plan 3 WP-E)

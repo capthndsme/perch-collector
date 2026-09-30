@@ -1,0 +1,16 @@
+ddns.global=ddns
+ddns.global.ddns_dateformat='%F %R'
+ddns.global.ddns_loglines='250'
+ddns.global.upd_privateip='0'
+ddns.home=service
+ddns.home.enabled='1'
+ddns.home.service_name='cloudflare.com-v4'
+ddns.home.lookup_host='home.example.com'
+ddns.home.domain='home@example.com'
+ddns.home.username='Bearer'
+ddns.home.password='fixture-ddns-password-0001'
+ddns.home.interface='wan'
+ddns.home.ip_source='network'
+ddns.home.ip_network='wan'
+ddns.home.use_https='1'
+ddns.home.cacert='IGNORE'

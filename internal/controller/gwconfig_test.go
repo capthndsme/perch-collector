@@ -103,6 +103,12 @@ func TestConfigPlaneOnTheSocket(t *testing.T) {
 		if ow, _ := json.Marshal(cp["openwrt"]); string(ow) != `{"release":"24.10.8"}` {
 			t.Errorf("openwrt %s", ow)
 		}
+		if f, _ := json.Marshal(cp["features"]); !strings.Contains(string(f), `"config.checks.v1"`) {
+			t.Errorf("features %s", f)
+		}
+		if w, _ := json.Marshal(cp["writableConfigs"]); string(w) != `["dhcp","network","wireless"]` {
+			t.Errorf("writableConfigs %s", w)
+		}
 
 		read := request(t, ctx, c, frames, 2, "gateway.config.read", `{"configs":["wireless","network"]}`)
 		if read.Error != nil || strings.Contains(string(read.Result), "correct horse") || !strings.Contains(string(read.Result), `"secrets":{"key":"hmac:`) ||

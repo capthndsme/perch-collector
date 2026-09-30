@@ -248,7 +248,8 @@ dhcp_leases_refresh: 600
 observe: auto
 
 # Only these parts of the observation (neighbors, interfaces, upnp, mwan3,
-# resolver, system). Empty = all. dhcp has its own switch, dhcp_leases.
+# resolver, system, wireguard, ddns). Empty = all. dhcp has its own switch,
+# dhcp_leases.
 # Default: []
 observe_parts: []
 
@@ -739,9 +740,15 @@ networks come and go:
 
 - **What `auto` selects.** Every netifd interface (`ubus call
   network.interface dump`) that is up, has an L3 device, proto `static` or
-  `none`, and is not a WAN. A WAN holds a default route, sits in a firewall
-  zone with `masq` on, or is listed in `wan_interfaces`; a WAN is never
-  captured, even when named. Several networks on one device (an alias) share
+  `none`, and is on the LAN side. The side rule (`internal/netcap/side.go`,
+  the same as the controller's): a tunnel proto (`wireguard`, `openvpn`,
+  `gre`…) is a VPN; an uplink has a WAN proto (`dhcp`, `dhcpv6`, `pppoe`,
+  `qmi`, `6in4`…), a default route, a firewall zone with `masq` on, a UCI
+  `gateway`, or is listed in `wan_interfaces`; a `static`/`none` network on
+  an uplink's device (or on `@<uplink>`) is a WAN alias, such as a modem's
+  management subnet on the WAN port; everything else is LAN. WANs and VPNs
+  are never captured, even when named, never listed as networks, and their
+  prefixes are never local. Several networks on one device (an alias) share
   one engine, attributed to the first by name that has an IPv4 address.
 - **Never twice.** A bridge port is never captured (its bridge is the L3
   device), nor a device whose VLAN devices are captured as well (it would
@@ -909,8 +916,11 @@ part is config.
  "dhcp":{…},
  "neighbors":[{"ip":"192.168.1.21","mac":"02:00:00:00:10:21","device":"br-lan","network":"lan","reachable":true,"state":"reachable"}],
  "interfaces":[{"network":"wan","device":"wan0","proto":"dhcp","up":true,"ipv4":["203.0.113.10/24"],"ipv6":[],
-                "uptimeSeconds":86400,"defaultRoute":true,"metric":1,"gateway4":"203.0.113.1","dnsServers":["203.0.113.53"]}],
- "upnp":{"installed":true,"enabled":true,"running":true,
+                "uptimeSeconds":86400,"defaultRoute":true,"metric":1,"gateway4":"203.0.113.1","dnsServers":["203.0.113.53"],
+                "ipv6Prefixes":[],"ipv6Assigned":[]},
+               {"network":"wan6","device":"wan0",…,"ipv6Prefixes":[{"prefix":"2001:db8:10::/56","preferredUntil":1790003600,"validUntil":1790007200}],"ipv6Assigned":[]},
+               {"network":"lan","device":"br-lan",…,"ipv6Prefixes":[],"ipv6Assigned":["2001:db8:10:1::/64"]}],
+ "upnp":{"installed":true,"enabled":true,"running":true,"secureMode":true,
          "mappings":[{"proto":"TCP","extPort":51413,"intIp":"192.168.1.21","intPort":51413,"expires":0,"description":"app"}]},
  "mwan3":{"serviceEnabled":false,"running":false,"configInterfaces":[{"name":"wan","enabled":true,"family":"ipv4","trackIps":["203.0.113.1"]}],
           "interfaces":[{"name":"wan","status":"notracking","enabled":true,"running":false,"up":true,"uptimeSeconds":86400,"tracking":"none","trackIps":[]}],
@@ -918,17 +928,25 @@ part is config.
  "resolver":{"dnsmasqPort":54,"port53Process":"AdGuardHome","port53Processes":["AdGuardHome"],
              "controllerHost":{"name":"perch.example.com","addresses":["192.168.1.10"]}},
  "system":{"hostname":"gateway","release":"OpenWrt 24.10.2 r28739-…","version":"24.10.2","board":"x86/64",
-           "model":"…","kernel":"6.6.100","uptimeSeconds":123456,"flowOffloading":false,"flowOffloadingHw":false}}
+           "model":"…","kernel":"6.6.100","uptimeSeconds":123456,"flowOffloading":false,"flowOffloadingHw":false},
+ "wireguard":{"interfaces":[{"name":"wg0","network":"wg0","publicKey":"<base64>","listenPort":51820,
+   "peers":[{"publicKey":"<base64>","description":"phone","endpoint":"203.0.113.7:40211",
+             "allowedIps":["192.168.9.2/32"],"latestHandshake":1790000000,"rxBytes":123456,"txBytes":654321,"keepalive":25}]}]},
+ "ddns":{"installed":true,"serviceEnabled":true,"providers":["cloudflare.com-v4","duckdns.org","no-ip.com"],
+   "services":[{"name":"home","enabled":true,"domain":"home.example.com","registeredIp":"203.0.113.10",
+                "lastUpdate":1790000000,"running":true,"lastError":null}]}}
 ```
 
 | Part | Source | Read at most every |
 |---|---|---|
 | `neighbors` | rtnetlink neighbour dump (IPv4 + IPv6), `/proc/net/arp` without netlink; unicast Ethernet MACs, no link-local, no failed/incomplete entries; `reachable` = REACHABLE, DELAY or PROBE | 60 s |
-| `interfaces` | `ubus call network.interface dump` (loopback left out); `defaultRoute`, `metric` and `gateway4/6` from its routes, so two WANs with metric failover read right without mwan3 | 5 s |
-| `upnp` | `upnpd.config` (`enabled`, `upnp_lease_file`, default `/var/run/miniupnpd.leases`), the `miniupnpd` process, the lease file (`PROTO:EXT:IP:INT:EXPIRES:DESC`, 1.x without `EXPIRES`); `installed:false` without miniupnpd | 15 s |
+| `interfaces` | `ubus call network.interface dump` (loopback left out); `defaultRoute`, `metric` and `gateway4/6` from its routes, so two WANs with metric failover read right without mwan3; `ipv6Prefixes` = delegated prefixes on an upstream (netifd's `ipv6-prefix`, lifetimes as Unix times, `null` = infinite), `ipv6Assigned` = what netifd assigned to a LAN (`ipv6-prefix-assignment`), 16 each (feature `observe.ipv6_prefixes` in `gateway.capabilities`) | 5 s |
+| `upnp` | `upnpd.config` (`enabled`, `secure_mode` (on when unset, like the init script), `upnp_lease_file`, default `/var/run/miniupnpd.leases`), the `miniupnpd` process, the lease file (`PROTO:EXT:IP:INT:EXPIRES:DESC`, 1.x without `EXPIRES`); `installed:false` without miniupnpd | 15 s |
 | `mwan3` | UCI (`configInterfaces`, `configPolicies`), `/etc/rc.d` (`serviceEnabled`), the `mwan3track` process (`running`), `ubus call mwan3 status` (`interfaces` with mwan3's own `status` and `tracking`, `policies`); absent when mwan3 is not installed. A service started by hand but disabled at boot reads `serviceEnabled:false, running:true` | 15 s |
 | `resolver` | dnsmasq's `port` (UCI, 53 when unset), the process holding a port-53 listener (`/proc/net/{udp,tcp}{,6}` + `/proc/*/fd`), the controller's host name resolved through the router's resolver | 60 s |
 | `system` | `ubus call system board` / `info`, `firewall.@defaults[0].flow_offloading(_hw)` | 60 s |
+| `wireguard` | `wg show all` `public-key`, `listen-port`, `peers`, `endpoints`, `allowed-ips`, `latest-handshakes`, `transfer`, `persistent-keepalive` (each prints no secret; `dump`, `private-key` and `preshared-keys` are never run); `network` (the UCI interface of the device) and the peers' `description` from `uci show network`, nothing else of those sections. `latestHandshake` 0 = never; `endpoint`, `keepalive` (off), `description`, an interface's `publicKey` and `network` may be `null`. 16 interfaces, 256 peers, 64 allowed IPs each. Absent without the `wg` tool. `rxBytes`/`txBytes` do not count as a change (they tick) | 30 s |
+| `ddns` | Only with ddns-scripts installed (else absent). `uci -X show ddns` (the `service` sections' names, `enabled`, `lookup_host` else `domain`; never the password), `serviceEnabled` = `/etc/rc.d/S??ddns`; per service in the run directory (`ddns.global.ddns_rundir`, default `/var/run/ddns`): `registeredIp` from `<name>.ip`, `lastUpdate` from `<name>.update` (ddns-scripts writes the uptime of the update: turned into a Unix time with the boot time; `null` = none since boot), `running` = the pid of `<name>.pid` runs the updater; `lastError` = the last line with ` ERROR ` or `WARN` of `<ddns_logdir>/<name>.log` (default `/var/log/ddns`) after its last successful update, ≤ 200 bytes; `providers` = the file names of `/usr/share/ddns/{default,custom}/*.json` (≤ 512) | 60 s |
 
 - **When a part is sent.** Each part has its own fingerprint (SHA-256 of its
   JSON, uptimes left out): it rides in the first push of a session, when its
@@ -941,9 +959,12 @@ part is config.
   request answers the same object read fresh, with `collectedAt`; unknown
   part names are ignored, `full` is true when every part was asked for.
 - **Caps.** 4096 neighbours, 256 interfaces, 512 UPnP mappings (descriptions
-  ≤ 128 bytes), 64 mwan3 interfaces and policies; names ≤ 253 bytes.
+  ≤ 128 bytes), 64 mwan3 interfaces and policies, 16 WireGuard interfaces of
+  256 peers, 64 DDNS services; names ≤ 253 bytes.
 - The hello's `capabilities` list `observe.<part>` for every part on, and
-  `gateway.observe`.
+  `gateway.observe`. The interfaces' IPv6 prefixes and the runtime actions
+  below are announced in `gateway.capabilities` `features` instead (the
+  controller keeps 32 hello capabilities).
 
 `perch-collector observe [part...]` prints the section once and exits,
 without reading this configuration (the resolver part then resolves no
@@ -971,6 +992,39 @@ every NATed flow has the WAN address as its reply destination),
 `flushed:false` with a `reason`. Implemented in pure Go (ti-mo/conntrack over
 netlink); no conntrack-tools. `perch-collector conntrack-flush [-dry-run]
 [-proto P] IP...` does the same by hand.
+
+### UPnP mapping delete and DDNS update now (`gateway.upnp.delete`, `gateway.ddns.update`)
+
+Runtime actions of the managed gateway (gateway-sync protocol 6.2), not
+config writes: served on OpenWrt with the config plane, behind its write gate
+(`config_access 'write'`; verified TLS, or `config_allow_insecure '1'` and a
+request signed like the write methods), and announced as `upnp.delete` and
+`ddns.update` in `gateway.capabilities` `features`.
+
+```json
+gateway.upnp.delete {"mappings":[{"proto":"TCP","extPort":51413}]}  → {"deleted":1,"notFound":0,"restarted":true}
+gateway.ddns.update {"service":"home"}                              → {"started":true}
+```
+
+- `gateway.upnp.delete` (1–64 mappings) drops the lines of the lease file
+  (`upnpd.config.upnp_lease_file`, default `/var/run/miniupnpd.leases`) whose
+  protocol and external port match (by content, never by line number), keeps
+  every other line byte for byte, writes the file atomically and runs
+  `/etc/init.d/miniupnpd restart` once; miniupnpd installs what the file holds
+  when it starts (LuCI's way). Nothing found: nothing written or restarted.
+  Refusals (-32000, `data.error`): `upnp_not_installed`, `upnp_failed`
+  (`data.detail`).
+- `gateway.ddns.update` starts the service's updater the way ddns-scripts
+  starts one section: `start-stop-daemon -S -b -x
+  /usr/lib/ddns/dynamic_dns_updater.sh -- -v 0 -S <service> -- start` (the
+  same flags on 23.05 and 24.10). The updater replaces the section's running
+  one, checks at once and sends an update when the registered address differs
+  (or the force interval passed); the outcome shows in the `ddns` part.
+  Refusals: `ddns_not_installed`, `ddns_unknown_service` (no `service` section
+  of that name), `ddns_failed` (`data.detail`).
+- Bad params are -32602 with `data.error` `bad_params`; the write gate's
+  refusals are the config plane's (`not_managed`, `insecure_transport`,
+  `signature_required`, …).
 
 ### Backups (`gateway.backup`)
 
@@ -1312,12 +1366,17 @@ fresh connection or restored on its own. The protocol is in ARCHITECTURE.md
   this switch or re-point `server_url`), `perch-apd`, `rpcd`, `uhttpd`,
   `dropbear` and `luci` are never readable. **Sibling packages** (gateway
   README 7.7): an installed `sqm-scripts` brings `sqm` onto the allowlist by
-  itself, an installed `perch-qos` brings `perch-qos` (the package database
-  is looked at every 30 s and right after an install job). Opt out with
+  itself, an installed `perch-qos` brings `perch-qos`, `miniupnpd-nftables`
+  (or `miniupnpd`, `miniupnpd-iptables`) brings `upnpd`, `ddns-scripts`
+  brings `ddns` (the package database is looked at every 30 s and right
+  after an install job). `mwan3` and `pbr` join **read-only**: the
+  controller reads and watches them but can never write them, unless you
+  list them yourself (`list managed_config 'mwan3'`). Opt out with
   `option managed_config_auto '0'` (only `managed_config` then), or keep one
   off with `list managed_config_exclude 'sqm'`. The denylist always wins.
-  `gateway.capabilities` reports the effective list (`allowedConfigs`) and
-  each sibling's state (`siblingConfigs`). The controller has its own
+  `gateway.capabilities` reports the readable list (`allowedConfigs`), the
+  writable one (`writableConfigs`) and each sibling's state
+  (`siblingConfigs`). The controller has its own
   switch per gateway (mode `off`/`observe`/`managed`); the effective access
   is the lower of the two.
 - **Where.** On OpenWrt (`/etc/openwrt_release`) with `transport websocket`.
@@ -1420,6 +1479,25 @@ for its confirm at a reboot, it restores the configs from the snapshot (the
 package runs it at boot, before the network; on a router without the
 package, add it to an early init script by hand). The daemon does the same at
 start when no guard ran.
+
+`perch-collector config-guard --overdue` is the watchdog for a daemon that is
+gone while the router keeps running: when no perch-collector holds the plane
+lock (`/var/run/perch-collector/plane.lock`, held by the daemon for its whole
+life, also while it is stopped with SIGSTOP) and a change's confirm deadline
+is more than 60 s behind, it restores the change the same way, has procd
+reload what it restored and leaves the outcome for the controller ("restored
+by the overdue watchdog"). It prints nothing when there is nothing to do. The
+package adds it to root's crontab (every minute) and starts cron; removing the
+package takes the line out again. By hand:
+
+```sh
+echo '* * * * * /usr/bin/perch-collector config-guard --overdue 2>&1 | logger -t perch-collector-guard' >> /etc/crontabs/root
+/etc/init.d/cron enable; /etc/init.d/cron restart
+```
+
+BusyBox crond logs every job it starts at OpenWrt's default
+`system.@system[0].cronloglevel` (5): one syslog line a minute. `cronloglevel
+'9'` silences that (the router's own setting; Perch never changes it).
 
 ### Paid Hotspot checkouts and click-through
 

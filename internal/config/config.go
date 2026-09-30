@@ -234,7 +234,7 @@ type Config struct {
 	Observe string `yaml:"observe"`
 
 	// ObserveParts limits Observe to these parts (neighbors, interfaces,
-	// upnp, mwan3, resolver, system). Empty = all of them.
+	// upnp, mwan3, resolver, system, wireguard, ddns). Empty = all of them.
 	ObserveParts []string `yaml:"observe_parts"`
 
 	// ObserveRefresh is how often, in seconds, an unchanged part is sent
@@ -319,7 +319,7 @@ const (
 )
 
 // ObservePartNames are the parts ObserveParts may name.
-var ObservePartNames = []string{"neighbors", "interfaces", "upnp", "mwan3", "resolver", "system"}
+var ObservePartNames = []string{"neighbors", "interfaces", "upnp", "mwan3", "resolver", "system", "wireguard", "ddns"}
 
 // DefaultControllerAddressCache is where the last good controller address
 // is kept when controller_address_cache is not set.

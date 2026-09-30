@@ -99,6 +99,26 @@ define Package/perch-collector/conffiles
 /etc/config/perch-managed
 endef
 
+# The overdue watchdog of the config plane (gateway-sync protocol 7): cron
+# runs `perch-collector config-guard --overdue` every minute, which restores
+# a config apply whose confirm deadline passed while no daemon owned it (the
+# daemon holds a lock for its life). Added once, also into an image being
+# built; crond starts only with a crontab, so it is enabled and (re)started.
+define Package/perch-collector/postinst
+#!/bin/sh
+root="$${IPKG_INSTROOT}"
+tab="$$root/etc/crontabs/root"
+if ! grep -qs 'perch-collector config-guard --overdue' "$$tab"; then
+	mkdir -p "$$root/etc/crontabs"
+	echo '* * * * * /usr/bin/perch-collector config-guard --overdue 2>&1 | logger -t perch-collector-guard' >> "$$tab"
+	if [ -z "$$root" ]; then
+		/etc/init.d/cron enable 2>/dev/null
+		/etc/init.d/cron restart 2>/dev/null
+	fi
+fi
+exit 0
+endef
+
 # Removing the package (not upgrading it) drops the pairing key of signed
 # config writes (/etc/perch-collector/pairing.json): a reinstall pairs
 # again. A factory reset loses it with the overlay; sysupgrade keeps it
@@ -157,8 +177,9 @@ define Package/perch-collector/install
 endef
 
 # Removing the package takes the guest portal's enforcement down with it
-# (its nftables tables, the fw4 drop-in and the dnsmasq walled-garden file);
-# an upgrade keeps it, so guests stay online while the new binary starts.
+# (its nftables tables, the fw4 drop-in and the dnsmasq walled-garden file)
+# and the watchdog's crontab line; an upgrade keeps both, so guests stay
+# online while the new binary starts.
 define Package/perch-collector/prerm
 #!/bin/sh
 [ -n "$${IPKG_INSTROOT}" ] && exit 0
@@ -174,6 +195,10 @@ for f in /tmp/dnsmasq*.d/perch-portal-walled-garden.conf; do
 	[ -f "$$f" ] && rm -f "$$f" && restart_dnsmasq=1
 done
 [ -n "$$restart_dnsmasq" ] && /etc/init.d/dnsmasq restart 2>/dev/null
+if grep -qs 'perch-collector config-guard --overdue' /etc/crontabs/root; then
+	sed -i '/perch-collector config-guard --overdue/d' /etc/crontabs/root
+	/etc/init.d/cron restart 2>/dev/null
+fi
 exit 0
 endef
 

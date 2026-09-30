@@ -1,0 +1,1 @@
+wg0	gOfqWazSdGuRFxc3JgwDl1c5VSDMWqgEn37hewWbwhY=	192.168.9.2/32

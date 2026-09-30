@@ -288,13 +288,13 @@ func TestUPnPReader(t *testing.T) {
 	process(t, root, "700", "miniupnpd")
 	env := &Env{Root: root, Run: cannedRun(map[string][]byte{"uci -q show upnpd": fixture(t, "uci-show-upnpd.txt")})}
 	u := (&UPnPReader{Env: env}).Read()
-	if !u.Installed || !u.Enabled || !u.Running || len(u.Mappings) != 3 {
+	if !u.Installed || !u.Enabled || !u.Running || !u.SecureMode || len(u.Mappings) != 3 {
 		t.Errorf("upnp = %+v", u)
 	}
 	// Not installed: reported as such, with no mappings.
 	u = (&UPnPReader{Env: &Env{Root: t.TempDir(), Run: cannedRun(nil)}}).Read()
 	b, _ := json.Marshal(u)
-	if string(b) != `{"installed":false,"enabled":false,"running":false,"mappings":[]}` {
+	if string(b) != `{"installed":false,"enabled":false,"running":false,"secureMode":false,"mappings":[]}` {
 		t.Errorf("no miniupnpd = %s", b)
 	}
 }

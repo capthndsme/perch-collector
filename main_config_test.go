@@ -17,7 +17,9 @@ import (
 	"time"
 
 	"github.com/capthndsme/perch-collector/internal/config"
+	"github.com/capthndsme/perch-collector/internal/gatewayops"
 	"github.com/capthndsme/perch-collector/internal/gwconfig"
+	"github.com/capthndsme/perch-collector/internal/observe"
 )
 
 func TestGatewayConfigCommand(t *testing.T) {
@@ -161,5 +163,61 @@ func TestPairCommand(t *testing.T) {
 	}
 	if code, _, errOut := run("reject"); code != 1 || !strings.Contains(errOut, "no pairing") {
 		t.Fatalf("%d %q", code, errOut)
+	}
+}
+
+// gateway.capabilities announces the runtime actions and the IPv6 prefixes
+// only when this daemon serves them (gateway-sync protocol 4).
+func TestPlaneFeatures(t *testing.T) {
+	if f := (gatewayFeatures{}).planeFeatures(); len(f) != 0 {
+		t.Fatalf("nothing built: %v", f)
+	}
+	gw := gatewayFeatures{upnp: &gatewayops.UPnP{}, ddns: &gatewayops.DDNS{},
+		observer: observe.NewObserver(&observe.Env{Root: t.TempDir()}, map[observe.Part]bool{observe.PartInterfaces: true}, "")}
+	if f := strings.Join(gw.planeFeatures(), " "); f != "upnp.delete ddns.update observe.ipv6_prefixes" {
+		t.Fatalf("%s", f)
+	}
+	gw.observer = observe.NewObserver(&observe.Env{Root: t.TempDir()}, map[observe.Part]bool{observe.PartSystem: true}, "")
+	if f := strings.Join(gw.planeFeatures(), " "); f != "upnp.delete ddns.update" {
+		t.Fatalf("without the interfaces part: %s", f)
+	}
+}
+
+// config-guard --overdue is quiet when there is nothing to do (cron runs it
+// every minute) and says what it restored.
+func TestConfigGuardOverdue(t *testing.T) {
+	root := t.TempDir()
+	var out, errb bytes.Buffer
+	if code := configGuardCommand([]string{"--overdue"}, &out, &errb, root, func() string { return "" }); code != 0 || out.Len() != 0 || errb.Len() != 0 {
+		t.Fatalf("%d %q %q", code, out.String(), errb.String())
+	}
+	os.MkdirAll(filepath.Join(root, "etc/config"), 0o755)
+	os.WriteFile(filepath.Join(root, "etc/config/dhcp"), []byte("\nconfig dhcp 'lan'\n\toption start '999'\n"), 0o644)
+	snap := filepath.Join(root, "etc/perch-collector/rollback/a1/before")
+	os.MkdirAll(snap, 0o755)
+	orig := []byte("\nconfig dhcp 'lan'\n\toption start '100'\n")
+	os.WriteFile(filepath.Join(snap, "dhcp"), orig, 0o644)
+	os.MkdirAll(filepath.Join(root, "var/run/perch-collector"), 0o700)
+	os.WriteFile(filepath.Join(root, "var/run/perch-collector/apply-a1"), []byte("a1\n"), 0o600)
+	sum := sha256.Sum256(orig)
+	deadline := time.Now().Add(-61 * time.Second).UTC().Format(time.RFC3339)
+	rec := fmt.Sprintf(`{"applyId":"a1","kind":"apply","deadline":%q,"configs":["dhcp"],"hashesBefore":{"dhcp":"%x"},"committed":true}`, deadline, sum)
+	os.WriteFile(filepath.Join(root, "etc/perch-collector/rollback/pending.json"), []byte(rec), 0o600)
+	var reloaded []string
+	o := gwconfig.OverdueOptions{Root: root, Now: time.Now(), Reload: func(_ context.Context, c []string) error { reloaded = c; return nil }}
+	// A daemon holds the lock: nothing.
+	lock, err := gwconfig.TryPlaneLock(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := overdueCommand(&out, &errb, o); code != 0 || out.Len() != 0 {
+		t.Fatalf("%d %q", code, out.String())
+	}
+	lock.Release()
+	if code := overdueCommand(&out, &errb, o); code != 0 || !strings.Contains(out.String(), "apply a1 was overdue and no daemon owned it: rolled_back (confirm_timeout); restored by the overdue watchdog") {
+		t.Fatalf("%d %q %q", code, out.String(), errb.String())
+	}
+	if data, _ := os.ReadFile(filepath.Join(root, "etc/config/dhcp")); !bytes.Equal(data, orig) || len(reloaded) != 1 || reloaded[0] != "dhcp" {
+		t.Fatalf("%s %v", data, reloaded)
 	}
 }

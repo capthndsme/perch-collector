@@ -9,7 +9,11 @@ package controller
 //     refresh (observe.Pacer);
 //   - gateway.observe {parts?} answers the same section on demand, fresh;
 //   - net.conntrack_flush {ips, proto?, dryRun?} deletes conntrack entries;
-//   - gateway.backup {redact?} returns a sysupgrade -b archive.
+//   - gateway.backup {redact?} returns a sysupgrade -b archive;
+//   - gateway.upnp.delete {mappings} and gateway.ddns.update {service}
+//     (gateway-sync protocol 6.2): runtime actions behind the config
+//     plane's write gate (access write; verified TLS or a signed request),
+//     announced in gateway.capabilities features, not in the hello.
 //
 // Kept apart from controller.go so the config plane's additions to the
 // hello and the dispatcher stay separate.
@@ -32,6 +36,12 @@ const (
 	CapabilityGatewayObserve = "gateway.observe"
 	CapabilityConntrackFlush = "net.conntrack_flush"
 	CapabilityGatewayBackup  = "gateway.backup"
+)
+
+// Runtime actions of the managed gateway (gateway-sync protocol 6.2).
+const (
+	MethodUPnPDelete = "gateway.upnp.delete"
+	MethodDDNSUpdate = "gateway.ddns.update"
 )
 
 // JSON-RPC error codes (section 3.2's convention: -32000 with data.error).
@@ -111,6 +121,12 @@ func (c *Client) registerGateway() {
 	}
 	if c.o.Backup != nil {
 		c.dispatcher.Register("gateway.backup", c.handleBackup)
+	}
+	if c.o.Config != nil && c.o.UPnP != nil {
+		c.dispatcher.Register(MethodUPnPDelete, c.handleUPnPDelete)
+	}
+	if c.o.Config != nil && c.o.DDNS != nil {
+		c.dispatcher.Register(MethodDDNSUpdate, c.handleDDNSUpdate)
 	}
 }
 
@@ -253,4 +269,72 @@ func (c *Client) connectionEndpoints() (netip.AddrPort, netip.AddrPort) {
 		return netip.AddrPort{}, netip.AddrPort{}
 	}
 	return c.dialer.endpoints()
+}
+
+// gatedParams passes a runtime action through the config plane's write gate
+// and decodes its params (a signed envelope's payload) into v.
+func (c *Client) gatedParams(ctx context.Context, method string, raw json.RawMessage, v any) error {
+	params, err := c.o.Config.GateWrite(method, raw, c.sessionRef(ctx))
+	if err != nil {
+		return configRPCError(err)
+	}
+	if len(params) == 0 || string(params) == "null" {
+		e := rpc.Errorf(codeInvalidParams, "params are required")
+		e.Data = map[string]any{"error": "bad_params"}
+		return e
+	}
+	if err := json.Unmarshal(params, v); err != nil {
+		e := rpc.Errorf(codeInvalidParams, "bad params: %v", err)
+		e.Data = map[string]any{"error": "bad_params"}
+		return e
+	}
+	return nil
+}
+
+// actionError maps a gatewayops refusal: bad params -32602, the action's
+// refusals and failures -32000 with data.error (and data.detail).
+func actionError(err error) error {
+	var pe *gatewayops.ParamError
+	if errors.As(err, &pe) {
+		e := rpc.Errorf(codeInvalidParams, "%s", pe.Message)
+		e.Data = map[string]any{"error": pe.Code}
+		return e
+	}
+	var ae *gatewayops.ActionError
+	if errors.As(err, &ae) {
+		data := map[string]any{"error": ae.Code}
+		if ae.Detail != "" {
+			data["detail"] = ae.Detail
+		}
+		e := rpc.Errorf(codeFailed, "%s", ae.Message)
+		e.Data = data
+		return e
+	}
+	return rpc.Errorf(codeFailed, "%v", err)
+}
+
+func (c *Client) handleUPnPDelete(ctx context.Context, raw json.RawMessage) (any, error) {
+	var p gatewayops.UPnPDeleteParams
+	if err := c.gatedParams(ctx, MethodUPnPDelete, raw, &p); err != nil {
+		return nil, err
+	}
+	res, err := c.o.UPnP.Delete(ctx, p)
+	if err != nil {
+		return nil, actionError(err)
+	}
+	c.log.Info("upnp mappings deleted", "requested", len(p.Mappings), "deleted", res.Deleted, "restarted", res.Restarted)
+	return res, nil
+}
+
+func (c *Client) handleDDNSUpdate(ctx context.Context, raw json.RawMessage) (any, error) {
+	var p gatewayops.DDNSUpdateParams
+	if err := c.gatedParams(ctx, MethodDDNSUpdate, raw, &p); err != nil {
+		return nil, err
+	}
+	res, err := c.o.DDNS.Update(ctx, p)
+	if err != nil {
+		return nil, actionError(err)
+	}
+	c.log.Info("ddns update started", "service", p.Service)
+	return res, nil
 }

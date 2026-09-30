@@ -44,6 +44,10 @@ type Discovery struct {
 	// Masq are the networks in a firewall zone with masquerading on: the
 	// WAN side, even while it holds no default route.
 	Masq map[string]bool
+	// Gateway are the networks whose UCI section sets a gateway, and
+	// ConfDevice each network's UCI device (side.go); nil without UCI.
+	Gateway    map[string]bool
+	ConfDevice map[string]string
 }
 
 // SysNet answers what the plan needs from /sys/class/net.
@@ -95,18 +99,10 @@ type Plan struct {
 	GatewayMACs []net.HardwareAddr
 }
 
-// IsWAN reports whether the interface is on the WAN side: it holds a default
-// route, sits in a masquerading firewall zone, or is a configured WAN.
+// IsWAN reports whether the interface is on the WAN side by the side rule
+// (side.go): an uplink, or an alias on one.
 func IsWAN(i observe.Interface, d Discovery, sel Selection) bool {
-	if i.DefaultRoute || d.Masq[i.Network] {
-		return true
-	}
-	for _, w := range sel.WAN {
-		if w == i.Network || (i.Device != "" && w == i.Device) {
-			return true
-		}
-	}
-	return false
+	return SideOf(i, d, sel) == SideWAN
 }
 
 // autoProto are the protos auto selects: LAN side, the router's own address.
@@ -117,12 +113,10 @@ func autoProto(p string) bool { return p == "static" || p == "none" }
 // devices are captured as well (its frames would arrive twice, once tagged).
 func MakePlan(d Discovery, sel Selection, sys SysNet) Plan {
 	var p Plan
+	sides := Sides(d, sel)
 	byName := map[string]observe.Interface{}
 	for _, i := range d.Interfaces {
-		if i.Network == "loopback" || i.Device == "lo" {
-			continue
-		}
-		if IsWAN(i, d, sel) {
+		if sides[i.Network] != SideLAN {
 			continue
 		}
 		byName[i.Network] = i
@@ -213,8 +207,15 @@ func MakePlan(d Discovery, sel Selection, sys SysNet) Plan {
 			}
 			continue
 		}
-		if isWANName(want, d, sel) {
+		switch sideOfName(want, d, sel, sides) {
+		case SideWAN:
 			p.Skipped = append(p.Skipped, Skip{Network: want, Reason: "a WAN is never captured"})
+			continue
+		case SideVPN:
+			p.Skipped = append(p.Skipped, Skip{Network: want, Reason: "a VPN tunnel is never captured"})
+			continue
+		case SideLoopback:
+			p.Skipped = append(p.Skipped, Skip{Network: want, Reason: "loopback is never captured"})
 			continue
 		}
 		// Not a netifd network: a device name (a host without netifd, or a
@@ -284,18 +285,21 @@ func MakePlan(d Discovery, sel Selection, sys SysNet) Plan {
 	return p
 }
 
-func isWANName(name string, d Discovery, sel Selection) bool {
+// sideOfName is the side of a selected name that is no LAN network: the
+// side of a non-LAN interface by that network or device name, WAN for a
+// configured WAN, "" otherwise.
+func sideOfName(name string, d Discovery, sel Selection, sides map[string]Side) Side {
 	for _, i := range d.Interfaces {
-		if (i.Network == name || i.Device == name) && IsWAN(i, d, sel) {
-			return true
+		if s := sides[i.Network]; s != SideLAN && (i.Network == name || i.Device == name) {
+			return s
 		}
 	}
 	for _, w := range sel.WAN {
 		if w == name {
-			return true
+			return SideWAN
 		}
 	}
-	return false
+	return ""
 }
 
 // deviceOfNetwork finds a LAN network by its device name and returns the

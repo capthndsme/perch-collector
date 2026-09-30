@@ -11,20 +11,24 @@ import (
 	"github.com/capthndsme/perch-collector/internal/observe"
 )
 
-// Discoverer reads netifd's interfaces and the firewall's masquerading
-// zones. Interfaces are asked fresh on every Discover(true) and at most every
-// five seconds otherwise; the firewall is read at most every FirewallTTL.
+// Discoverer reads netifd's interfaces, the firewall's masquerading zones
+// and what the side rule needs of UCI network (side.go). Interfaces are
+// asked fresh on every Discover(true) and at most every five seconds
+// otherwise; the firewall and UCI network are read at most every
+// FirewallTTL.
 type Discoverer struct {
 	Env *observe.Env
 	// FirewallTTL between two `uci show firewall`; 0 = 30 s.
 	FirewallTTL time.Duration
 
-	mu     sync.Mutex
-	at     time.Time
-	last   Discovery
-	fwAt   time.Time
-	masq   map[string]bool
-	fwOnce bool
+	mu      sync.Mutex
+	at      time.Time
+	last    Discovery
+	fwAt    time.Time
+	masq    map[string]bool
+	gateway map[string]bool
+	confDev map[string]string
+	fwOnce  bool
 }
 
 // Discover returns the router's interfaces; fresh skips the five-second
@@ -46,10 +50,13 @@ func (d *Discoverer) Discover(fresh bool) Discovery {
 		if secs, ok := d.Env.UCI("firewall"); ok {
 			d.masq = MasqNetworks(secs)
 		}
+		if secs, ok := d.Env.UCI("network"); ok {
+			d.gateway, d.confDev = NetworkUCI(secs)
+		}
 	}
 	list, ok := d.Env.Interfaces()
 	d.at = now
-	d.last = Discovery{OK: ok, Netifd: ok, Interfaces: list, Masq: d.masq}
+	d.last = Discovery{OK: ok, Netifd: ok, Interfaces: list, Masq: d.masq, Gateway: d.gateway, ConfDevice: d.confDev}
 	if !ok && !d.hasUbus() {
 		// Not OpenWrt: nothing to discover, not a failure.
 		d.last.OK = true

@@ -153,9 +153,12 @@ func parentDevice(dev string) string {
 // management path: the path's interface, any interface on its device, the
 // device section that is the device or its parent bridge, the bridge-vlans
 // on that bridge, the firewall zone listing the network, and the firewall
-// defaults. The controller splits jobs by the same built-in rules
-// (apply_plan.ts); the agent's check is the safety net that grants the
-// longer window when a job carries them anyway.
+// defaults; and WireGuard peers (gateway-sync domains 4): every peer of an
+// interface on the path (a remote site dialling home over WireGuard), and
+// any peer whose routed allowed_ips cover the controller's address (it
+// would steal the path). The controller splits jobs by the same built-in
+// rules (apply_plan.ts); the agent's check is the safety net that grants
+// the longer window when a job carries them anyway.
 func protectedSections(configs map[string]*uci.Config, m *ManagementPath) map[string]map[string]bool {
 	out := map[string]map[string]bool{}
 	if m == nil || m.Device == "" {
@@ -194,6 +197,16 @@ func protectedSections(configs map[string]*uci.Config, m *ManagementPath) map[st
 				if str("device") == parent {
 					add("network", s.Name)
 				}
+			}
+		}
+		controller := net.ParseIP(m.ControllerAddress)
+		for _, s := range c.Sections {
+			iface, ok := strings.CutPrefix(s.Type, "wireguard_")
+			if !ok || iface == "" {
+				continue
+			}
+			if nets[iface] || peerRoutesCover(s, controller) {
+				add("network", s.Name)
 			}
 		}
 	}
@@ -240,4 +253,40 @@ func touchesProtected(sim *simulation, current map[string]*uci.Config, m *Manage
 		}
 	}
 	return false, ""
+}
+
+// peerRoutesCover reports whether a WireGuard peer section routes ip into
+// its tunnel: route_allowed_ips on and an allowed_ips prefix containing it.
+func peerRoutesCover(s *uci.Section, ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	if v, _ := s.Get("route_allowed_ips"); !uciTrue(v.Str()) {
+		return false
+	}
+	v, _ := s.Get("allowed_ips")
+	for _, item := range v.Items {
+		for _, w := range strings.Fields(item) {
+			if !strings.Contains(w, "/") {
+				if strings.Contains(w, ":") {
+					w += "/128"
+				} else {
+					w += "/32"
+				}
+			}
+			if _, n, err := net.ParseCIDR(w); err == nil && n.Contains(ip) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// uciTrue is UCI's boolean true.
+func uciTrue(v string) bool {
+	switch v {
+	case "1", "on", "true", "yes", "enabled":
+		return true
+	}
+	return false
 }

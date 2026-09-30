@@ -21,10 +21,13 @@ const (
 	PartMWAN3      Part = "mwan3"
 	PartResolver   Part = "resolver"
 	PartSystem     Part = "system"
+	// PartWireGuard and PartDDNS: gateway-sync protocol 6.1.
+	PartWireGuard Part = "wireguard"
+	PartDDNS      Part = "ddns"
 )
 
 // AllParts in wire order.
-var AllParts = []Part{PartDHCP, PartNeighbors, PartInterfaces, PartUPnP, PartMWAN3, PartResolver, PartSystem}
+var AllParts = []Part{PartDHCP, PartNeighbors, PartInterfaces, PartUPnP, PartMWAN3, PartResolver, PartSystem, PartWireGuard, PartDDNS}
 
 // ParsePart reads a part name; ok is false for an unknown one.
 func ParsePart(s string) (Part, bool) {
@@ -56,6 +59,8 @@ type Section struct {
 	MWAN3      *MWAN3       `json:"mwan3,omitempty"`
 	Resolver   *Resolver    `json:"resolver,omitempty"`
 	System     *System      `json:"system,omitempty"`
+	WireGuard  *WireGuard   `json:"wireguard,omitempty"`
+	DDNS       *DDNS        `json:"ddns,omitempty"`
 }
 
 // Set puts a part's value (as returned by Observer.Read) in the section.
@@ -79,13 +84,17 @@ func (s *Section) Set(p Part, v any) {
 		s.Resolver, _ = v.(*Resolver)
 	case PartSystem:
 		s.System, _ = v.(*System)
+	case PartWireGuard:
+		s.WireGuard, _ = v.(*WireGuard)
+	case PartDDNS:
+		s.DDNS, _ = v.(*DDNS)
 	}
 }
 
 // Empty reports whether no part is set.
 func (s *Section) Empty() bool {
 	return s.DHCP == nil && s.Neighbors == nil && s.Interfaces == nil && s.UPnP == nil && s.MWAN3 == nil &&
-		s.Resolver == nil && s.System == nil
+		s.Resolver == nil && s.System == nil && s.WireGuard == nil && s.DDNS == nil
 }
 
 // Item is one part's value and its fingerprint (hex SHA-256 of its JSON,
@@ -105,6 +114,8 @@ var defaultEvery = map[Part]time.Duration{
 	PartMWAN3:      15 * time.Second,
 	PartResolver:   60 * time.Second,
 	PartSystem:     60 * time.Second,
+	PartWireGuard:  30 * time.Second,
+	PartDDNS:       60 * time.Second,
 }
 
 // Observer reads every enabled part. A nil reader = the part is off.
@@ -116,6 +127,8 @@ type Observer struct {
 	MWAN3      *MWAN3Reader
 	Resolver   *ResolverReader
 	System     *SystemReader
+	WireGuard  *WireGuardReader
+	DDNS       *DDNSReader
 	// Every overrides the re-read interval per part (tests).
 	Every map[Part]time.Duration
 	// Now is the clock (tests); nil = time.Now.
@@ -158,6 +171,12 @@ func NewObserver(env *Env, parts map[Part]bool, controllerHost string) *Observer
 	if parts[PartSystem] {
 		o.System = &SystemReader{Env: env}
 	}
+	if parts[PartWireGuard] {
+		o.WireGuard = &WireGuardReader{Env: env}
+	}
+	if parts[PartDDNS] {
+		o.DDNS = &DDNSReader{Env: env}
+	}
 	return o
 }
 
@@ -191,6 +210,10 @@ func (o *Observer) has(p Part) bool {
 		return o.Resolver != nil
 	case PartSystem:
 		return o.System != nil
+	case PartWireGuard:
+		return o.WireGuard != nil
+	case PartDDNS:
+		return o.DDNS != nil
 	}
 	return false
 }
@@ -251,6 +274,10 @@ func (o *Observer) read(p Part) (Item, bool) {
 		stable := make([]Interface, len(l))
 		for i, it := range l {
 			it.UptimeSeconds = 0
+			it.IPv6Prefixes = append([]IPv6Prefix(nil), it.IPv6Prefixes...)
+			for j := range it.IPv6Prefixes {
+				it.IPv6Prefixes[j].PreferredUntil, it.IPv6Prefixes[j].ValidUntil = nil, nil
+			}
 			stable[i] = it
 		}
 		return Item{Value: l, FP: Fingerprint(stable)}, true
@@ -280,6 +307,18 @@ func (o *Observer) read(p Part) (Item, bool) {
 		stable := *s
 		stable.UptimeSeconds = 0
 		return Item{Value: s, FP: Fingerprint(stable)}, true
+	case PartWireGuard:
+		w := o.WireGuard.Read()
+		if w == nil {
+			return Item{}, false
+		}
+		return Item{Value: w, FP: Fingerprint(wgStable(w))}, true
+	case PartDDNS:
+		d := o.DDNS.Read()
+		if d == nil {
+			return Item{}, false
+		}
+		return Item{Value: d, FP: Fingerprint(d)}, true
 	}
 	return Item{}, false
 }

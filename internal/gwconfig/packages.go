@@ -27,12 +27,28 @@ import (
 // InstallAllowlist are the packages the controller may install: what the
 // gateway features use. The router's owner extends it with
 // `list package_allow` in /etc/config/perch-collector.
-var InstallAllowlist = append(append([]string(nil), pkgdb.WatchList...),
+var InstallAllowlist = uniqueNames(pkgdb.WatchList,
 	"luci-app-sqm", "kmod-ifb", "tc-full", "tc-tiny", "kmod-sched-core",
-	"kmod-wireguard", "luci-proto-wireguard",
+	"kmod-wireguard", "luci-proto-wireguard", "wireguard-tools",
 	"luci-app-mwan3", "luci-app-pbr", "ip-full",
 	"luci-app-opennds",
+	// gateway-sync: UPnP and DDNS (protocol 5).
+	"miniupnpd-nftables", "luci-app-upnp",
+	"ddns-scripts", "ddns-scripts-services", "ddns-scripts-cloudflare", "luci-app-ddns", "ca-bundle",
 )
+
+// uniqueNames is base then more, without repeats, in order.
+func uniqueNames(base []string, more ...string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, n := range append(append([]string(nil), base...), more...) {
+		if !seen[n] {
+			seen[n] = true
+			out = append(out, n)
+		}
+	}
+	return out
+}
 
 // PackageInstallParams are gateway.package.install's params.
 type PackageInstallParams struct {
