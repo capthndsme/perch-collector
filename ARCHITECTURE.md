@@ -855,6 +855,35 @@ new process may confirm. The boot guard `perch-collector config-guard`
 the reboot case before any service reads the configs, without reloading;
 the daemon then reports the outcome.
 
+**The overdue watchdog** (`internal/gwconfig/overdue.go`, gateway-sync
+protocol 7) covers a daemon that is gone while the router runs on (procd gave
+up on a crash loop, `service perch-collector stop`): nothing else would
+restore its apply until the next reboot. The daemon holds an exclusive
+`flock` on `/var/run/perch-collector/plane.lock` for its whole life
+(`HoldPlaneLock`, taken in `main_config.go` before `Plane.Start` reads
+`pending.json`, waiting while a guard holds it). `perch-collector
+config-guard --overdue`, from cron every minute:
+
+```
+no pending.json                          -> exit 0, silent
+lock held (the daemon runs, or is SIGSTOPped: flock belongs to the open file)
+                                         -> exit 0, silent
+take the lock, read pending.json again
+now <= deadline + 60 s                   -> exit 0, silent (the daemon's timer comes first)
+restore (the boot guard's restore: discarded edits, package removal, files)
+reason: no marker -> reboot, not committed -> commit_failed, else confirm_timeout;
+detail "restored by the overdue watchdog"
+config.change per restored config in apply order (ubus service event, the
+daemon's reload), result -> results.json, snapshot dropped, lock released
+```
+
+The next daemon start finds no `pending.json` and reports the result in its
+hello. The boot guard takes the same lock (a running daemon's apply is never
+its business). The package's postinst adds the crontab line once (`* * * * *
+/usr/bin/perch-collector config-guard --overdue 2>&1 | logger -t
+perch-collector-guard`), enables and restarts cron; removing the package
+removes it. A hand-installed router adds it by hand (openwrt/README.md).
+
 **Management path.** `ip route get <server_url host>` gives the device;
 netifd's interface on it is the network. Protected sections: that interface,
 any interface on its device (or its parent bridge), the `device` section that

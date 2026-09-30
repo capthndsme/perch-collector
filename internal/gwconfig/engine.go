@@ -920,6 +920,15 @@ func Guard(root string, run ubus.Runner, now time.Time, redact uci.Redactor) (*R
 		// The system did not reboot: the daemon owns this apply.
 		return nil, nil
 	}
+	// A running daemon owns it too (overdue.go). The lock is best effort
+	// here: a guard that cannot open it still restores.
+	lock, err := TryPlaneLock(root)
+	switch {
+	case errors.Is(err, ErrLockHeld):
+		return nil, nil
+	case err == nil:
+		defer lock.Release()
+	}
 	if run == nil {
 		run = ubus.ExecRunner
 	}

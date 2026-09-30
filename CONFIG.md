@@ -1480,6 +1480,25 @@ package runs it at boot, before the network; on a router without the
 package, add it to an early init script by hand). The daemon does the same at
 start when no guard ran.
 
+`perch-collector config-guard --overdue` is the watchdog for a daemon that is
+gone while the router keeps running: when no perch-collector holds the plane
+lock (`/var/run/perch-collector/plane.lock`, held by the daemon for its whole
+life, also while it is stopped with SIGSTOP) and a change's confirm deadline
+is more than 60 s behind, it restores the change the same way, has procd
+reload what it restored and leaves the outcome for the controller ("restored
+by the overdue watchdog"). It prints nothing when there is nothing to do. The
+package adds it to root's crontab (every minute) and starts cron; removing the
+package takes the line out again. By hand:
+
+```sh
+echo '* * * * * /usr/bin/perch-collector config-guard --overdue 2>&1 | logger -t perch-collector-guard' >> /etc/crontabs/root
+/etc/init.d/cron enable; /etc/init.d/cron restart
+```
+
+BusyBox crond logs every job it starts at OpenWrt's default
+`system.@system[0].cronloglevel` (5): one syslog line a minute. `cronloglevel
+'9'` silences that (the router's own setting; Perch never changes it).
+
 ### Paid Hotspot checkouts and click-through
 
 The contract is the controller's `docs/gateway/portal.md` §14; this is the

@@ -64,6 +64,12 @@ func configPlane(cfg config.Config, captured func() map[string]string, features 
 	default:
 		log.Printf("config plane: config_access %s: %s", p.Access(), strings.Join(p.Allowed(), " "))
 	}
+	// The plane lock says a daemon owns the pending apply, so the overdue
+	// watchdog (config-guard --overdue, cron) leaves it alone; held for the
+	// daemon's life, taken before the pending record is read.
+	if err := gwconfig.HoldPlaneLock("", nil); err != nil {
+		log.Printf("config plane: %v: the overdue watchdog cannot tell that this daemon runs", err)
+	}
 	// A pending apply from before this start: resume its window, or restore.
 	p.Start()
 	// `perch-collector pair` talks to the daemon over a root-only socket.
@@ -98,7 +104,7 @@ func planeOptions(cfg config.Config) gwconfig.Options {
 	}
 }
 
-const configGuardUsage = `usage: perch-collector config-guard
+const configGuardUsage = `usage: perch-collector config-guard [--overdue]
 
 The boot guard of the config plane (init script perch-collector-guard, run
 before the network comes up): when a config apply was waiting for the
@@ -107,18 +113,32 @@ from the snapshot in /etc/perch-collector/rollback. Nothing is reloaded (the
 services start afterwards). The outcome waits there for the controller. Does
 nothing when no apply is pending, or when the daemon owns it (no reboot).
 Always exits 0 unless it cannot read its state.
+
+--overdue is the watchdog cron runs every minute: when no perch-collector
+daemon holds the plane lock (/var/run/perch-collector/plane.lock) and a
+pending apply's deadline is more than 60 s behind, restore it the same way,
+have procd reload the restored configs, and record the result (reason
+confirm_timeout, "restored by the overdue watchdog"). Prints nothing when
+there is nothing to do.
 `
 
 // configGuardCommand is `perch-collector config-guard`.
 func configGuardCommand(args []string, stdout, stderr io.Writer, root string, apiKey func() string) int {
+	overdue := false
 	for _, a := range args {
 		switch a {
 		case "-h", "-help", "--help", "help":
 			fmt.Fprint(stdout, configGuardUsage)
 			return 0
+		case "-overdue", "--overdue":
+			overdue = true
+			continue
 		}
 		fmt.Fprintf(stderr, "unexpected argument %q\n\n%s", a, configGuardUsage)
 		return 2
+	}
+	if overdue {
+		return overdueCommand(stdout, stderr, gwconfig.OverdueOptions{Root: root, Now: time.Now(), Redact: gwconfig.NewRedactor(apiKey())})
 	}
 	res, err := gwconfig.Guard(root, nil, time.Now(), gwconfig.NewRedactor(apiKey()))
 	if err != nil {
@@ -132,6 +152,25 @@ func configGuardCommand(args []string, stdout, stderr io.Writer, root string, ap
 	fmt.Fprintf(stdout, "perch-collector config-guard: apply %s was pending at the reboot: %s", res.ApplyID, res.Outcome)
 	if res.Detail != "" {
 		fmt.Fprintf(stdout, " (%s)", res.Detail)
+	}
+	fmt.Fprintln(stdout)
+	return 0
+}
+
+// overdueCommand is `perch-collector config-guard --overdue`, quiet unless
+// it restored something (cron runs it every minute).
+func overdueCommand(stdout, stderr io.Writer, o gwconfig.OverdueOptions) int {
+	res, err := gwconfig.Overdue(o)
+	if err != nil {
+		fmt.Fprintf(stderr, "perch-collector config-guard --overdue: %v\n", err)
+		return 1
+	}
+	if res == nil {
+		return 0
+	}
+	fmt.Fprintf(stdout, "perch-collector config-guard: apply %s was overdue and no daemon owned it: %s (%s)", res.ApplyID, res.Outcome, res.Reason)
+	if res.Detail != "" {
+		fmt.Fprintf(stdout, "; %s", res.Detail)
 	}
 	fmt.Fprintln(stdout)
 	return 0
