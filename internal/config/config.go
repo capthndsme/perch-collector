@@ -282,6 +282,8 @@ type Config struct {
 	// ConfigPlane is the router's opt-in to the config plane
 	// (config_plane.go).
 	ConfigPlane `yaml:",inline"`
+	// Updates is the router's say on self-update (updates.go).
+	Updates `yaml:",inline"`
 
 	// Deprecated lists the pre-rename GOCOLLECTOR_* variables that supplied
 	// a value, so main can say once that each has a new name. Never YAML.
@@ -414,6 +416,7 @@ func Defaults() Config {
 		Portal:                      GatewayStatsAuto,
 		PortalPort:                  DefaultPortalPort,
 		ConfigPlane:                 defaultConfigPlane(),
+		Updates:                     defaultUpdates(),
 	}
 }
 
@@ -543,6 +546,7 @@ func load(configPath string, cli cliOverrides) (Config, error) {
 	env.integer("PORTAL_FLUSH_INTERVAL", func(n int) { cfg.PortalFlushInterval = n })
 	env.str("PORTAL_STORAGE_MOUNT", &cfg.PortalStorageMount)
 	cfg.ConfigPlane.readEnv(env)
+	cfg.Updates.readEnv(env)
 	cfg.Deprecated = env.deprecated
 	if env.err != nil {
 		return cfg, env.err
@@ -748,6 +752,7 @@ func (c *Config) Validate() error {
 	if err := c.ConfigPlane.validate(); err != nil {
 		return err
 	}
+	c.validateUpdates()
 
 	// Clamped unconditionally so the value in the struct is always the value
 	// the daemon would actually use.

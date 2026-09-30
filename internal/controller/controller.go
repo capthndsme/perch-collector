@@ -26,6 +26,7 @@ import (
 
 	"github.com/capthndsme/perch-agentkit/link"
 	"github.com/capthndsme/perch-agentkit/rpc"
+	"github.com/capthndsme/perch-agentkit/update"
 
 	"github.com/capthndsme/perch-collector/internal/aggregator"
 	"github.com/capthndsme/perch-collector/internal/announce"
@@ -161,6 +162,8 @@ type Options struct {
 	AddressCache string
 	// Config is the config plane (gwconfig.go); nil = not offered.
 	Config *gwconfig.Plane
+	// Update is agent self-update (update.go); nil = off.
+	Update Updater
 	// CaptureExclude receives agent.configure's capture.exclude: networks
 	// the controller asks not to capture, added to the local
 	// capture_exclude (nil = none; also when the block is absent). nil = the
@@ -275,6 +278,7 @@ func New(o Options) (*Client, error) {
 		o.Conntrack.Protected = c.connectionEndpoints
 	}
 	c.registerConfigPlane()
+	c.registerUpdate()
 	return c, nil
 }
 
@@ -369,6 +373,8 @@ type helloParams struct {
 	System *System       `json:"system,omitempty"`
 	// GatewayConfig is the config plane's block (gwconfig.go).
 	GatewayConfig *gwconfig.Hello `json:"gatewayConfig,omitempty"`
+	// Update is the self-update block (update.go; agent-updates protocol.md 3).
+	Update *update.Status `json:"update,omitempty"`
 }
 
 type helloResult struct {
@@ -409,6 +415,7 @@ func (c *Client) hello(ctx context.Context, challenge string) helloParams {
 	if c.qosInstalled() {
 		p.Capabilities = append(p.Capabilities, CapabilityQoS)
 	}
+	c.updateHello(ctx, &p)
 	return p
 }
 
@@ -488,6 +495,7 @@ func (c *Client) onOpen(gen uint64, configs chan link.Schedule, note *helloNote)
 			defer c.o.Portal.SetAgent(nil)
 		}
 		c.configSessionOpened(gen, s)
+		defer c.updateSession(s.Notify)()
 		go c.forwardQoSEvents(ctx, s)
 		link.RunPusher(ctx, link.PushOptions{
 			Configs: configs,

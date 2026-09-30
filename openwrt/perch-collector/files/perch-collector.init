@@ -103,7 +103,7 @@ start_service() {
 	local capture_network config_access managed_configs config_allow_insecure config_confirm_max storage_path
 	local config_sign_key package_allow managed_config_auto managed_config_exclude
 	local capture_networks capture_exclude capture_rescan routed_lan ndpi_module
-	local qos
+	local qos self_update update_keys
 	local uci_dirty=0
 
 	config_load "$CONF"
@@ -217,6 +217,9 @@ start_service() {
 	config_get storage_path main storage_path '/etc/perch-collector'
 	config_get config_sign_key main config_sign_key
 	config_list_foreach main package_allow append_list package_allow
+	# Self-update (agent.update.*): on unless '0'; extra trusted release keys.
+	config_get_bool self_update main self_update 1
+	config_list_foreach main update_key append_list update_keys
 
 	procd_open_instance
 	# No config file: everything comes from the environment below.
@@ -277,7 +280,9 @@ start_service() {
 		PERCH_COLLECTOR_STORAGE_PATH="$storage_path" \
 		PERCH_COLLECTOR_CONFIG_SIGN_KEY="$config_sign_key" \
 		PERCH_COLLECTOR_PACKAGE_ALLOW="$package_allow" \
-		PERCH_COLLECTOR_QOS="$qos"
+		PERCH_COLLECTOR_QOS="$qos" \
+		PERCH_COLLECTOR_SELF_UPDATE="$self_update" \
+		PERCH_COLLECTOR_UPDATE_KEYS="$update_keys"
 	procd_set_param respawn 3600 5 0
 	procd_set_param stdout 1
 	procd_set_param stderr 1

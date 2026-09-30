@@ -6,16 +6,21 @@
 #
 #   scripts/build-static.sh [output]        # default: out/perch-collector-ndpi.static
 #
-# Environment: VERSION (baked into the start-up line, /healthz and the hello,
-# default 1.1.0-pre.3-static), NDPI_TAG (git tag, default 5.0), GOARCH (default
-# amd64), AGENTKIT (a local perch-agentkit checkout to build against instead
-# of the published module; default ../perch-agentkit when it exists).
+# Environment: VERSION (baked into the start-up line, /healthz and the hello;
+# default: the tag at HEAD without its v, else the commit, as the Makefile
+# does), NDPI_TAG (git tag, default 5.0), GOARCH (default amd64), AGENTKIT (a
+# local perch-agentkit checkout to build against instead of the published
+# module; default ../perch-agentkit when it exists).
+# VERSION must be exactly the release version for a release: self-update
+# recognises the new process by it (no suffix such as -static; the build
+# says it is the static nDPI variant with -X main.variant=ndpi-static).
 # Then, on the router: copy it to /usr/bin/perch-collector together with
 # openwrt/perch-collector/files/* (see openwrt/README.md).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 OUT="${1:-out/perch-collector-ndpi.static}"
-VERSION="${VERSION:-1.1.0-pre.3-static}"
+VERSION="${VERSION:-$(git describe --tags --always --dirty 2>/dev/null | sed 's/^v//')}"
+VERSION="${VERSION:-dev}"
 NDPI_TAG="${NDPI_TAG:-5.0}"
 GOARCH="${GOARCH:-amd64}"
 AGENTKIT="${AGENTKIT:-}"
@@ -46,6 +51,6 @@ docker run --rm -v "$PWD":/src -w /src "${KIT_MOUNT[@]}" -e CGO_ENABLED=1 -e GOA
       export GOWORK=/tmp/go.work
     fi
     echo "libndpi $(pkg-config --modversion libndpi) (static)"
-    go build -trimpath -tags "ndpi sqlite_omit_load_extension" -ldflags "-s -w -linkmode external -extldflags -static -X main.version=$VERSION" -o "$OUT" .
+    go build -trimpath -tags "ndpi sqlite_omit_load_extension" -ldflags "-s -w -linkmode external -extldflags -static -X main.version=$VERSION -X main.variant=ndpi-static" -o "$OUT" .
   '
 file "$OUT" | grep -q "statically linked" && echo "built $OUT ($(stat -c %s "$OUT") bytes, static, version $VERSION)"
