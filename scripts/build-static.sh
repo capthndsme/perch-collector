@@ -10,7 +10,16 @@
 # default: the tag at HEAD without its v, else the commit, as the Makefile
 # does), NDPI_TAG (git tag, default 5.0), GOARCH (default amd64), AGENTKIT (a
 # local perch-agentkit checkout to build against instead of the published
-# module; default ../perch-agentkit when it exists).
+# module; default ../perch-agentkit when it exists; "published" forces the
+# published module), GO_IMAGE (the build image, default golang:1.23.12-alpine).
+#
+# Reproducible: the image is pinned to an exact Go release (the binary records
+# it: go version -m), nDPI to a tag, vcs stamping is off, paths are trimmed and
+# the ldflags hold nothing of this machine; the same commit, VERSION and
+# GO_IMAGE give the same bytes (v1.0.0's CI build rebuilt identically). The
+# image's gcc/musl/libpcap come from Alpine's repository at build time, so a
+# rebuild long after the release may differ there; scripts/sign-release.sh says
+# so and can sign the owner's own build instead (--own-static).
 # VERSION must be exactly the release version for a release: self-update
 # recognises the new process by it (no suffix such as -static; the build
 # says it is the static nDPI variant with -X main.variant=ndpi-static).
@@ -24,7 +33,10 @@ VERSION="${VERSION:-dev}"
 NDPI_TAG="${NDPI_TAG:-5.0}"
 GOARCH="${GOARCH:-amd64}"
 AGENTKIT="${AGENTKIT:-}"
-if [ -z "$AGENTKIT" ] && [ -f ../perch-agentkit/go.mod ]; then
+GO_IMAGE="${GO_IMAGE:-golang:1.23.12-alpine}"
+if [ "$AGENTKIT" = published ]; then
+  AGENTKIT=
+elif [ -z "$AGENTKIT" ] && [ -f ../perch-agentkit/go.mod ]; then
   AGENTKIT="$(cd ../perch-agentkit && pwd)"
 fi
 mkdir -p "$(dirname "$OUT")"
@@ -39,7 +51,7 @@ fi
 
 docker run --rm -v "$PWD":/src -w /src "${KIT_MOUNT[@]}" -e CGO_ENABLED=1 -e GOARCH="$GOARCH" \
   -e GOFLAGS=-buildvcs=false -e VERSION="$VERSION" -e NDPI_TAG="$NDPI_TAG" -e OUT="$OUT" \
-  golang:1.23-alpine sh -euc '
+  "$GO_IMAGE" sh -euc '
     apk add --no-cache gcc g++ musl-dev libpcap-dev git autoconf automake libtool make pkgconf linux-headers >/dev/null
     git clone -q --depth 1 --branch "$NDPI_TAG" https://github.com/ntop/nDPI /tmp/nDPI
     cd /tmp/nDPI && ./autogen.sh >/dev/null 2>&1 && ./configure --prefix=/usr/local --with-only-libndpi >/dev/null

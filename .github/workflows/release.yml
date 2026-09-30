@@ -3,9 +3,9 @@ name: Release
 # On a v* tag, or by hand for an existing tag (Actions → Release → Run
 # workflow): builds the OpenWrt packages (.ipk for 24.10, .apk for 25.12) for
 # every architecture in openwrt/sdk.env with the official SDK images, the
-# static x86_64 binary with nDPI linked in (scripts/build-static.sh), and a
-# SHA256SUMS file, and attaches them to the tag's GitHub release, creating it
-# when missing. docker.yml publishes the images for the same tag. The
+# static x86_64 binary with nDPI linked in (scripts/build-static.sh), the files
+# bundle, the unsigned perch-manifest.json and a SHA256SUMS file, and attaches
+# them to the tag's GitHub release, creating it when missing. docker.yml publishes the images for the same tag. The
 # packaging (openwrt/, scripts/) comes from the commit the workflow runs on,
 # the packaged source from the tag.
 
@@ -96,17 +96,46 @@ jobs:
     needs: [packages, static]
     runs-on: ubuntu-latest
     steps:
+      # The files bundle and the manifest's inputs (release.env, sdk.env,
+      # files.json, the kit version in go.mod) come from the tag.
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.TAG }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache: false
       - uses: actions/download-artifact@v4
         with:
           path: release
           merge-multiple: true
+      # The files bundle a self-update installs next to the static binary on
+      # gateways no package manages, and the UNSIGNED manifest of every
+      # artefact (agent-updates protocol.md 1.1). CI never signs: the owner
+      # runs scripts/sign-release.sh, which rebuilds everything, compares,
+      # signs with his key and attaches the .sig. Until then controllers list
+      # the release as unsigned and offer nothing.
+      - name: Files bundle and unsigned manifest
+        env:
+          GH_REPO: ${{ github.repository }}
+        run: |
+          make files
+          cp out/perch-collector-files.tar.gz release/
+          chmod +x release/perch-collector-linux-amd64-ndpi
+          . ./release.env
+          go run github.com/capthndsme/perch-agentkit/cmd/perch-release manifest \
+            -product perch-collector -version "${TAG#v}" -commit "$(git rev-parse HEAD)" \
+            -notes-url "https://github.com/$GH_REPO/releases/tag/$TAG" \
+            -min-version "$MIN_VERSION" -min-from-version "$MIN_FROM_VERSION" \
+            -min-controller-version "$MIN_CONTROLLER_VERSION" \
+            -sdk-env openwrt/sdk.env -files-spec openwrt/perch-collector/files.json \
+            -o release/perch-manifest.json release
       - name: Attach to the release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           cd release
-          chmod +x perch-collector-linux-amd64-ndpi
           sha256sum perch-collector* perch-qos* > SHA256SUMS
           cat SHA256SUMS
           # A tag with a pre-release part (v1.0.0-rc.2) is a GitHub pre-release:
@@ -114,4 +143,4 @@ jobs:
           pre=; case "$TAG" in *-*) pre=--prerelease ;; esac
           gh release view "$TAG" >/dev/null 2>&1 \
             || gh release create "$TAG" --verify-tag $pre --title "Perch Network Collector ${TAG#v}" --generate-notes
-          gh release upload "$TAG" perch-collector* perch-qos* SHA256SUMS --clobber
+          gh release upload "$TAG" perch-collector* perch-qos* SHA256SUMS perch-manifest.json --clobber
