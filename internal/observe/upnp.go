@@ -3,6 +3,7 @@ package observe
 import (
 	"bufio"
 	"bytes"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -153,5 +154,83 @@ func (r *UPnPReader) Read() *UPnP {
 	if data, err := r.Env.read(r.leaseFile); err == nil {
 		u.Mappings = capList(ParseUPnPLeases(data), MaxUPnPMappings)
 	}
+	if u.Running {
+		u.Mappings = capList(append(u.Mappings, r.orphans(u.Mappings)...), MaxUPnPMappings)
+	}
 	return u
+}
+
+// OrphanDescription marks a mapping whose nftables rules are there but
+// whose lease line is not: miniupnpd refused to re-add it at a restart (its
+// permission rules deny it now) and left the port open. The delete removes
+// such rules too.
+const OrphanDescription = "open without a lease: left by miniupnpd"
+
+// natRuleRe is a DNAT rule miniupnpd-nftables writes:
+// iif "wan" @nh,72,8 0x6 th dport 45000 dnat ip to 10.99.10.128:5000 # handle 8536
+var natRuleRe = regexp.MustCompile(`@nh,72,8 0x([0-9a-f]+) th dport (\d+) dnat ip to ([0-9.]+):(\d+)`)
+
+// orphans lists miniupnpd-nftables' DNAT rules that the lease file does not
+// name (nothing with another backend, or without its generated config).
+func (r *UPnPReader) orphans(known []UPnPMapping) []UPnPMapping {
+	conf, err := r.Env.read("/var/etc/miniupnpd.conf")
+	if err != nil {
+		return nil
+	}
+	table, chain := "", "upnp_prerouting"
+	for _, line := range strings.Split(string(conf), "\n") {
+		k, v, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if !ok {
+			continue
+		}
+		switch strings.TrimSpace(k) {
+		case "upnp_nat_table_name":
+			table = strings.TrimSpace(v)
+		case "upnp_table_name":
+			if table == "" {
+				table = strings.TrimSpace(v)
+			}
+		case "upnp_nat_chain":
+			chain = strings.TrimSpace(v)
+		}
+	}
+	if !nftName(table) || !nftName(chain) {
+		return nil
+	}
+	out, err := r.Env.run("nft", "list", "chain", "inet", table, chain)
+	if err != nil {
+		return nil
+	}
+	have := map[string]bool{}
+	for _, m := range known {
+		have[m.Proto+":"+strconv.Itoa(m.ExtPort)] = true
+	}
+	var orphans []UPnPMapping
+	for _, line := range strings.Split(string(out), "\n") {
+		m := natRuleRe.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		proto := map[string]string{"6": "TCP", "11": "UDP"}[m[1]]
+		ext, _ := strconv.Atoi(m[2])
+		intPort, _ := strconv.Atoi(m[4])
+		if proto == "" || ext < 1 || have[proto+":"+m[2]] {
+			continue
+		}
+		have[proto+":"+m[2]] = true
+		orphans = append(orphans, UPnPMapping{Proto: proto, ExtPort: ext, IntIP: m[3], IntPort: intPort, Description: OrphanDescription})
+	}
+	return orphans
+}
+
+func nftName(s string) bool {
+	if s == "" || len(s) > 64 {
+		return false
+	}
+	for _, c := range s {
+		if !(c == '_' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z') {
+			return false
+		}
+	}
+	return true
 }

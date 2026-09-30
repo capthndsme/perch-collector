@@ -146,7 +146,7 @@ func leaseKey(line []byte) string {
 // Delete drops the mappings from the lease file and restarts miniupnpd
 // once. Idempotent: a mapping that is not there counts as notFound, and
 // nothing found means nothing is written or restarted.
-func (u *UPnP) Delete(ctx context.Context, p UPnPDeleteParams) (*UPnPDeleteResult, error) {
+func (u *UPnP) Delete(ctx context.Context, p UPnPDeleteParams) (res *UPnPDeleteResult, _ error) {
 	want, err := validateUPnP(p)
 	if err != nil {
 		return nil, err
@@ -161,7 +161,7 @@ func (u *UPnP) Delete(ctx context.Context, p UPnPDeleteParams) (*UPnPDeleteResul
 	if err != nil && !os.IsNotExist(err) {
 		return nil, &ActionError{Code: "upnp_failed", Message: "cannot read the lease file", Detail: err.Error()}
 	}
-	res := &UPnPDeleteResult{}
+	res = &UPnPDeleteResult{}
 	found := map[string]bool{}
 	var kept bytes.Buffer
 	rest := data
@@ -178,6 +178,24 @@ func (u *UPnP) Delete(ctx context.Context, p UPnPDeleteParams) (*UPnPDeleteResul
 		}
 		kept.Write(line)
 	}
+	run := u.Run
+	if run == nil {
+		run = ubus.ExecRunner
+	}
+	// Whatever happens to the lease file, rules left for a requested mapping
+	// go (upnp_nft.go), counted as deleted.
+	defer func() {
+		if res == nil {
+			return
+		}
+		for k := range u.removeOrphanRules(ctx, run, want) {
+			if !found[k] {
+				found[k] = true
+				res.Deleted++
+				res.NotFound--
+			}
+		}
+	}()
 	res.Deleted = len(found)
 	res.NotFound = len(want) - len(found)
 	if res.Deleted == 0 {
@@ -185,10 +203,6 @@ func (u *UPnP) Delete(ctx context.Context, p UPnPDeleteParams) (*UPnPDeleteResul
 	}
 	if err := replaceFile(path, kept.Bytes()); err != nil {
 		return nil, &ActionError{Code: "upnp_failed", Message: "cannot write the lease file", Detail: err.Error()}
-	}
-	run := u.Run
-	if run == nil {
-		run = ubus.ExecRunner
 	}
 	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()

@@ -19,12 +19,17 @@ type fakeRunner struct {
 	calls [][]string
 	code  int
 	err   error
+	// out answers a command line (name and args joined by spaces).
+	out map[string]string
 }
 
 func (f *fakeRunner) run(_ context.Context, name string, args ...string) ([]byte, []byte, int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, append([]string{name}, args...))
+	if o, ok := f.out[strings.Join(append([]string{name}, args...), " ")]; ok {
+		return []byte(o), nil, 0, nil
+	}
 	if f.err != nil {
 		return nil, nil, -1, f.err
 	}
@@ -93,6 +98,44 @@ func TestUPnPDeleteByContent(t *testing.T) {
 	res, err = u.Delete(context.Background(), UPnPDeleteParams{Mappings: []UPnPMappingRef{{Proto: "TCP", ExtPort: 51413}}})
 	if err != nil || res.Deleted != 0 || res.NotFound != 1 || res.Restarted || len(r.calls) != 1 {
 		t.Fatalf("%+v %v %v", res, err, r.calls)
+	}
+}
+
+// A device just blocked: miniupnpd's restart dropped its mapping from the
+// lease file (the new deny refused to re-add it) but left the nftables
+// rules, so the port is still open. The delete removes them.
+func TestUPnPDeleteRemovesOrphanRules(t *testing.T) {
+	root := upnpRoot(t, "/var/run/miniupnpd.leases")
+	writeFiles(t, root, map[string]string{
+		"usr/sbin/nft": "",
+		"var/etc/miniupnpd.conf": "ext_ifname=wan\nupnp_table_name=fw4\nupnp_nat_table_name=fw4\n" +
+			"upnp_forward_chain=upnp_forward\nupnp_nat_chain=upnp_prerouting\n",
+	})
+	r := &fakeRunner{out: map[string]string{
+		"nft -a list chain inet fw4 upnp_prerouting": "table inet fw4 {\n\tchain upnp_prerouting {\n" +
+			"\t\tiif \"wan\" @nh,72,8 0x6 th dport 45000 dnat ip to 10.99.10.128:5000 # handle 8536\n" +
+			"\t\tiif \"wan\" @nh,72,8 0x11 th dport 3074 dnat ip to 192.168.1.30:3074 # handle 8540\n\t}\n}\n",
+		"nft -a list chain inet fw4 upnp_forward": "table inet fw4 {\n\tchain upnp_forward {\n" +
+			"\t\tiif \"wan\" th dport 5000 @nh,128,32 0xa630a80 @nh,72,8 0x6 accept # handle 8537\n" +
+			"\t\tiif \"wan\" th dport 3074 @nh,128,32 0xc0a8011e @nh,72,8 0x11 accept # handle 8541\n\t}\n}\n",
+	}}
+	u := &UPnP{Root: root, Run: r.run}
+	res, err := u.Delete(context.Background(), UPnPDeleteParams{Mappings: []UPnPMappingRef{{Proto: "TCP", ExtPort: 45000}}})
+	if err != nil || res.Deleted != 1 || res.NotFound != 0 {
+		t.Fatalf("%+v %v", res, err)
+	}
+	var deletes []string
+	for _, c := range r.calls {
+		if len(c) > 2 && c[0] == "nft" && c[1] == "delete" {
+			deletes = append(deletes, strings.Join(c, " "))
+		}
+	}
+	want := []string{
+		"nft delete rule inet fw4 upnp_prerouting handle 8536",
+		"nft delete rule inet fw4 upnp_forward handle 8537",
+	}
+	if strings.Join(deletes, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("deletes:\n%s", strings.Join(deletes, "\n"))
 	}
 }
 

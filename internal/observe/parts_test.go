@@ -291,6 +291,20 @@ func TestUPnPReader(t *testing.T) {
 	if !u.Installed || !u.Enabled || !u.Running || !u.SecureMode || len(u.Mappings) != 3 {
 		t.Errorf("upnp = %+v", u)
 	}
+	// A DNAT rule the lease file does not name: reported, marked.
+	writeTree(t, root, map[string][]byte{"var/etc/miniupnpd.conf": []byte("upnp_table_name=fw4\nupnp_nat_table_name=fw4\nupnp_nat_chain=upnp_prerouting\n")})
+	env.Run = cannedRun(map[string][]byte{
+		"uci -q show upnpd": fixture(t, "uci-show-upnpd.txt"),
+		"nft list chain inet fw4 upnp_prerouting": []byte("table inet fw4 {\n\tchain upnp_prerouting {\n" +
+			"\t\tiif \"wan\" @nh,72,8 0x6 th dport 45000 dnat ip to 192.168.1.40:5000\n\t}\n}\n"),
+	})
+	u = (&UPnPReader{Env: env}).Read()
+	if len(u.Mappings) != 4 {
+		t.Fatalf("upnp = %+v", u)
+	}
+	if o := u.Mappings[3]; o.Proto != "TCP" || o.ExtPort != 45000 || o.IntIP != "192.168.1.40" || o.IntPort != 5000 || o.Description != OrphanDescription {
+		t.Errorf("orphan = %+v", o)
+	}
 	// Not installed: reported as such, with no mappings.
 	u = (&UPnPReader{Env: &Env{Root: t.TempDir(), Run: cannedRun(nil)}}).Read()
 	b, _ := json.Marshal(u)
