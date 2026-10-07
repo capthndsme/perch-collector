@@ -3,7 +3,7 @@ module github.com/capthndsme/perch-collector
 go 1.22.2
 
 require (
-	github.com/capthndsme/perch-agentkit v0.2.0
+	github.com/capthndsme/perch-agentkit v0.4.0-pre.1
 	github.com/coder/websocket v1.8.13
 	github.com/google/gopacket v1.1.19
 	github.com/mattn/go-sqlite3 v1.14.52
