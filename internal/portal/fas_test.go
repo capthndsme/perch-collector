@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -278,16 +279,17 @@ func TestFASRelay(t *testing.T) {
 	}
 }
 
-// fakeListener records what the pages would listen on.
+// fakeListener records what the pages would listen on. `closed` is atomic:
+// Close runs on the test's goroutine, Accept on the server's.
 type fakeListener struct {
 	net.Listener
 	addr   string
-	closed bool
+	closed atomic.Bool
 }
 
-func (l *fakeListener) Close() error { l.closed = true; return nil }
+func (l *fakeListener) Close() error { l.closed.Store(true); return nil }
 func (l *fakeListener) Accept() (net.Conn, error) {
-	for !l.closed {
+	for !l.closed.Load() {
 		time.Sleep(10 * time.Millisecond)
 	}
 	return nil, net.ErrClosed
@@ -342,7 +344,7 @@ func TestGuestPagesListenOnlyOnPortalAddresses(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	for a, l := range open {
-		if a != "fail" && !l.closed {
+		if a != "fail" && !l.closed.Load() {
 			t.Fatalf("%s not closed", a)
 		}
 	}
